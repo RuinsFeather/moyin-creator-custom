@@ -1,19 +1,21 @@
 "use client";
 
 import { useMemo, useCallback, useEffect, useRef, useState } from 'react';
-import { VideoIcon, Loader2, Download, Sparkles, Upload, X, Type, ImageIcon, Layers, Film, Music } from 'lucide-react';
+import { VideoIcon, Loader2, Download, Sparkles, Upload, X, Type, ImageIcon, Layers, Film, Music, StopCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Slider } from '@/components/ui/slider';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { Progress } from '@/components/ui/progress';
 import { toast } from 'sonner';
 import { useFreedomStore, type VideoFeatureMode, type ImageToVideoSubMode } from '@/stores/freedom-store';
 import { useAPIConfigStore } from '@/stores/api-config-store';
 import { ModelSelector } from './ModelSelector';
 import { GenerationHistory } from './GenerationHistory';
-import { generateFreedomVideo, type FreedomVideoUploadFile, type FreedomVideoUploadRole } from '@/lib/freedom/freedom-api';
+import { ActiveTaskCard } from './ActiveTaskCard';
+import { generateFreedomVideo, FreedomCancelledError, type FreedomVideoUploadFile, type FreedomVideoUploadRole } from '@/lib/freedom/freedom-api';
 import {
   getAspectRatiosForT2VModel,
   getDurationsForModel,
@@ -74,9 +76,7 @@ interface MultiRefAsset {
   assetType: MultiRefAssetType;
   /** 音频时长（秒），仅 audio 类型有值 */
   audioDuration?: number;
-}
-
-function resolveVideoCapabilityModelId(modelId: string): string {
+}function resolveVideoCapabilityModelId(modelId: string): string {
   const lower = modelId.toLowerCase();
   // Kling 版本化模型（kling-v* / kling-video-o1）沿用 kling-video 的能力定义
   if (/^kling-v/i.test(modelId) || modelId === 'kling-video-o1') {
@@ -244,7 +244,23 @@ export function VideoStudio() {
     videoGenerating, setVideoGenerating,
     videoFeatureMode, setVideoFeatureMode,
     videoI2VSubMode, setVideoI2VSubMode,
+    videoSingleUpload: singleUpload,
+    setVideoSingleUpload: setSingleUpload,
+    videoFirstFrameUpload: firstFrameUpload,
+    setVideoFirstFrameUpload: setFirstFrameUpload,
+    videoLastFrameUpload: lastFrameUpload,
+    setVideoLastFrameUpload: setLastFrameUpload,
+    videoReferenceUploads: referenceUploads,
+    setVideoReferenceUploads: setReferenceUploads,
+    videoMultiRefAssets: multiRefAssets,
+    setVideoMultiRefAssets: setMultiRefAssets,
+    clearVideoUploads,
     addHistoryEntry,
+    activeTasks,
+    addActiveTask,
+    updateActiveTask,
+    removeActiveTask,
+    cancelActiveTask,
   } = useFreedomStore();
 
   const modelEndpointTypes = useAPIConfigStore((s) => s.modelEndpointTypes);
@@ -252,6 +268,27 @@ export function VideoStudio() {
     () => modelEndpointTypes[selectedVideoModel] || [],
     [modelEndpointTypes, selectedVideoModel],
   );
+
+  // 当前选中的任务 ID（用于在中央预览区展示任务进度）
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const selectedTaskIdRef = useRef<string | null>(null);
+  selectedTaskIdRef.current = selectedTaskId;
+
+  // 仅本 studio (video) 的活动任务
+  const videoActiveTasks = useMemo(
+    () => activeTasks.filter((t) => t.type === 'video'),
+    [activeTasks],
+  );
+
+  // 当前正在查看的任务（用于中央区域展示进度/结果）
+  const viewingTask = useMemo(
+    () => (selectedTaskId ? activeTasks.find((t) => t.id === selectedTaskId) : null) || null,
+    [selectedTaskId, activeTasks],
+  );
+
+  const handleCancelTask = useCallback((taskId: string) => {
+    cancelActiveTask(taskId);
+  }, [cancelActiveTask]);
 
   const capabilityModelId = useMemo(
     () => resolveVideoCapabilityModelId(selectedVideoModel),
@@ -266,11 +303,6 @@ export function VideoStudio() {
     [selectedVideoModel, endpointTypes],
   );
 
-  const [singleUpload, setSingleUpload] = useState<LocalUploadAsset | null>(null);
-  const [firstFrameUpload, setFirstFrameUpload] = useState<LocalUploadAsset | null>(null);
-  const [lastFrameUpload, setLastFrameUpload] = useState<LocalUploadAsset | null>(null);
-  const [referenceUploads, setReferenceUploads] = useState<LocalUploadAsset[]>([]);
-
   const singleInputRef = useRef<HTMLInputElement>(null);
   const firstInputRef = useRef<HTMLInputElement>(null);
   const lastInputRef = useRef<HTMLInputElement>(null);
@@ -279,8 +311,6 @@ export function VideoStudio() {
   /** 是否属于 seedance 组 */
   const isSeedance = useMemo(() => isSeedanceGroupModel(selectedVideoModel), [selectedVideoModel]);
 
-  /** 多功能参考模式的资源列表 */
-  const [multiRefAssets, setMultiRefAssets] = useState<MultiRefAsset[]>([]);
   const multiRefInputRef = useRef<HTMLInputElement>(null);
 
   /** 计算当前功能模式下可用的 feature mode 列表（多功能参考仅对 seedance） */
@@ -298,12 +328,8 @@ export function VideoStudio() {
   }, [isSeedance, videoFeatureMode, setVideoFeatureMode]);
 
   useEffect(() => {
-    setSingleUpload(null);
-    setFirstFrameUpload(null);
-    setLastFrameUpload(null);
-    setReferenceUploads([]);
-    setMultiRefAssets([]);
-  }, [selectedVideoModel]);
+    clearVideoUploads();
+  }, [selectedVideoModel, clearVideoUploads]);
 
   const toAsset = useCallback(async (file: File): Promise<LocalUploadAsset> => {
     const dataUrl = await fileToDataUrl(file);
@@ -315,113 +341,152 @@ export function VideoStudio() {
     };
   }, []);
 
-  const handleSingleUploadChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
+  /** 仅接受图片文件 */
+  const pickImageFile = (files: FileList | File[] | null | undefined): File | null => {
+    if (!files) return null;
+    const arr = Array.from(files as ArrayLike<File>);
+    return arr.find((f) => f.type.startsWith('image/')) ?? arr[0] ?? null;
+  };
+
+  const ingestSingleImage = useCallback(async (
+    file: File | null | undefined,
+    setter: (asset: LocalUploadAsset | null) => void,
+  ) => {
     if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      toast.error('请上传图片文件');
+      return;
+    }
     try {
-      setSingleUpload(await toAsset(file));
+      setter(await toAsset(file));
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : '读取文件失败';
       toast.error(message);
     }
   }, [toAsset]);
+
+  const handleSingleUploadChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = pickImageFile(e.target.files);
+    e.target.value = '';
+    await ingestSingleImage(file, setSingleUpload);
+  }, [ingestSingleImage, setSingleUpload]);
 
   const handleFirstFrameChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const file = pickImageFile(e.target.files);
     e.target.value = '';
-    if (!file) return;
-    try {
-      setFirstFrameUpload(await toAsset(file));
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : '读取文件失败';
-      toast.error(message);
-    }
-  }, [toAsset]);
+    await ingestSingleImage(file, setFirstFrameUpload);
+  }, [ingestSingleImage, setFirstFrameUpload]);
 
   const handleLastFrameChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const file = pickImageFile(e.target.files);
     e.target.value = '';
-    if (!file) return;
-    try {
-      setLastFrameUpload(await toAsset(file));
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : '读取文件失败';
-      toast.error(message);
-    }
-  }, [toAsset]);
+    await ingestSingleImage(file, setLastFrameUpload);
+  }, [ingestSingleImage, setLastFrameUpload]);
 
-  const handleReferenceChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-    if (referenceUploads.length >= Math.max(veoCapability.maxFiles, 1)) {
+  const ingestReferenceImages = useCallback(async (files: File[]) => {
+    const remaining = Math.max(veoCapability.maxFiles, 1) - referenceUploads.length;
+    if (remaining <= 0) {
       toast.error(`当前模型最多支持 ${veoCapability.maxFiles} 张参考图`);
       return;
     }
+    const accepted = files.filter((f) => f.type.startsWith('image/')).slice(0, remaining);
+    if (accepted.length === 0) {
+      toast.error('请上传图片文件');
+      return;
+    }
     try {
-      const asset = await toAsset(file);
-      setReferenceUploads((prev) => [...prev, asset]);
+      const assets = await Promise.all(accepted.map(toAsset));
+      setReferenceUploads((prev) => [...prev, ...assets]);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : '读取文件失败';
       toast.error(message);
     }
-  }, [referenceUploads.length, toAsset, veoCapability.maxFiles]);
+  }, [referenceUploads.length, setReferenceUploads, toAsset, veoCapability.maxFiles]);
+
+  const handleReferenceChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = '';
+    if (files.length === 0) return;
+    await ingestReferenceImages(files);
+  }, [ingestReferenceImages]);
 
   const removeReference = useCallback((id: string) => {
     setReferenceUploads((prev) => prev.filter((item) => item.id !== id));
-  }, []);
+  }, [setReferenceUploads]);
 
-  /** 多功能参考模式：上传文件（视频/图片/音频） */
-  const handleMultiRefChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-    if (multiRefAssets.length >= MULTI_REF_MAX_ASSETS) {
+  /** 多功能参考模式：处理一组文件（支持视频/图片/音频，依次入队） */
+  const ingestMultiRefFiles = useCallback(async (files: File[]) => {
+    if (files.length === 0) return;
+
+    let remaining = MULTI_REF_MAX_ASSETS - multiRefAssets.length;
+    if (remaining <= 0) {
       toast.error(`最多支持上传 ${MULTI_REF_MAX_ASSETS} 个参考素材`);
       return;
     }
-    try {
-      let assetType: MultiRefAssetType = 'image';
-      if (file.type.startsWith('video/')) assetType = 'video';
-      else if (file.type.startsWith('audio/')) assetType = 'audio';
 
-      // 音频时长校验
-      let audioDuration: number | undefined;
-      if (assetType === 'audio') {
-        audioDuration = await getAudioDuration(file);
-        const existingAudioTotal = multiRefAssets
-          .filter((a) => a.assetType === 'audio')
-          .reduce((sum, a) => sum + (a.audioDuration ?? 0), 0);
-        if (existingAudioTotal + audioDuration > MULTI_REF_AUDIO_MAX_SECONDS) {
-          toast.error(
-            `音频总时长不能超过 ${MULTI_REF_AUDIO_MAX_SECONDS} 秒（当前已 ${Math.round(existingAudioTotal)}s，新增 ${Math.round(audioDuration)}s）`,
-          );
-          return;
-        }
+    let existingAudioTotal = multiRefAssets
+      .filter((a) => a.assetType === 'audio')
+      .reduce((sum, a) => sum + (a.audioDuration ?? 0), 0);
+
+    const newAssets: MultiRefAsset[] = [];
+
+    for (const file of files) {
+      if (remaining <= 0) {
+        toast.error(`最多支持上传 ${MULTI_REF_MAX_ASSETS} 个参考素材`);
+        break;
       }
+      try {
+        let assetType: MultiRefAssetType = 'image';
+        if (file.type.startsWith('video/')) assetType = 'video';
+        else if (file.type.startsWith('audio/')) assetType = 'audio';
+        else if (!file.type.startsWith('image/')) {
+          // 不支持的类型，跳过
+          continue;
+        }
 
-      const dataUrl = await fileToDataUrl(file);
-      setMultiRefAssets((prev) => [
-        ...prev,
-        {
+        let audioDuration: number | undefined;
+        if (assetType === 'audio') {
+          audioDuration = await getAudioDuration(file);
+          if (existingAudioTotal + audioDuration > MULTI_REF_AUDIO_MAX_SECONDS) {
+            toast.error(
+              `音频总时长不能超过 ${MULTI_REF_AUDIO_MAX_SECONDS} 秒（已 ${Math.round(existingAudioTotal)}s，新增 ${Math.round(audioDuration)}s）`,
+            );
+            continue;
+          }
+          existingAudioTotal += audioDuration;
+        }
+
+        const dataUrl = await fileToDataUrl(file);
+        newAssets.push({
           id: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
           dataUrl,
           fileName: file.name,
           mimeType: file.type,
           assetType,
           audioDuration,
-        },
-      ]);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : '读取文件失败';
-      toast.error(message);
+        });
+        remaining -= 1;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : '读取文件失败';
+        toast.error(message);
+      }
     }
-  }, [multiRefAssets]);
+
+    if (newAssets.length > 0) {
+      setMultiRefAssets((prev) => [...prev, ...newAssets]);
+    }
+  }, [multiRefAssets, setMultiRefAssets]);
+
+  /** 多功能参考模式：上传文件（视频/图片/音频） */
+  const handleMultiRefChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = '';
+    await ingestMultiRefFiles(files);
+  }, [ingestMultiRefFiles]);
 
   const removeMultiRefAsset = useCallback((id: string) => {
     setMultiRefAssets((prev) => prev.filter((a) => a.id !== id));
-  }, []);
+  }, [setMultiRefAssets]);
 
   /** 计算某个素材在同类型中的序号标签，如 @image_file_1 */
   const getMultiRefTag = useCallback((assetId: string): string => {
@@ -459,52 +524,75 @@ export function VideoStudio() {
     onPick: () => void,
     onClear: () => void,
     required = false,
-  ) => (
-    <div className="rounded-md border p-2 space-y-2">
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-medium">
-          {label}{required ? ' *' : ''}
-        </span>
-        {asset && (
+    onDropFile?: (file: File) => void,
+  ) => {
+    const dropProps = onDropFile
+      ? {
+          onDragOver: (e: React.DragEvent<HTMLDivElement>) => {
+            if (e.dataTransfer.types.includes('Files')) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'copy';
+            }
+          },
+          onDrop: (e: React.DragEvent<HTMLDivElement>) => {
+            const file = pickImageFile(e.dataTransfer.files);
+            if (!file) return;
+            e.preventDefault();
+            onDropFile(file);
+          },
+        }
+      : {};
+
+    return (
+      <div
+        className="rounded-md border p-2 space-y-2 transition-colors"
+        {...dropProps}
+      >
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-medium">
+            {label}{required ? ' *' : ''}
+          </span>
+          {asset && (
+            <button
+              type="button"
+              onClick={onClear}
+              className="text-muted-foreground hover:text-destructive"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+        {asset ? (
+          <img
+            src={asset.dataUrl}
+            alt={label}
+            className="h-24 w-full rounded object-cover"
+          />
+        ) : (
           <button
             type="button"
-            onClick={onClear}
-            className="text-muted-foreground hover:text-destructive"
+            onClick={onPick}
+            className="h-24 w-full rounded border border-dashed flex flex-col items-center justify-center gap-1 text-muted-foreground hover:text-foreground hover:border-primary/40"
           >
-            <X className="h-3.5 w-3.5" />
+            <Upload className="h-4 w-4" />
+            <span className="text-xs">点击或拖入图片</span>
           </button>
         )}
+        {asset && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="w-full h-7 text-xs"
+            onClick={onPick}
+            disabled={videoGenerating}
+          >
+            更换
+          </Button>
+        )}
       </div>
-      {asset ? (
-        <img
-          src={asset.dataUrl}
-          alt={label}
-          className="h-24 w-full rounded object-cover"
-        />
-      ) : (
-        <button
-          type="button"
-          onClick={onPick}
-          className="h-24 w-full rounded border border-dashed flex flex-col items-center justify-center gap-1 text-muted-foreground hover:text-foreground hover:border-primary/40"
-        >
-          <Upload className="h-4 w-4" />
-          <span className="text-xs">上传图片</span>
-        </button>
-      )}
-      {asset && (
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="w-full h-7 text-xs"
-          onClick={onPick}
-          disabled={videoGenerating}
-        >
-          更换
-        </Button>
-      )}
-    </div>
-  );
+    );
+  };
 
   const handleGenerate = useCallback(async () => {
     if (!videoPrompt.trim()) {
@@ -547,79 +635,156 @@ export function VideoStudio() {
       }
     }
 
+    // 快照当前参数
+    const snapshot = {
+      prompt: videoPrompt,
+      model: selectedVideoModel,
+      aspectRatio: videoAspectRatio,
+      duration: videoDuration,
+      resolution: videoResolution || undefined,
+      featureMode: videoFeatureMode,
+    };
+
+    // 构建上传文件列表
+    let uploadFiles: FreedomVideoUploadFile[] | undefined;
+
+    if (videoFeatureMode === 'text-to-video') {
+      uploadFiles = veoUploadFiles.length > 0 ? veoUploadFiles : undefined;
+    } else if (videoFeatureMode === 'image-to-video') {
+      const files: FreedomVideoUploadFile[] = [];
+      if (firstFrameUpload) {
+        files.push({
+          role: 'first',
+          dataUrl: firstFrameUpload.dataUrl,
+          fileName: firstFrameUpload.fileName,
+          mimeType: firstFrameUpload.mimeType,
+        });
+      }
+      if (videoI2VSubMode === 'first-last-frame' && lastFrameUpload) {
+        files.push({
+          role: 'last',
+          dataUrl: lastFrameUpload.dataUrl,
+          fileName: lastFrameUpload.fileName,
+          mimeType: lastFrameUpload.mimeType,
+        });
+      }
+      uploadFiles = files.length > 0 ? files : undefined;
+    } else if (videoFeatureMode === 'multi-reference') {
+      uploadFiles = multiRefAssets.map((a) => ({
+        role: 'reference' as FreedomVideoUploadRole,
+        dataUrl: a.dataUrl,
+        fileName: a.fileName,
+        mimeType: a.mimeType,
+        assetType: a.assetType,
+      }));
+    }
+
+    // 创建任务
+    const taskId = `vid_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const controller = new AbortController();
+
+    addActiveTask({
+      id: taskId,
+      type: 'video',
+      prompt: snapshot.prompt,
+      model: snapshot.model,
+      status: 'running',
+      percent: 5,
+      message: '准备提交…',
+      createdAt: Date.now(),
+      controller,
+    });
+
+    setSelectedTaskId(taskId);
     setVideoGenerating(true);
     setVideoResult(null);
 
-    try {
-      // 构建上传文件列表
-      let uploadFiles: FreedomVideoUploadFile[] | undefined;
+    // 后台异步执行：不 await，保证 UI 可立即返回
+    void (async () => {
+      // 预估进度定时器（视频生成通常 60-240 秒，模拟渐进进度）
+      let estimatedPercent = 5;
+      const progressTimer = setInterval(() => {
+        if (estimatedPercent < 90) {
+          // 缓慢递增，越接近 90% 越慢
+          const increment = estimatedPercent < 30 ? 3 : estimatedPercent < 60 ? 2 : 1;
+          estimatedPercent = Math.min(90, estimatedPercent + increment);
+          updateActiveTask(taskId, {
+            percent: estimatedPercent,
+            message: estimatedPercent < 20 ? '提交任务中…' :
+                     estimatedPercent < 50 ? '视频生成中…' :
+                     estimatedPercent < 80 ? '渲染中，请耐心等待…' :
+                     '即将完成…',
+          });
+        }
+      }, 3000);
 
-      if (videoFeatureMode === 'text-to-video') {
-        uploadFiles = veoUploadFiles.length > 0 ? veoUploadFiles : undefined;
-      } else if (videoFeatureMode === 'image-to-video') {
-        const files: FreedomVideoUploadFile[] = [];
-        if (firstFrameUpload) {
-          files.push({
-            role: 'first',
-            dataUrl: firstFrameUpload.dataUrl,
-            fileName: firstFrameUpload.fileName,
-            mimeType: firstFrameUpload.mimeType,
+      try {
+        const result = await generateFreedomVideo({
+          prompt: snapshot.prompt,
+          model: snapshot.model,
+          aspectRatio: snapshot.aspectRatio,
+          duration: snapshot.duration,
+          resolution: snapshot.resolution,
+          uploadFiles,
+          signal: controller.signal,
+        });
+
+        clearInterval(progressTimer);
+
+        updateActiveTask(taskId, {
+          status: 'done',
+          percent: 100,
+          message: '完成',
+          resultUrl: result.url,
+        });
+
+        addHistoryEntry({
+          id: taskId,
+          prompt: snapshot.prompt,
+          model: snapshot.model,
+          resultUrl: result.url,
+          params: {
+            aspectRatio: snapshot.aspectRatio,
+            duration: snapshot.duration,
+            resolution: snapshot.resolution,
+            featureMode: snapshot.featureMode,
+            uploadCount: uploadFiles?.length ?? 0,
+          },
+          createdAt: Date.now(),
+          mediaId: result.mediaId,
+          type: 'video',
+        });
+
+        // 同步预览结果（仅当用户当前查看此任务时）
+        useFreedomStore.setState((s) => {
+          if (selectedTaskIdRef.current === taskId || !s.videoResult) {
+            return { videoResult: result.url };
+          }
+          return {};
+        });
+
+        toast.success('视频生成成功！已保存到素材库');
+        setTimeout(() => removeActiveTask(taskId), 4000);
+      } catch (err: any) {
+        clearInterval(progressTimer);
+
+        if (err instanceof FreedomCancelledError || err?.name === 'AbortError') {
+          updateActiveTask(taskId, { status: 'cancelled', message: '已取消' });
+          setTimeout(() => removeActiveTask(taskId), 3000);
+        } else {
+          const message = err instanceof Error ? err.message : '未知错误';
+          updateActiveTask(taskId, {
+            status: 'error',
+            message,
+            error: message,
           });
+          toast.error(`生成失败: ${message}`);
+          setTimeout(() => removeActiveTask(taskId), 6000);
         }
-        if (videoI2VSubMode === 'first-last-frame' && lastFrameUpload) {
-          files.push({
-            role: 'last',
-            dataUrl: lastFrameUpload.dataUrl,
-            fileName: lastFrameUpload.fileName,
-            mimeType: lastFrameUpload.mimeType,
-          });
-        }
-        uploadFiles = files.length > 0 ? files : undefined;
-      } else if (videoFeatureMode === 'multi-reference') {
-        uploadFiles = multiRefAssets.map((a) => ({
-          role: 'reference' as FreedomVideoUploadRole,
-          dataUrl: a.dataUrl,
-          fileName: a.fileName,
-          mimeType: a.mimeType,
-          assetType: a.assetType,
-        }));
+      } finally {
+        setVideoGenerating(false);
       }
-
-      const result = await generateFreedomVideo({
-        prompt: videoPrompt,
-        model: selectedVideoModel,
-        aspectRatio: videoAspectRatio,
-        duration: videoDuration,
-        resolution: videoResolution || undefined,
-        uploadFiles,
-      });
-
-      setVideoResult(result.url);
-
-      addHistoryEntry({
-        id: `vid_${Date.now()}`,
-        prompt: videoPrompt,
-        model: selectedVideoModel,
-        resultUrl: result.url,
-        params: {
-          aspectRatio: videoAspectRatio,
-          duration: videoDuration,
-          resolution: videoResolution,
-          featureMode: videoFeatureMode,
-          uploadCount: uploadFiles?.length ?? 0,
-        },
-        createdAt: Date.now(),
-        mediaId: result.mediaId,
-        type: 'video',
-      });
-
-      toast.success('视频生成成功！已保存到素材库');
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : '未知错误';
-      toast.error(`生成失败: ${message}`);
-    } finally {
-      setVideoGenerating(false);
-    }
+    })();
   }, [
     videoPrompt,
     videoFeatureMode,
@@ -638,6 +803,10 @@ export function VideoStudio() {
     selectedVideoModel,
     veoUploadFiles,
     addHistoryEntry,
+    addActiveTask,
+    updateActiveTask,
+    removeActiveTask,
+    setSelectedTaskId,
   ]);
 
   return (
@@ -788,6 +957,7 @@ export function VideoStudio() {
                     () => firstInputRef.current?.click(),
                     () => setFirstFrameUpload(null),
                     true,
+                    (file) => void ingestSingleImage(file, setFirstFrameUpload),
                   )}
                   {videoI2VSubMode === 'first-last-frame' && renderUploadSlot(
                     '尾帧图',
@@ -795,6 +965,7 @@ export function VideoStudio() {
                     () => lastInputRef.current?.click(),
                     () => setLastFrameUpload(null),
                     false,
+                    (file) => void ingestSingleImage(file, setLastFrameUpload),
                   )}
                 </div>
               </div>
@@ -805,7 +976,21 @@ export function VideoStudio() {
               <div className="space-y-3">
                 <div className="space-y-2">
                   <Label className="text-sm font-medium">参考素材（视频/图片/音频）</Label>
-                  <div className="grid grid-cols-3 gap-2">
+                  <div
+                    className="grid grid-cols-3 gap-2 rounded-md border border-dashed border-transparent transition-colors p-1 -m-1 hover:border-primary/30"
+                    onDragOver={(e) => {
+                      if (e.dataTransfer.types.includes('Files')) {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'copy';
+                      }
+                    }}
+                    onDrop={(e) => {
+                      const files = e.dataTransfer.files ? Array.from(e.dataTransfer.files) : [];
+                      if (files.length === 0) return;
+                      e.preventDefault();
+                      void ingestMultiRefFiles(files);
+                    }}
+                  >
                     {multiRefAssets.map((asset, index) => (
                       <div
                         key={asset.id}
@@ -889,6 +1074,7 @@ export function VideoStudio() {
                         setFirstFrameUpload(null);
                       },
                       veoCapability.minFiles > 0,
+                      (file) => void ingestSingleImage(file, setSingleUpload),
                     )}
 
                     {veoCapability.mode === 'first_last' && (
@@ -899,6 +1085,7 @@ export function VideoStudio() {
                           () => firstInputRef.current?.click(),
                           () => setFirstFrameUpload(null),
                           veoCapability.minFiles > 0,
+                          (file) => void ingestSingleImage(file, setFirstFrameUpload),
                         )}
                         {renderUploadSlot(
                           '尾帧图',
@@ -906,13 +1093,28 @@ export function VideoStudio() {
                           () => lastInputRef.current?.click(),
                           () => setLastFrameUpload(null),
                           false,
+                          (file) => void ingestSingleImage(file, setLastFrameUpload),
                         )}
                       </div>
                     )}
 
                     {veoCapability.mode === 'multi' && (
                       <div className="space-y-2">
-                        <div className="grid grid-cols-3 gap-2">
+                        <div
+                          className="grid grid-cols-3 gap-2 rounded-md border border-dashed border-transparent transition-colors p-1 -m-1 hover:border-primary/30"
+                          onDragOver={(e) => {
+                            if (e.dataTransfer.types.includes('Files')) {
+                              e.preventDefault();
+                              e.dataTransfer.dropEffect = 'copy';
+                            }
+                          }}
+                          onDrop={(e) => {
+                            const files = e.dataTransfer.files ? Array.from(e.dataTransfer.files) : [];
+                            if (files.length === 0) return;
+                            e.preventDefault();
+                            void ingestReferenceImages(files);
+                          }}
+                        >
                           {referenceUploads.map((asset, index) => (
                             <div key={asset.id} className="relative rounded border overflow-hidden">
                               <img
@@ -986,6 +1188,7 @@ export function VideoStudio() {
               ref={referenceInputRef}
               type="file"
               accept="image/*"
+              multiple
               className="hidden"
               onChange={handleReferenceChange}
             />
@@ -993,6 +1196,7 @@ export function VideoStudio() {
               ref={multiRefInputRef}
               type="file"
               accept="image/*,video/*,audio/*"
+              multiple
               className="hidden"
               onChange={handleMultiRefChange}
             />
@@ -1001,12 +1205,13 @@ export function VideoStudio() {
             <Button
               className="w-full h-11"
               onClick={handleGenerate}
-              disabled={videoGenerating || !videoPrompt.trim()}
+              disabled={!videoPrompt.trim()}
             >
-              {videoGenerating ? (
-                <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> 生成中...</>
-              ) : (
-                <><Sparkles className="mr-2 h-4 w-4" /> 生成视频</>
+              <Sparkles className="mr-2 h-4 w-4" /> 生成视频
+              {videoActiveTasks.filter((t) => t.status === 'running').length > 0 && (
+                <span className="ml-1 text-xs opacity-80">
+                  ({videoActiveTasks.filter((t) => t.status === 'running').length} 个进行中)
+                </span>
               )}
             </Button>
           </div>
@@ -1015,15 +1220,38 @@ export function VideoStudio() {
 
       {/* Center: Result */}
       <div className="flex-1 flex items-center justify-center p-8 bg-muted/30">
-        {videoGenerating ? (
-          <div className="flex flex-col items-center gap-4">
+        {viewingTask && (viewingTask.status === 'running' || viewingTask.status === 'cancelling') ? (
+          <div className="flex flex-col items-center gap-4 w-full max-w-md">
             <Loader2 className="h-12 w-12 animate-spin text-primary" />
-            <p className="text-sm text-muted-foreground">视频生成中，请稍候（可能需要 1-4 分钟）...</p>
+            <p className="text-sm font-medium">{viewingTask.message || '视频生成中，请稍候...'}</p>
+            <div className="w-full space-y-1.5">
+              <Progress value={viewingTask.percent} />
+              <div className="flex justify-between text-xs text-muted-foreground">
+                <span>{viewingTask.percent}%</span>
+                <span>可切换页面，任务将在后台继续</span>
+              </div>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleCancelTask(viewingTask.id)}
+              disabled={viewingTask.status === 'cancelling'}
+              className="mt-1"
+            >
+              <StopCircle className="h-4 w-4 mr-1.5" />
+              {viewingTask.status === 'cancelling' ? '正在取消…' : '取消任务'}
+            </Button>
           </div>
-        ) : videoResult ? (
+        ) : viewingTask && viewingTask.status === 'error' ? (
+          <div className="flex flex-col items-center gap-3 text-destructive max-w-md text-center">
+            <X className="h-12 w-12" />
+            <p className="text-sm font-medium">生成失败</p>
+            <p className="text-xs text-muted-foreground">{viewingTask.error || viewingTask.message}</p>
+          </div>
+        ) : (viewingTask?.resultUrl || videoResult) ? (
           <div className="max-w-full max-h-full relative group">
             <video
-              src={videoResult}
+              src={viewingTask?.resultUrl || videoResult || ''}
               controls
               autoPlay
               loop
@@ -1031,7 +1259,7 @@ export function VideoStudio() {
             />
             <div className="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity flex gap-2">
               <Button size="sm" variant="secondary" asChild>
-                <a href={videoResult} download target="_blank" rel="noopener">
+                <a href={viewingTask?.resultUrl || videoResult || ''} download target="_blank" rel="noopener">
                   <Download className="h-4 w-4 mr-1" /> 下载
                 </a>
               </Button>
@@ -1046,13 +1274,38 @@ export function VideoStudio() {
         )}
       </div>
 
-      {/* Right: History */}
-      <div className="w-[240px] border-l">
-        <GenerationHistory type="video" onSelect={(entry) => {
-          setVideoPrompt(entry.prompt);
-          setSelectedVideoModel(entry.model);
-          setVideoResult(entry.resultUrl);
-        }} />
+      {/* Right: Active tasks + History */}
+      <div className="w-[260px] border-l flex flex-col">
+        {videoActiveTasks.length > 0 && (
+          <div className="border-b">
+            <div className="px-3 py-2 border-b">
+              <span className="text-sm font-medium">当前任务 ({videoActiveTasks.length})</span>
+            </div>
+            <div className="p-2 space-y-2 max-h-[40vh] overflow-y-auto">
+              {videoActiveTasks.map((t) => (
+                <ActiveTaskCard
+                  key={t.id}
+                  task={t}
+                  selected={selectedTaskId === t.id}
+                  onSelect={() => setSelectedTaskId(t.id)}
+                  onCancel={() => handleCancelTask(t.id)}
+                  onDismiss={() => {
+                    removeActiveTask(t.id);
+                    if (selectedTaskId === t.id) setSelectedTaskId(null);
+                  }}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+        <div className="flex-1 min-h-0">
+          <GenerationHistory type="video" onSelect={(entry) => {
+            setVideoPrompt(entry.prompt);
+            setSelectedVideoModel(entry.model);
+            setVideoResult(entry.resultUrl);
+            setSelectedTaskId(null);
+          }} />
+        </div>
       </div>
     </div>
   );

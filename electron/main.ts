@@ -93,6 +93,26 @@ function getDefaultGithubUrl() {
   return sanitizeExternalUrl(packageUpdateConfig.defaultGithubUrl)
 }
 
+/**
+ * 从 defaultGithubUrl（形如 https://github.com/owner/repo[.git]）中提取 owner/repo。
+ */
+function getGithubRepoSlug(): { owner: string; repo: string } | null {
+  const url = getDefaultGithubUrl()
+  if (!url) return null
+  try {
+    const parsed = new URL(url)
+    if (!/github\.com$/i.test(parsed.hostname)) return null
+    const segments = parsed.pathname.split('/').filter(Boolean)
+    if (segments.length < 2) return null
+    const owner = segments[0]
+    const repo = segments[1].replace(/\.git$/i, '')
+    if (!owner || !repo) return null
+    return { owner, repo }
+  } catch {
+    return null
+  }
+}
+
 function getDefaultBaiduUrl() {
   return sanitizeExternalUrl(packageUpdateConfig.defaultBaiduUrl)
 }
@@ -103,41 +123,62 @@ function getDefaultBaiduCode() {
     : undefined
 }
 
-async function fetchUpdateManifest() {
-  const manifestUrl = getUpdateManifestUrl()
-  if (!manifestUrl) {
-    throw new Error('未配置版本清单地址')
+async function fetchUpdateManifest(): Promise<UpdateManifest> {
+  const slug = getGithubRepoSlug()
+  if (!slug) {
+    throw new Error('未配置有效的 GitHub 仓库地址 (updateConfig.defaultGithubUrl)')
   }
 
-  const requestUrl = new URL(manifestUrl)
-  requestUrl.searchParams.set('_ts', Date.now().toString())
+  const apiUrl = new URL(`https://api.github.com/repos/${slug.owner}/${slug.repo}/releases/latest`)
+  apiUrl.searchParams.set('_ts', Date.now().toString())
 
-  const response = await net.fetch(requestUrl.toString())
+  const response = await net.fetch(apiUrl.toString(), {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': `moyin-creator/${app.getVersion()}`,
+    },
+  })
+
   if (!response.ok) {
-    throw new Error(`版本清单请求失败 (${response.status})`)
+    if (response.status === 404) {
+      throw new Error('仓库尚未发布任何 Release')
+    }
+    throw new Error(`GitHub Releases 请求失败 (${response.status})`)
   }
 
-  const rawManifest = await response.json() as Partial<UpdateManifest>
-  if (!isNonEmptyString(rawManifest.version)) {
-    throw new Error('版本清单缺少有效的 version 字段')
+  const release = (await response.json()) as {
+    tag_name?: string
+    name?: string
+    body?: string
+    published_at?: string
+    html_url?: string
+    draft?: boolean
+    prerelease?: boolean
   }
+
+  const tagName = isNonEmptyString(release.tag_name)
+    ? release.tag_name.trim()
+    : isNonEmptyString(release.name)
+      ? release.name.trim()
+      : ''
+
+  if (!tagName) {
+    throw new Error('GitHub Release 缺少版本号 (tag_name)')
+  }
+
+  // 去掉前缀 v / V
+  const version = tagName.replace(/^v/i, '')
 
   return {
-    version: rawManifest.version.trim(),
-    releaseNotes: isNonEmptyString(rawManifest.releaseNotes)
-      ? rawManifest.releaseNotes.trim()
-      : isNonEmptyString(rawManifest.notes)
-        ? rawManifest.notes.trim()
-        : undefined,
-    publishedAt: isNonEmptyString(rawManifest.publishedAt)
-      ? rawManifest.publishedAt.trim()
-      : undefined,
-    githubUrl: sanitizeExternalUrl(rawManifest.githubUrl) ?? getDefaultGithubUrl(),
-    baiduUrl: sanitizeExternalUrl(rawManifest.baiduUrl) ?? getDefaultBaiduUrl(),
-    baiduCode: isNonEmptyString(rawManifest.baiduCode)
-      ? rawManifest.baiduCode.trim()
-      : getDefaultBaiduCode(),
-  } satisfies UpdateManifest
+    version,
+    releaseNotes: isNonEmptyString(release.body) ? release.body.trim() : undefined,
+    publishedAt: isNonEmptyString(release.published_at) ? release.published_at.trim() : undefined,
+    // 优先使用 release 的 html_url（直接指向该次发布页），否则回退到仓库默认地址
+    githubUrl: sanitizeExternalUrl(release.html_url) ?? getDefaultGithubUrl(),
+    baiduUrl: getDefaultBaiduUrl(),
+    baiduCode: getDefaultBaiduCode(),
+  }
 }
 
 async function resolveAvailableUpdate(currentVersion: string): Promise<AvailableUpdateInfo | null> {

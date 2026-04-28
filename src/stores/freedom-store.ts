@@ -29,6 +29,28 @@ export interface HistoryEntry {
 
 export type ActiveTaskStatus = 'running' | 'cancelling' | 'done' | 'error' | 'cancelled';
 
+/** 视频工作室上传素材（首帧/尾帧/单图/多参考） */
+export interface VideoUploadAsset {
+  id: string;
+  dataUrl: string;
+  fileName: string;
+  mimeType: string;
+}
+
+/** 多功能参考素材类型 */
+export type MultiRefAssetType = 'video' | 'image' | 'audio';
+
+/** 多功能参考模式素材 */
+export interface VideoMultiRefAsset {
+  id: string;
+  dataUrl: string;
+  fileName: string;
+  mimeType: string;
+  assetType: MultiRefAssetType;
+  /** 音频时长（秒），仅 audio 类型有值 */
+  audioDuration?: number;
+}
+
 /**
  * 进行中的生成任务（运行时状态，不持久化）。
  * AbortController 用于支持任务卡片上的"取消"按钮。
@@ -73,6 +95,12 @@ interface FreedomState {
   videoGenerating: boolean;
   videoFeatureMode: VideoFeatureMode;
   videoI2VSubMode: ImageToVideoSubMode;
+  /** 视频工作室上传素材（跨 Tab 保留，不持久化到 localStorage 以避免 dataUrl 撑爆） */
+  videoSingleUpload: VideoUploadAsset | null;
+  videoFirstFrameUpload: VideoUploadAsset | null;
+  videoLastFrameUpload: VideoUploadAsset | null;
+  videoReferenceUploads: VideoUploadAsset[];
+  videoMultiRefAssets: VideoMultiRefAsset[];
   
   // Cinema studio
   cinemaPrompt: string;
@@ -115,6 +143,12 @@ interface FreedomActions {
   setVideoGenerating: (generating: boolean) => void;
   setVideoFeatureMode: (mode: VideoFeatureMode) => void;
   setVideoI2VSubMode: (mode: ImageToVideoSubMode) => void;
+  setVideoSingleUpload: (asset: VideoUploadAsset | null) => void;
+  setVideoFirstFrameUpload: (asset: VideoUploadAsset | null) => void;
+  setVideoLastFrameUpload: (asset: VideoUploadAsset | null) => void;
+  setVideoReferenceUploads: (assets: VideoUploadAsset[] | ((prev: VideoUploadAsset[]) => VideoUploadAsset[])) => void;
+  setVideoMultiRefAssets: (assets: VideoMultiRefAsset[] | ((prev: VideoMultiRefAsset[]) => VideoMultiRefAsset[])) => void;
+  clearVideoUploads: () => void;
   
   // Cinema studio actions
   setCinemaPrompt: (prompt: string) => void;
@@ -164,6 +198,11 @@ const initialState: FreedomState = {
   videoGenerating: false,
   videoFeatureMode: 'text-to-video',
   videoI2VSubMode: 'first-frame',
+  videoSingleUpload: null,
+  videoFirstFrameUpload: null,
+  videoLastFrameUpload: null,
+  videoReferenceUploads: [],
+  videoMultiRefAssets: [],
   
   cinemaPrompt: '',
   selectedCamera: 'Modular 8K Digital',
@@ -209,6 +248,22 @@ export const useFreedomStore = create<FreedomStore>()(
       setVideoGenerating: (generating) => set({ videoGenerating: generating }),
       setVideoFeatureMode: (mode) => set({ videoFeatureMode: mode }),
       setVideoI2VSubMode: (mode) => set({ videoI2VSubMode: mode }),
+      setVideoSingleUpload: (asset) => set({ videoSingleUpload: asset }),
+      setVideoFirstFrameUpload: (asset) => set({ videoFirstFrameUpload: asset }),
+      setVideoLastFrameUpload: (asset) => set({ videoLastFrameUpload: asset }),
+      setVideoReferenceUploads: (assets) => set((state) => ({
+        videoReferenceUploads: typeof assets === 'function' ? assets(state.videoReferenceUploads) : assets,
+      })),
+      setVideoMultiRefAssets: (assets) => set((state) => ({
+        videoMultiRefAssets: typeof assets === 'function' ? assets(state.videoMultiRefAssets) : assets,
+      })),
+      clearVideoUploads: () => set({
+        videoSingleUpload: null,
+        videoFirstFrameUpload: null,
+        videoLastFrameUpload: null,
+        videoReferenceUploads: [],
+        videoMultiRefAssets: [],
+      }),
 
       // Cinema studio
       setCinemaPrompt: (prompt) => set({ cinemaPrompt: prompt }),

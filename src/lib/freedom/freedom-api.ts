@@ -68,6 +68,8 @@ export interface FreedomVideoParams {
   duration?: number;
   resolution?: string;
   uploadFiles?: FreedomVideoUploadFile[];
+  /** 用于取消任务的 AbortSignal */
+  signal?: AbortSignal;
 }
 
 export interface GenerationResult {
@@ -1290,6 +1292,8 @@ export async function generateFreedomVideo(
 async function _generateFreedomVideoInner(
   params: FreedomVideoParams
 ): Promise<GenerationResult> {
+  throwIfAborted(params.signal);
+
   const { config, source: configSource } = resolveFreedomFeatureConfig(
     'freedom_video',
     'video_generation',
@@ -1718,6 +1722,7 @@ async function generateVideoViaUnified(
       'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
+    signal: params.signal,
   });
   if (!resp.ok) {
     const text = await resp.text();
@@ -1745,9 +1750,10 @@ async function generateVideoViaUnified(
   const pollUrl = `${rootBase}${endpointPaths.poll(String(taskId))}`;
 
   for (let i = 0; i < VIDEO_POLL_MAX_ATTEMPTS; i++) {
-    await new Promise((r) => setTimeout(r, VIDEO_POLL_INTERVAL));
+    await abortableSleep(VIDEO_POLL_INTERVAL, params.signal);
     const pollResp = await fetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
+      signal: params.signal,
     });
     if (!pollResp.ok) continue;
     const pollData = await pollResp.json();
@@ -1832,6 +1838,7 @@ async function generateVideoViaVolc(
       'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
+    signal: params.signal,
   });
   if (!submitResp.ok) {
     throw toHttpError('Volc submit failed', submitResp.status, await submitResp.text());
@@ -1843,9 +1850,10 @@ async function generateVideoViaVolc(
 
   const pollUrl = `${rootBase}/volc/v1/contents/generations/tasks/${taskId}`;
   for (let i = 0; i < VIDEO_POLL_MAX_ATTEMPTS; i++) {
-    await new Promise((r) => setTimeout(r, VIDEO_POLL_INTERVAL));
+    await abortableSleep(VIDEO_POLL_INTERVAL, params.signal);
     const pollResp = await fetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
+      signal: params.signal,
     });
     if (!pollResp.ok) continue;
     const pollData = await pollResp.json();
