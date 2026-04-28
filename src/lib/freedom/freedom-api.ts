@@ -33,6 +33,21 @@ export interface FreedomImageParams {
   height?: number;
   negativePrompt?: string;
   extraParams?: Record<string, any>;
+  /** 参考图（dataUrl 或 http URL），最多 10 张。各路由按能力下发 */
+  referenceImages?: string[];
+  /** 进度回调（提交 / 轮询 / 完成）。phase 0..1，message 用于 UI */
+  onProgress?: (info: FreedomProgress) => void;
+  /** 用于取消任务的 AbortSignal（可中止提交请求与轮询） */
+  signal?: AbortSignal;
+}
+
+export interface FreedomProgress {
+  /** 阶段：submitting=提交中, processing=排队/生成中, finalizing=收尾, done=完成 */
+  phase: 'submitting' | 'processing' | 'finalizing' | 'done';
+  /** 0-100 进度百分比（粗略估算） */
+  percent: number;
+  /** 状态描述，可选 */
+  message?: string;
 }
 
 export type FreedomVideoUploadRole = 'single' | 'first' | 'last' | 'reference';
@@ -42,6 +57,8 @@ export interface FreedomVideoUploadFile {
   dataUrl: string;
   fileName?: string;
   mimeType?: string;
+  /** 素材类型（多功能参考模式使用），用于区分图片/视频/音频 */
+  assetType?: 'image' | 'video' | 'audio';
 }
 
 export interface FreedomVideoParams {
@@ -121,6 +138,8 @@ async function freedomRetry<T>(
       return await operation();
     } catch (error) {
       lastError = error as Error;
+      if (error instanceof FreedomCancelledError) throw error;
+      if ((error as any)?.name === 'AbortError') throw new FreedomCancelledError();
       if (!isRetryableError(error)) throw error;
 
       // 触发 key 轮换（如果有 keyManager）
@@ -143,6 +162,46 @@ async function freedomRetry<T>(
     }
   }
   throw lastError;
+}
+
+// ==================== Cancellation ====================
+
+/** 自定义取消错误，便于 UI 区分取消与失败 */
+export class FreedomCancelledError extends Error {
+  constructor(message = '任务已取消') {
+    super(message);
+    this.name = 'FreedomCancelledError';
+  }
+}
+
+/** 抛出取消错误（如果 signal 已 abort） */
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new FreedomCancelledError();
+  }
+}
+
+/** 等待指定毫秒，期间可被 signal 取消（避免轮询间隔阻塞取消） */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new FreedomCancelledError());
+      return;
+    }
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      cleanup();
+      reject(new FreedomCancelledError());
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 // ==================== Helpers: Endpoint Building ====================
@@ -184,7 +243,7 @@ function resolveFreedomFeatureConfig(
   return { config: null, source: feature };
 }
 
-type FreedomImageRoute = 'midjourney' | 'ideogram' | 'kling_image' | 'openai_chat' | 'openai_images' | 'replicate';
+type FreedomImageRoute = 'midjourney' | 'ideogram' | 'kling_image' | 'gemini_native' | 'openai_chat' | 'openai_images' | 'replicate';
 
 function detectFreedomImageRoute(model: string, endpointTypes?: string[]): FreedomImageRoute {
   const lower = model.toLowerCase();
@@ -205,6 +264,12 @@ function detectFreedomImageRoute(model: string, endpointTypes?: string[]): Freed
   // Replicate: endpoint type uses '{org}/{model}异步' pattern (contains '/' before '异步')
   if ((endpointTypes || []).some(t => t.includes('/') && t.endsWith('异步'))) {
     return 'replicate';
+  }
+
+  // Gemini Nano Banana 系列：使用 Gemini 原生 REST API（非 OpenAI 兼容）
+  // 这样才能正确传递 imageConfig.aspectRatio / image_size
+  if (lower.includes('gemini') && (lower.includes('image') || lower.includes('imagen'))) {
+    return 'gemini_native';
   }
 
   const baseRoute = resolveImageApiFormat(endpointTypes, model);
@@ -317,12 +382,88 @@ function detectFreedomVideoRoute(model: string, endpointTypes?: string[]): Freed
   const m = model.toLowerCase();
   if (m.includes('sora-2')) return 'openai_official';
   if (m.includes('kling')) return 'kling';
-  if (m.includes('seedance') || m.includes('doubao')) return 'volc';
+  // Seedance/Doubao: 仅在有明确 '豆包视频异步' endpointType 时走 volc 路由，
+  // 否则走 unified 路由（中转站使用 /v1/videos 统一格式）
   if (m.includes('wan')) return 'wan';
   return 'unified';
 }
 
 // ==================== Image Generation ====================
+
+/**
+ * 判断模型是否为 Gemini 图片生成模型（Nano Banana 系列）
+ * - gemini-3-pro-image-preview        → 支持 1K/2K/4K
+ * - gemini-3.1-flash-image-preview    → 支持 512/1K/2K/4K
+ * - gemini-2.5-flash-image            → 固定 1K（不支持 image_size）
+ */
+function isGeminiImageModel(model: string): boolean {
+  const m = model.toLowerCase();
+  return m.includes('gemini') && (m.includes('image') || m.includes('imagen'));
+}
+
+/** gemini-2.5-flash-image 不支持 image_size；3.x 系列支持 */
+function geminiSupportsImageSize(model: string): boolean {
+  const m = model.toLowerCase();
+  return m.includes('gemini-3') && m.includes('image');
+}
+
+/**
+ * Gemini 官方 image_size 参数：仅接受 '1K' | '2K' | '4K'（大写），
+ * gemini-3.1-flash-image-preview 还支持 '512'。
+ */
+function normalizeGeminiImageSize(resolution?: string): string {
+  if (!resolution) return '2K';
+  const upper = resolution.toUpperCase();
+  if (upper === '512') return '512';
+  if (['1K', '2K', '4K'].includes(upper)) return upper;
+  return '2K';
+}
+
+/**
+ * 将"宽高比 + 分辨率档位"换算成像素尺寸。
+ * resolution 支持: '1K' | '2K' | '4K' | 'HD' | 'FHD' | '720p' | '1080p' | '2160p' | '512' | '1024' | '2048'
+ * 返回 { width, height, size: 'WxH' }。无法解析时返回 null。
+ */
+function aspectRatioToSize(
+  aspectRatio?: string,
+  resolution?: string,
+): { width: number; height: number; size: string } | null {
+  if (!aspectRatio) return null;
+  const m = aspectRatio.match(/^(\d+)\s*[:xX]\s*(\d+)$/);
+  if (!m) return null;
+  const arW = parseInt(m[1], 10);
+  const arH = parseInt(m[2], 10);
+  if (!arW || !arH) return null;
+
+  // 长边像素映射（短边按 ratio 推导，向偶数 8 对齐）
+  const longSide = ((): number => {
+    const r = (resolution || '').toLowerCase();
+    if (!r) return 1024;
+    if (r === '4k' || r === '2160p') return 3840;
+    if (r === '2k' || r === 'qhd') return 2560;
+    if (r === 'fhd' || r === '1080p' || r === 'hd+') return 1920;
+    if (r === 'hd' || r === '720p') return 1280;
+    const n = parseInt(r, 10);
+    if (!Number.isNaN(n) && n > 0) return n;
+    return 1024;
+  })();
+
+  const ratio = arW / arH;
+  let width: number;
+  let height: number;
+  if (ratio >= 1) {
+    width = longSide;
+    height = Math.round(longSide / ratio);
+  } else {
+    height = longSide;
+    width = Math.round(longSide * ratio);
+  }
+  // 对齐到 8 像素（多数模型要求）
+  width = Math.max(64, Math.round(width / 8) * 8);
+  height = Math.max(64, Math.round(height / 8) * 8);
+
+  return { width, height, size: `${width}x${height}` };
+}
 
 export async function generateFreedomImage(
   params: FreedomImageParams
@@ -378,7 +519,156 @@ async function _generateFreedomImageInner(
   if (route === 'replicate') {
     return await generateViaReplicateImageEndpoint(params, model, apiKey, normalizedBase);
   }
+  if (route === 'gemini_native') {
+    try {
+      return await generateViaGeminiNative(params, model, apiKey, normalizedBase);
+    } catch (err: any) {
+      // Gemini 原生失败（如中转站不支持 /v1beta），回退到 chat completions
+      if (err instanceof FreedomCancelledError) throw err;
+      console.warn('[Freedom] Gemini native route failed, falling back to chat completions:', err?.message);
+      return await generateViaChatCompletions(params, model, apiKey, normalizedBase);
+    }
+  }
   return await generateViaImagesEndpoint(params, model, apiKey, normalizedBase, endpointTypes);
+}
+
+/**
+ * 把参考图（http(s)/dataURL）转换为 Gemini inlineData：{ mimeType, data: base64 }
+ */
+async function urlToGeminiInlineData(
+  src: string,
+): Promise<{ mimeType: string; data: string } | null> {
+  try {
+    if (src.startsWith('data:')) {
+      const m = src.match(/^data:([^;]+);base64,(.+)$/);
+      if (!m) return null;
+      return { mimeType: m[1], data: m[2] };
+    }
+    const resp = await fetch(src);
+    if (!resp.ok) return null;
+    const blob = await resp.blob();
+    const buf = await blob.arrayBuffer();
+    let binary = '';
+    const bytes = new Uint8Array(buf);
+    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+    const data = btoa(binary);
+    return { mimeType: blob.type || 'image/png', data };
+  } catch (e) {
+    console.warn('[Freedom] Failed to fetch reference image:', e);
+    return null;
+  }
+}
+
+/**
+ * 从 Gemini generateContent 响应中提取图片
+ * 返回 dataURL（inlineData）或 http(s) URL
+ */
+function extractGeminiImage(data: any): string | null {
+  const parts = data?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return null;
+  for (const part of parts) {
+    // 原生 camelCase
+    if (part.inlineData?.data) {
+      const mime = part.inlineData.mimeType || 'image/png';
+      return `data:${mime};base64,${part.inlineData.data}`;
+    }
+    // snake_case 兜底
+    if (part.inline_data?.data) {
+      const mime = part.inline_data.mime_type || part.inline_data.mimeType || 'image/png';
+      return `data:${mime};base64,${part.inline_data.data}`;
+    }
+    if (part.fileData?.fileUri) return part.fileData.fileUri;
+    if (part.file_data?.file_uri) return part.file_data.file_uri;
+  }
+  return null;
+}
+
+/**
+ * Generate image via Gemini native REST API
+ *   POST {base}/v1beta/models/{model}:generateContent
+ *
+ * 严格遵循官方 SDK 请求体结构：
+ *   { contents: [{ parts: [{ text }, { inlineData }] }],
+ *     generationConfig: { responseModalities: ['IMAGE'],
+ *                         imageConfig: { aspectRatio, imageSize } } }
+ */
+async function generateViaGeminiNative(
+  params: FreedomImageParams,
+  model: string,
+  apiKey: string,
+  baseUrl: string,
+): Promise<GenerationResult> {
+  const rootBase = getRootBaseUrl(baseUrl);
+  const aspectRatio = params.aspectRatio || '1:1';
+  const supportsImageSize = geminiSupportsImageSize(model);
+  const imageSize = supportsImageSize ? normalizeGeminiImageSize(params.resolution) : undefined;
+
+  // 构造 parts：先文本，再参考图
+  const parts: any[] = [{ text: params.prompt }];
+  if (params.referenceImages && params.referenceImages.length > 0) {
+    params.onProgress?.({ phase: 'submitting', percent: 5, message: '编码参考图…' });
+    for (const refUrl of params.referenceImages.slice(0, 10)) {
+      throwIfAborted(params.signal);
+      const inline = await urlToGeminiInlineData(refUrl);
+      if (inline) parts.push({ inlineData: inline });
+    }
+  }
+
+  const imageConfig: Record<string, any> = { aspectRatio };
+  if (imageSize) imageConfig.imageSize = imageSize;
+
+  const requestBody: Record<string, any> = {
+    contents: [{ role: 'user', parts }],
+    generationConfig: {
+      responseModalities: ['IMAGE'],
+      imageConfig,
+    },
+  };
+
+  // Gemini 原生路径：{base}/v1beta/models/{model}:generateContent
+  // 中转站普遍兼容此路径（与 Google AI Studio 一致）
+  const endpoint = `${rootBase}/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+
+  console.log('[Freedom] Submitting via Gemini native:', {
+    model,
+    endpoint,
+    aspectRatio,
+    imageSize: imageSize ?? '(n/a)',
+    refCount: params.referenceImages?.length ?? 0,
+  });
+  params.onProgress?.({ phase: 'submitting', percent: 15, message: '提交 Gemini 请求…' });
+  throwIfAborted(params.signal);
+
+  // 同时支持两种鉴权方式：x-goog-api-key（官方）与 Bearer（多数中转站）
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+      'x-goog-api-key': apiKey,
+    },
+    body: JSON.stringify(requestBody),
+    signal: params.signal,
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    let msg = `Gemini native API 错误: ${response.status}`;
+    try { const j = JSON.parse(errorText); msg = j.error?.message || msg; } catch {}
+    throw toHttpError(msg, response.status, errorText);
+  }
+
+  params.onProgress?.({ phase: 'finalizing', percent: 90, message: '解析结果…' });
+  const data = await response.json();
+  const imageUrl = extractGeminiImage(data);
+  if (!imageUrl) {
+    console.warn('[Freedom] Gemini response without image:', JSON.stringify(data).slice(0, 500));
+    throw new Error('未能从 Gemini 响应中提取图片');
+  }
+
+  const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image');
+  params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
+  return { url: imageUrl, mediaId };
 }
 
 /**
@@ -392,18 +682,64 @@ async function generateViaChatCompletions(
 ): Promise<GenerationResult> {
   const endpoint = buildEndpoint(baseUrl, 'chat/completions');
   const aspectRatio = params.aspectRatio || '1:1';
+  const sized = aspectRatioToSize(aspectRatio, params.resolution);
 
-  const userContent: Array<{ type: string; text?: string }> = [
-    { type: 'text', text: `Generate an image with aspect ratio ${aspectRatio}: ${params.prompt}` },
+  const isGemini = isGeminiImageModel(model);
+  const geminiHasImageSize = isGemini && geminiSupportsImageSize(model);
+  const geminiImageSize = geminiHasImageSize ? normalizeGeminiImageSize(params.resolution) : undefined;
+
+  // Prompt 文本里强调宽高比和精确像素，作为参数被丢弃时的兜底引导
+  const dimsHint = sized
+    ? ` The output image MUST have an aspect ratio of exactly ${aspectRatio} and resolution ${sized.width}x${sized.height} pixels (${sized.width} wide, ${sized.height} tall).`
+    : ` The output image MUST have an aspect ratio of exactly ${aspectRatio}.`;
+
+  const userContent: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
+    { type: 'text', text: `${params.prompt}\n\n${dimsHint}` },
   ];
 
-  const requestBody = {
+  // 参考图作为多模态 image_url 注入（chat completions 通用格式）
+  if (params.referenceImages && params.referenceImages.length > 0) {
+    for (const url of params.referenceImages.slice(0, 10)) {
+      userContent.push({ type: 'image_url', image_url: { url } });
+    }
+  }
+
+  const requestBody: Record<string, any> = {
     model,
     messages: [{ role: 'user', content: userContent }],
     max_tokens: 4096,
+    stream: false,
   };
 
-  console.log('[Freedom] Submitting via chat completions:', { model, endpoint });
+  if (isGemini) {
+    // ── Gemini Nano Banana 中转站规范 ──
+    // 接口仅识别顶层 camelCase: aspectRatio / imageSize
+    // 不要再下发 size/width/height/aspect_ratio 等，否则中转站可能优先命中
+    // 这些字段并把 aspectRatio 丢弃，导致输出回落到默认 1:1。
+    requestBody.aspectRatio = aspectRatio;
+    if (geminiImageSize) {
+      requestBody.imageSize = geminiImageSize;
+    }
+  } else {
+    // 非 Gemini：附带 size / aspect_ratio / 宽高，兼容各家代理
+    if (sized) {
+      requestBody.size = sized.size;
+      requestBody.width = sized.width;
+      requestBody.height = sized.height;
+    }
+    requestBody.aspect_ratio = aspectRatio;
+  }
+
+  console.log('[Freedom] Submitting via chat completions:', {
+    model,
+    endpoint,
+    isGemini,
+    aspectRatio,
+    imageSize: geminiImageSize ?? '(n/a)',
+    bodyKeys: Object.keys(requestBody),
+  });
+  params.onProgress?.({ phase: 'submitting', percent: 10, message: '提交请求…' });
+  throwIfAborted(params.signal);
 
   const response = await fetch(endpoint, {
     method: 'POST',
@@ -412,6 +748,7 @@ async function generateViaChatCompletions(
       'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify(requestBody),
+    signal: params.signal,
   });
 
   if (!response.ok) {
@@ -421,6 +758,7 @@ async function generateViaChatCompletions(
     throw toHttpError(msg, response.status, errorText);
   }
 
+  params.onProgress?.({ phase: 'finalizing', percent: 90, message: '解析结果…' });
   const data = await response.json();
   const imageUrl = extractChatCompletionsImage(data);
 
@@ -429,6 +767,7 @@ async function generateViaChatCompletions(
   }
 
   const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image');
+  params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
   return { url: imageUrl, mediaId };
 }
 
@@ -482,18 +821,35 @@ async function generateViaImagesEndpoint(
     model,
   };
 
+  // 尺寸下发：同时附带 aspect_ratio / size / width / height，
+  // 各供应商按各自识别字段自行匹配（未识别字段会被忽略）
+  const sized = aspectRatioToSize(params.aspectRatio, params.resolution);
   if (params.aspectRatio) body.aspect_ratio = params.aspectRatio;
   if (params.resolution) body.resolution = params.resolution;
+  if (sized) {
+    body.size = sized.size;
+    if (!params.width) body.width = sized.width;
+    if (!params.height) body.height = sized.height;
+  }
   if (params.width) body.width = params.width;
   if (params.height) body.height = params.height;
   if (params.negativePrompt) body.negative_prompt = params.negativePrompt;
   if (params.extraParams) {
     Object.assign(body, params.extraParams);
   }
+  // 参考图：单张走 image，多张走 images。具体字段名随各供应商有差异，
+  // 这里同时附带 image / images，未识别字段会被服务端忽略
+  if (params.referenceImages && params.referenceImages.length > 0) {
+    const refs = params.referenceImages.slice(0, 10);
+    body.image = refs[0];
+    if (refs.length > 1) body.images = refs;
+  }
 
   const imagePaths = getImageEndpointPaths(endpointTypes || []);
   const rootBase = getRootBaseUrl(baseUrl);
   const submitUrl = `${rootBase}${imagePaths.submit}`;
+  params.onProgress?.({ phase: 'submitting', percent: 10, message: '提交请求…' });
+  throwIfAborted(params.signal);
   const response = await fetch(submitUrl, {
     method: 'POST',
     headers: {
@@ -501,6 +857,7 @@ async function generateViaImagesEndpoint(
       'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
+    signal: params.signal,
   });
 
   if (!response.ok) {
@@ -515,12 +872,15 @@ async function generateViaImagesEndpoint(
 
   // If async task, poll for result
   if (!imageUrl && data.task_id) {
+    params.onProgress?.({ phase: 'processing', percent: 25, message: '排队 / 生成中…' });
     const pollUrl = `${rootBase}${imagePaths.poll(String(data.task_id))}`;
     imageUrl = await pollForResult(
       pollUrl,
       apiKey,
       IMAGE_POLL_INTERVAL,
-      IMAGE_POLL_MAX_ATTEMPTS
+      IMAGE_POLL_MAX_ATTEMPTS,
+      params.onProgress,
+      params.signal,
     );
   }
 
@@ -528,7 +888,9 @@ async function generateViaImagesEndpoint(
     throw new Error('No image URL in response');
   }
 
+  params.onProgress?.({ phase: 'finalizing', percent: 95, message: '保存到素材库…' });
   const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image');
+  params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
   return { url: imageUrl, taskId: data.task_id, mediaId };
 }
 
@@ -559,17 +921,33 @@ async function generateViaKlingImagesEndpoint(
 
   const body: Record<string, any> = { prompt: params.prompt, model: resolveKlingModelName(model) };
   if (params.aspectRatio) body.aspect_ratio = params.aspectRatio;
+  const sized = aspectRatioToSize(params.aspectRatio, params.resolution);
+  if (sized) {
+    body.size = sized.size;
+    body.width = sized.width;
+    body.height = sized.height;
+  }
   if (params.negativePrompt) body.negative_prompt = params.negativePrompt;
   if (params.extraParams) Object.assign(body, params.extraParams);
+  // Kling 参考图字段：image_list（多张）/ image（单张）
+  if (params.referenceImages && params.referenceImages.length > 0) {
+    const refs = params.referenceImages.slice(0, 10);
+    body.image = refs[0];
+    if (refs.length > 1) body.image_list = refs;
+  }
 
+  params.onProgress?.({ phase: 'submitting', percent: 10, message: '提交 Kling 任务…' });
+  throwIfAborted(params.signal);
   let response: Response;
   try {
     response = await fetch(`${rootBase}/${nativePath}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify(body),
+      signal: params.signal,
     });
-  } catch {
+  } catch (err: any) {
+    if (params.signal?.aborted || err?.name === 'AbortError') throw new FreedomCancelledError();
     return generateViaImagesEndpoint(params, model, apiKey, baseUrl);
   }
 
@@ -581,11 +959,14 @@ async function generateViaKlingImagesEndpoint(
   let imageUrl = extractImageUrl(data);
 
   if (!imageUrl && data.task_id) {
+    params.onProgress?.({ phase: 'processing', percent: 25, message: '排队 / 生成中…' });
     imageUrl = await pollForResult(
       `${rootBase}/${nativePath}/${data.task_id}`,
       apiKey,
       IMAGE_POLL_INTERVAL,
       IMAGE_POLL_MAX_ATTEMPTS,
+      params.onProgress,
+      params.signal,
     );
   }
 
@@ -593,7 +974,9 @@ async function generateViaKlingImagesEndpoint(
     return generateViaImagesEndpoint(params, model, apiKey, baseUrl);
   }
 
+  params.onProgress?.({ phase: 'finalizing', percent: 95, message: '保存到素材库…' });
   const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image');
+  params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
   return { url: imageUrl, taskId: data.task_id, mediaId };
 }
 
@@ -647,10 +1030,17 @@ async function generateViaMidjourneyEndpoint(
   if (modes) requestBody.accountFilter = { modes };
   if (/niji/i.test(model)) requestBody.botType = 'NIJI_JOURNEY';
   // 垫图：base64Array（图片引导，格式 data:image/png;base64,xxx）
-  if (Array.isArray(extra.base64Array) && extra.base64Array.length > 0) {
-    requestBody.base64Array = extra.base64Array;
+  const mjRefs: string[] = [];
+  if (Array.isArray(extra.base64Array)) mjRefs.push(...extra.base64Array);
+  if (params.referenceImages && params.referenceImages.length > 0) {
+    mjRefs.push(...params.referenceImages.filter((s) => typeof s === 'string' && s.startsWith('data:')));
+  }
+  if (mjRefs.length > 0) {
+    requestBody.base64Array = mjRefs.slice(0, 10);
   }
 
+  params.onProgress?.({ phase: 'submitting', percent: 10, message: '提交 Midjourney 任务…' });
+  throwIfAborted(params.signal);
   const submitResp = await fetch(submitUrl, {
     method: 'POST',
     headers: {
@@ -658,6 +1048,7 @@ async function generateViaMidjourneyEndpoint(
       'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify(requestBody),
+    signal: params.signal,
   });
   if (!submitResp.ok) {
     throw toHttpError('Midjourney submit failed', submitResp.status, await submitResp.text());
@@ -673,13 +1064,22 @@ async function generateViaMidjourneyEndpoint(
 
   const pollUrl = `${rootBase}/mj/task/${taskId}/fetch`;
   for (let i = 0; i < IMAGE_POLL_MAX_ATTEMPTS; i++) {
-    await new Promise((r) => setTimeout(r, 2500));
+    await abortableSleep(2500, params.signal);
     const pollResp = await fetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
+      signal: params.signal,
     });
     if (!pollResp.ok) continue;
     const pollData = await pollResp.json();
     const status = String(pollData.status || '').toLowerCase();
+    // MJ 服务端会返回字符串如 "50%"，提取数字
+    let serverPct: number | undefined;
+    if (typeof pollData.progress === 'string') {
+      const m = pollData.progress.match(/(\d+)/);
+      if (m) serverPct = parseInt(m[1], 10);
+    } else if (typeof pollData.progress === 'number') {
+      serverPct = pollData.progress > 1 ? pollData.progress : pollData.progress * 100;
+    }
     if (status === 'success' || status === 'succeeded' || status === 'completed') {
       const imageUrl =
         pollData.imageUrl ||
@@ -688,12 +1088,21 @@ async function generateViaMidjourneyEndpoint(
         pollData.data?.imageUrl ||
         pollData.data?.image_url;
       if (!imageUrl) throw new Error('Midjourney 成功但未返回图片 URL');
+      params.onProgress?.({ phase: 'finalizing', percent: 95, message: '保存到素材库…' });
       const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image');
+      params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
       return { url: imageUrl, taskId: String(taskId), mediaId };
     }
     if (status === 'failure' || status === 'failed' || status === 'error') {
       throw new Error(pollData.failReason || pollData.message || 'Midjourney 生成失败');
     }
+    const estimated = 25 + Math.min(55, Math.round((i / IMAGE_POLL_MAX_ATTEMPTS) * 60));
+    const percent = Math.min(85, Math.max(estimated, Math.round(serverPct ?? 0)));
+    params.onProgress?.({
+      phase: 'processing',
+      percent,
+      message: serverPct !== undefined ? `Midjourney 进度 ${serverPct}%` : (status ? `状态：${status}` : '生成中…'),
+    });
   }
 
   throw new Error('Midjourney 生成超时');
@@ -755,22 +1164,27 @@ async function generateViaIdeogramEndpoint(
   }
   if (typeof extra.num_images === 'number') form.append('num_images', String(extra.num_images));
 
+  params.onProgress?.({ phase: 'submitting', percent: 15, message: '提交 Ideogram 任务…' });
+  throwIfAborted(params.signal);
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
     },
     body: form,
+    signal: params.signal,
   });
 
   if (!response.ok) {
     throw toHttpError('Ideogram generate failed', response.status, await response.text());
   }
 
+  params.onProgress?.({ phase: 'finalizing', percent: 90, message: '解析结果…' });
   const data = await response.json();
   const imageUrl = extractImageUrl(data);
   if (!imageUrl) throw new Error('Ideogram 响应未包含图片 URL');
   const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image');
+  params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
   return { url: imageUrl, mediaId };
 }
 
@@ -791,15 +1205,30 @@ async function generateViaReplicateImageEndpoint(
   const input: Record<string, any> = { prompt: params.prompt };
   if (params.aspectRatio) input.aspect_ratio = params.aspectRatio;
   if (params.resolution) input.resolution = params.resolution;
+  const sized = aspectRatioToSize(params.aspectRatio, params.resolution);
+  if (sized) {
+    input.size = sized.size;
+    if (!params.width) input.width = sized.width;
+    if (!params.height) input.height = sized.height;
+  }
   if (params.width) input.width = params.width;
   if (params.height) input.height = params.height;
   if (params.negativePrompt) input.negative_prompt = params.negativePrompt;
   if (params.extraParams) Object.assign(input, params.extraParams);
+  // Replicate 参考图字段：image / image_input
+  if (params.referenceImages && params.referenceImages.length > 0) {
+    const refs = params.referenceImages.slice(0, 10);
+    input.image = refs[0];
+    if (refs.length > 1) input.image_input = refs;
+  }
 
+  params.onProgress?.({ phase: 'submitting', percent: 10, message: '提交 Replicate 任务…' });
+  throwIfAborted(params.signal);
   const submitResp = await fetch(submitUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
     body: JSON.stringify({ model, input }),
+    signal: params.signal,
   });
   if (!submitResp.ok) {
     throw toHttpError('Replicate submit failed', submitResp.status, await submitResp.text());
@@ -808,7 +1237,9 @@ async function generateViaReplicateImageEndpoint(
   const submitData = await submitResp.json();
   const directUrl = extractImageUrl(submitData);
   if (directUrl) {
+    params.onProgress?.({ phase: 'finalizing', percent: 95, message: '保存到素材库…' });
     const mediaId = saveToMediaLibrary(directUrl, params.prompt, 'ai-image');
+    params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
     return { url: directUrl, mediaId };
   }
 
@@ -816,10 +1247,12 @@ async function generateViaReplicateImageEndpoint(
   if (!predictionId) throw new Error('Replicate 返回空 prediction ID');
 
   const pollUrl = `${rootBase}/replicate/v1/predictions/${predictionId}`;
+  params.onProgress?.({ phase: 'processing', percent: 25, message: '排队 / 生成中…' });
   for (let i = 0; i < IMAGE_POLL_MAX_ATTEMPTS; i++) {
-    await new Promise(r => setTimeout(r, IMAGE_POLL_INTERVAL));
+    await abortableSleep(IMAGE_POLL_INTERVAL, params.signal);
     const pollResp = await fetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
+      signal: params.signal,
     });
     if (!pollResp.ok) continue;
     const pollData = await pollResp.json();
@@ -827,12 +1260,20 @@ async function generateViaReplicateImageEndpoint(
     if (status === 'succeeded') {
       const imageUrl = extractImageUrl(pollData);
       if (!imageUrl) throw new Error('Replicate 成功但未返回图片 URL');
+      params.onProgress?.({ phase: 'finalizing', percent: 95, message: '保存到素材库…' });
       const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image');
+      params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
       return { url: imageUrl, taskId: String(predictionId), mediaId };
     }
     if (status === 'failed' || status === 'canceled') {
       throw new Error(pollData.error || 'Replicate 图片生成失败');
     }
+    const estimated = 25 + Math.min(55, Math.round((i / IMAGE_POLL_MAX_ATTEMPTS) * 60));
+    params.onProgress?.({
+      phase: 'processing',
+      percent: Math.min(85, estimated),
+      message: status ? `状态：${status}` : '生成中…',
+    });
   }
   throw new Error('Replicate 图片生成超时');
 }
@@ -1173,6 +1614,7 @@ async function generateVideoViaUnified(
     const isLuma = (endpointTypes || []).some(t => /luma/i.test(t));
     const isRunway = (endpointTypes || []).some(t => /runway/i.test(t));
     const isGrok = (endpointTypes || []).some(t => /grok/i.test(t)) || /grok/i.test(model);
+    const isSeedance = /seedance|doubao-seedance/i.test(model);
 
     body = { model, prompt: params.prompt };
     const metadata: Record<string, any> = {};
@@ -1184,11 +1626,14 @@ async function generateVideoViaUnified(
 
     // AspectRatio 处理策略（各模型格式不同，按模型分别处理）：
     // - Runway: metadata.ratio（像素格式 1280:720）
+    // - Seedance: metadata.ratio（官方格式，如 "16:9"）
     // - Grok: 顶层 aspect_ratio（xAI 官方格式，支持 16:9/9:16/4:3/3:4/3:2/2:3/1:1）
     // - 其他统一格式模型: metadata.aspect_ratio
     if (params.aspectRatio) {
       if (isRunway) {
         metadata.ratio = toRunwayRatio(params.aspectRatio);
+      } else if (isSeedance) {
+        metadata.ratio = params.aspectRatio;
       } else if (isGrok) {
         body.aspect_ratio = params.aspectRatio;
       } else {
@@ -1209,17 +1654,53 @@ async function generateVideoViaUnified(
 
     // Image inputs (wan2.6, doubao, luma, vidu, minimax, runway, etc.)
     const grouped = groupVideoUploadFiles(params.uploadFiles);
-    if (grouped.single || grouped.first) {
-      body.image = await toUploadHttpUrl((grouped.single || grouped.first)!);
-    }
-    if (grouped.last) {
-      metadata.image_end = await toUploadHttpUrl(grouped.last);
-    }
-    // Reference images: vidu参考生视频 and similar models
-    if (grouped.references.length > 0) {
-      metadata.reference_images = await Promise.all(
-        grouped.references.map(async (f) => ({ url: await toUploadHttpUrl(f) }))
-      );
+
+    if (isSeedance && grouped.references.length > 0) {
+      // Seedance 多功能参考模式（官方格式）：
+      // - 图片 → 顶层 images 数组
+      // - 视频 → metadata.video_urls 数组
+      // - 音频 → metadata.audio_urls 数组
+      const imageUrls: string[] = [];
+      const videoUrls: string[] = [];
+      const audioUrls: string[] = [];
+      for (const ref of grouped.references) {
+        const url = await toUploadHttpUrl(ref);
+        const assetType = ref.assetType || inferAssetType(ref);
+        if (assetType === 'video') {
+          videoUrls.push(url);
+        } else if (assetType === 'audio') {
+          audioUrls.push(url);
+        } else {
+          imageUrls.push(url);
+        }
+      }
+      if (imageUrls.length > 0) body.images = imageUrls;
+      if (videoUrls.length > 0) metadata.video_urls = videoUrls;
+      if (audioUrls.length > 0) metadata.audio_urls = audioUrls;
+    } else if (isSeedance) {
+      // Seedance 图生视频模式：首帧/尾帧 → images 数组
+      const imageUrls: string[] = [];
+      if (grouped.single || grouped.first) {
+        imageUrls.push(await toUploadHttpUrl((grouped.single || grouped.first)!));
+      }
+      if (grouped.last) {
+        imageUrls.push(await toUploadHttpUrl(grouped.last));
+      }
+      if (imageUrls.length > 0) body.images = imageUrls;
+    } else {
+      // 非 Seedance 模型：原有逻辑
+      if (grouped.single || grouped.first) {
+        body.image = await toUploadHttpUrl((grouped.single || grouped.first)!);
+      }
+      if (grouped.last) {
+        metadata.image_end = await toUploadHttpUrl(grouped.last);
+      }
+      // Reference images: vidu参考生视频 and similar models
+      if (grouped.references.length > 0) {
+        metadata.reference_images = await Promise.all(
+          grouped.references.map(async (f) => ({ url: await toUploadHttpUrl(f) }))
+        );
+      }
     }
 
     if (Object.keys(metadata).length > 0) body.metadata = metadata;
@@ -1283,6 +1764,21 @@ async function generateVideoViaUnified(
   throw new Error('视频生成超时');
 }
 
+/**
+ * 从文件 MIME 类型或文件名推断素材类型（图片/视频/音频）
+ */
+function inferAssetType(file: FreedomVideoUploadFile): 'image' | 'video' | 'audio' {
+  const mime = (file.mimeType || '').toLowerCase();
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
+  if (mime.startsWith('image/')) return 'image';
+  // 根据文件名后缀推断
+  const ext = (file.fileName || '').split('.').pop()?.toLowerCase() || '';
+  if (['mp4', 'webm', 'mov', 'avi', 'mkv'].includes(ext)) return 'video';
+  if (['mp3', 'wav', 'ogg', 'aac', 'm4a', 'flac', 'wma'].includes(ext)) return 'audio';
+  return 'image';
+}
+
 async function generateVideoViaVolc(
   params: FreedomVideoParams,
   model: string,
@@ -1309,6 +1805,22 @@ async function generateVideoViaVolc(
   if (grouped.last) {
     const url = await toUploadHttpUrl(grouped.last);
     content.push({ type: 'image_url', image_url: { url }, role: 'last_frame' });
+  }
+
+  // 多功能参考素材（Seedance 2.0 多模态：图片/视频/音频引用）
+  if (grouped.references.length > 0) {
+    for (const ref of grouped.references) {
+      const url = await toUploadHttpUrl(ref);
+      const assetType = ref.assetType || inferAssetType(ref);
+      if (assetType === 'video') {
+        content.push({ type: 'video_url', video_url: { url } });
+      } else if (assetType === 'audio') {
+        content.push({ type: 'audio_url', audio_url: { url } });
+      } else {
+        // 默认按图片处理
+        content.push({ type: 'image_url', image_url: { url } });
+      }
+    }
   }
 
   const body = { model, content };
@@ -1604,23 +2116,31 @@ async function pollForResult(
   pollUrl: string,
   apiKey: string,
   interval: number,
-  maxAttempts: number
+  maxAttempts: number,
+  onProgress?: (info: FreedomProgress) => void,
+  signal?: AbortSignal,
 ): Promise<string | null> {
   for (let i = 0; i < maxAttempts; i++) {
-    await new Promise(resolve => setTimeout(resolve, interval));
+    await abortableSleep(interval, signal);
 
     try {
       const response = await fetch(pollUrl, {
         headers: { 'Authorization': `Bearer ${apiKey}` },
+        signal,
       });
 
       if (!response.ok) continue;
 
       const data = await response.json();
       const status = (data.status || data.state || '').toLowerCase();
+      // 服务器进度（0-100）若有则优先采用
+      const serverPct = typeof data.progress === 'number'
+        ? (data.progress > 1 ? data.progress : data.progress * 100)
+        : (typeof data.percent === 'number' ? data.percent : undefined);
 
       // Check completion - triple status normalization from Higgsfield
       if (status === 'completed' || status === 'succeeded' || status === 'success') {
+        onProgress?.({ phase: 'finalizing', percent: 90, message: '已完成，下载结果…' });
         return extractImageUrl(data) || extractVideoUrl(data);
       }
 
@@ -1629,9 +2149,18 @@ async function pollForResult(
         throw new Error(`Generation failed: ${data.error || data.message || status}`);
       }
 
-      // Still processing
+      // Still processing — 估算进度：25% 起步，逐步增长到 80%
+      const estimated = 25 + Math.min(55, Math.round((i / maxAttempts) * 60));
+      const percent = Math.max(estimated, Math.round(serverPct ?? 0));
+      onProgress?.({
+        phase: 'processing',
+        percent: Math.min(85, percent),
+        message: status ? `状态：${status}` : `生成中… (${i + 1}/${maxAttempts})`,
+      });
       console.log(`[Freedom] Polling attempt ${i + 1}/${maxAttempts}, status: ${status}`);
     } catch (err: any) {
+      if (err instanceof FreedomCancelledError) throw err;
+      if (err?.name === 'AbortError') throw new FreedomCancelledError();
       if (err.message?.startsWith('Generation failed')) throw err;
       console.warn(`[Freedom] Poll error (attempt ${i + 1}):`, err.message);
     }

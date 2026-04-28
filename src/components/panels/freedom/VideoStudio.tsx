@@ -1,18 +1,19 @@
 "use client";
 
 import { useMemo, useCallback, useEffect, useRef, useState } from 'react';
-import { VideoIcon, Loader2, Download, Sparkles, Upload, X } from 'lucide-react';
+import { VideoIcon, Loader2, Download, Sparkles, Upload, X, Type, ImageIcon, Layers, Film, Music } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Slider } from '@/components/ui/slider';
+import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { toast } from 'sonner';
-import { useFreedomStore } from '@/stores/freedom-store';
+import { useFreedomStore, type VideoFeatureMode, type ImageToVideoSubMode } from '@/stores/freedom-store';
 import { useAPIConfigStore } from '@/stores/api-config-store';
 import { ModelSelector } from './ModelSelector';
 import { GenerationHistory } from './GenerationHistory';
-import { generateFreedomVideo, type FreedomVideoUploadFile } from '@/lib/freedom/freedom-api';
+import { generateFreedomVideo, type FreedomVideoUploadFile, type FreedomVideoUploadRole } from '@/lib/freedom/freedom-api';
 import {
   getAspectRatiosForT2VModel,
   getDurationsForModel,
@@ -20,11 +21,59 @@ import {
 } from '@/lib/freedom/model-registry';
 import { resolveVeoUploadCapability, type VeoUploadCapability } from '@/lib/freedom/veo-capability';
 
+// ==================== 宽高比和分辨率常量 ====================
+
+const ASPECT_RATIO_OPTIONS = [
+  { value: '21:9', label: '21:9', desc: '超宽屏' },
+  { value: '16:9', label: '16:9', desc: '宽屏' },
+  { value: '4:3', label: '4:3', desc: '标准' },
+  { value: '1:1', label: '1:1', desc: '正方形' },
+  { value: '3:4', label: '3:4', desc: '竖屏' },
+  { value: '9:16', label: '9:16', desc: '手机竖屏' },
+] as const;
+
+const RESOLUTION_OPTIONS = [
+  { value: '480p', label: '480p', desc: 'SD 标清' },
+  { value: '720p', label: '720p', desc: 'HD 高清' },
+  { value: '1080p', label: '1080p', desc: 'FHD 全高清' },
+] as const;
+
+const FEATURE_MODE_OPTIONS: { value: VideoFeatureMode; label: string; icon: React.ReactNode; desc: string }[] = [
+  { value: 'text-to-video', label: '文生视频', icon: <Type className="h-4 w-4" />, desc: '输入文字描述生成视频' },
+  { value: 'image-to-video', label: '图生视频', icon: <ImageIcon className="h-4 w-4" />, desc: '上传图片生成视频' },
+  { value: 'multi-reference', label: '多功能参考', icon: <Layers className="h-4 w-4" />, desc: '上传多个视频、图片、音频' },
+];
+
+const I2V_SUB_MODE_OPTIONS: { value: ImageToVideoSubMode; label: string; desc: string }[] = [
+  { value: 'first-frame', label: '首帧功能', desc: '上传一张图片作为视频起始帧' },
+  { value: 'first-last-frame', label: '首尾帧功能', desc: '上传首帧和尾帧图片' },
+];
+
+/** 多功能参考模式常量 */
+const MULTI_REF_MAX_ASSETS = 12;
+const MULTI_REF_AUDIO_MAX_SECONDS = 15;
+
+/** Seedance 多功能参考模式可选视频时长范围 (4s–15s) */
+const SEEDANCE_MULTI_REF_DURATIONS = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] as const;
+
 interface LocalUploadAsset {
   id: string;
   dataUrl: string;
   fileName: string;
   mimeType: string;
+}
+
+/** 多功能参考模式的资源类型 */
+type MultiRefAssetType = 'video' | 'image' | 'audio';
+
+interface MultiRefAsset {
+  id: string;
+  dataUrl: string;
+  fileName: string;
+  mimeType: string;
+  assetType: MultiRefAssetType;
+  /** 音频时长（秒），仅 audio 类型有值 */
+  audioDuration?: number;
 }
 
 function resolveVideoCapabilityModelId(modelId: string): string {
@@ -60,12 +109,36 @@ function resolveVideoCapabilityModelId(modelId: string): string {
   return modelId;
 }
 
+/** 判断模型是否属于 Seedance 组别 */
+function isSeedanceGroupModel(modelId: string): boolean {
+  const lower = modelId.toLowerCase();
+  return lower.includes('seedance');
+}
+
 function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result || ''));
     reader.onerror = () => reject(new Error('文件读取失败'));
     reader.readAsDataURL(file);
+  });
+}
+
+/** 获取音频文件时长（秒） */
+function getAudioDuration(file: File): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const audio = new Audio();
+    audio.addEventListener('loadedmetadata', () => {
+      const dur = audio.duration;
+      URL.revokeObjectURL(url);
+      resolve(Number.isFinite(dur) ? dur : 0);
+    });
+    audio.addEventListener('error', () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('无法读取音频时长'));
+    });
+    audio.src = url;
   });
 }
 
@@ -169,6 +242,8 @@ export function VideoStudio() {
     videoResolution, setVideoResolution,
     videoResult, setVideoResult,
     videoGenerating, setVideoGenerating,
+    videoFeatureMode, setVideoFeatureMode,
+    videoI2VSubMode, setVideoI2VSubMode,
     addHistoryEntry,
   } = useFreedomStore();
 
@@ -201,11 +276,33 @@ export function VideoStudio() {
   const lastInputRef = useRef<HTMLInputElement>(null);
   const referenceInputRef = useRef<HTMLInputElement>(null);
 
+  /** 是否属于 seedance 组 */
+  const isSeedance = useMemo(() => isSeedanceGroupModel(selectedVideoModel), [selectedVideoModel]);
+
+  /** 多功能参考模式的资源列表 */
+  const [multiRefAssets, setMultiRefAssets] = useState<MultiRefAsset[]>([]);
+  const multiRefInputRef = useRef<HTMLInputElement>(null);
+
+  /** 计算当前功能模式下可用的 feature mode 列表（多功能参考仅对 seedance） */
+  const availableFeatureModes = useMemo(() => {
+    return FEATURE_MODE_OPTIONS.filter(
+      (opt) => opt.value !== 'multi-reference' || isSeedance,
+    );
+  }, [isSeedance]);
+
+  /** 当前模型不支持多功能参考时，自动回退 */
+  useEffect(() => {
+    if (videoFeatureMode === 'multi-reference' && !isSeedance) {
+      setVideoFeatureMode('text-to-video');
+    }
+  }, [isSeedance, videoFeatureMode, setVideoFeatureMode]);
+
   useEffect(() => {
     setSingleUpload(null);
     setFirstFrameUpload(null);
     setLastFrameUpload(null);
     setReferenceUploads([]);
+    setMultiRefAssets([]);
   }, [selectedVideoModel]);
 
   const toAsset = useCallback(async (file: File): Promise<LocalUploadAsset> => {
@@ -274,6 +371,76 @@ export function VideoStudio() {
   const removeReference = useCallback((id: string) => {
     setReferenceUploads((prev) => prev.filter((item) => item.id !== id));
   }, []);
+
+  /** 多功能参考模式：上传文件（视频/图片/音频） */
+  const handleMultiRefChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (multiRefAssets.length >= MULTI_REF_MAX_ASSETS) {
+      toast.error(`最多支持上传 ${MULTI_REF_MAX_ASSETS} 个参考素材`);
+      return;
+    }
+    try {
+      let assetType: MultiRefAssetType = 'image';
+      if (file.type.startsWith('video/')) assetType = 'video';
+      else if (file.type.startsWith('audio/')) assetType = 'audio';
+
+      // 音频时长校验
+      let audioDuration: number | undefined;
+      if (assetType === 'audio') {
+        audioDuration = await getAudioDuration(file);
+        const existingAudioTotal = multiRefAssets
+          .filter((a) => a.assetType === 'audio')
+          .reduce((sum, a) => sum + (a.audioDuration ?? 0), 0);
+        if (existingAudioTotal + audioDuration > MULTI_REF_AUDIO_MAX_SECONDS) {
+          toast.error(
+            `音频总时长不能超过 ${MULTI_REF_AUDIO_MAX_SECONDS} 秒（当前已 ${Math.round(existingAudioTotal)}s，新增 ${Math.round(audioDuration)}s）`,
+          );
+          return;
+        }
+      }
+
+      const dataUrl = await fileToDataUrl(file);
+      setMultiRefAssets((prev) => [
+        ...prev,
+        {
+          id: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+          dataUrl,
+          fileName: file.name,
+          mimeType: file.type,
+          assetType,
+          audioDuration,
+        },
+      ]);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : '读取文件失败';
+      toast.error(message);
+    }
+  }, [multiRefAssets]);
+
+  const removeMultiRefAsset = useCallback((id: string) => {
+    setMultiRefAssets((prev) => prev.filter((a) => a.id !== id));
+  }, []);
+
+  /** 计算某个素材在同类型中的序号标签，如 @image_file_1 */
+  const getMultiRefTag = useCallback((assetId: string): string => {
+    const asset = multiRefAssets.find((a) => a.id === assetId);
+    if (!asset) return '';
+    const prefix = asset.assetType === 'video' ? 'video_file' : asset.assetType === 'audio' ? 'audio_file' : 'image_file';
+    const sameTypeIndex = multiRefAssets.filter((a) => a.assetType === asset.assetType).findIndex((a) => a.id === assetId) + 1;
+    return `@${prefix}_${sameTypeIndex}`;
+  }, [multiRefAssets]);
+
+  /** 右键素材卡片 → 在 prompt 末尾插入引用标签 */
+  const insertRefToPrompt = useCallback((assetId: string) => {
+    const tag = getMultiRefTag(assetId);
+    if (!tag) return;
+    const prev = videoPrompt;
+    const sep = prev.length > 0 && !prev.endsWith(' ') && !prev.endsWith('\n') ? ' ' : '';
+    setVideoPrompt(`${prev}${sep}${tag} `);
+    toast.success(`已插入 ${tag}`);
+  }, [getMultiRefTag, videoPrompt, setVideoPrompt]);
 
   const veoUploadFiles = useMemo(
     () => buildVeoUploadFiles(
@@ -345,29 +512,86 @@ export function VideoStudio() {
       return;
     }
 
-    const uploadError = getVeoUploadValidationError(
-      veoCapability,
-      singleUpload,
-      firstFrameUpload,
-      lastFrameUpload,
-      referenceUploads,
-    );
-    if (uploadError) {
-      toast.error(uploadError);
-      return;
+    // 图生视频模式验证
+    if (videoFeatureMode === 'image-to-video') {
+      if (videoI2VSubMode === 'first-frame' && !firstFrameUpload) {
+        toast.error('请上传首帧图片');
+        return;
+      }
+      if (videoI2VSubMode === 'first-last-frame' && !firstFrameUpload) {
+        toast.error('请上传首帧图片');
+        return;
+      }
+    }
+
+    // 多功能参考模式验证
+    if (videoFeatureMode === 'multi-reference') {
+      if (multiRefAssets.length === 0) {
+        toast.error('请上传至少一个参考素材');
+        return;
+      }
+    }
+
+    // Veo 验证（仅文生视频模式或 veo 模型时使用旧逻辑）
+    if (videoFeatureMode === 'text-to-video') {
+      const uploadError = getVeoUploadValidationError(
+        veoCapability,
+        singleUpload,
+        firstFrameUpload,
+        lastFrameUpload,
+        referenceUploads,
+      );
+      if (uploadError) {
+        toast.error(uploadError);
+        return;
+      }
     }
 
     setVideoGenerating(true);
     setVideoResult(null);
 
     try {
+      // 构建上传文件列表
+      let uploadFiles: FreedomVideoUploadFile[] | undefined;
+
+      if (videoFeatureMode === 'text-to-video') {
+        uploadFiles = veoUploadFiles.length > 0 ? veoUploadFiles : undefined;
+      } else if (videoFeatureMode === 'image-to-video') {
+        const files: FreedomVideoUploadFile[] = [];
+        if (firstFrameUpload) {
+          files.push({
+            role: 'first',
+            dataUrl: firstFrameUpload.dataUrl,
+            fileName: firstFrameUpload.fileName,
+            mimeType: firstFrameUpload.mimeType,
+          });
+        }
+        if (videoI2VSubMode === 'first-last-frame' && lastFrameUpload) {
+          files.push({
+            role: 'last',
+            dataUrl: lastFrameUpload.dataUrl,
+            fileName: lastFrameUpload.fileName,
+            mimeType: lastFrameUpload.mimeType,
+          });
+        }
+        uploadFiles = files.length > 0 ? files : undefined;
+      } else if (videoFeatureMode === 'multi-reference') {
+        uploadFiles = multiRefAssets.map((a) => ({
+          role: 'reference' as FreedomVideoUploadRole,
+          dataUrl: a.dataUrl,
+          fileName: a.fileName,
+          mimeType: a.mimeType,
+          assetType: a.assetType,
+        }));
+      }
+
       const result = await generateFreedomVideo({
         prompt: videoPrompt,
         model: selectedVideoModel,
         aspectRatio: videoAspectRatio,
         duration: videoDuration,
         resolution: videoResolution || undefined,
-        uploadFiles: veoUploadFiles.length > 0 ? veoUploadFiles : undefined,
+        uploadFiles,
       });
 
       setVideoResult(result.url);
@@ -381,7 +605,8 @@ export function VideoStudio() {
           aspectRatio: videoAspectRatio,
           duration: videoDuration,
           resolution: videoResolution,
-          uploadCount: veoUploadFiles.length,
+          featureMode: videoFeatureMode,
+          uploadCount: uploadFiles?.length ?? 0,
         },
         createdAt: Date.now(),
         mediaId: result.mediaId,
@@ -397,11 +622,14 @@ export function VideoStudio() {
     }
   }, [
     videoPrompt,
+    videoFeatureMode,
+    videoI2VSubMode,
     veoCapability,
     singleUpload,
     firstFrameUpload,
     lastFrameUpload,
     referenceUploads,
+    multiRefAssets,
     setVideoGenerating,
     setVideoResult,
     videoAspectRatio,
@@ -431,65 +659,219 @@ export function VideoStudio() {
               )}
             </div>
 
-            {/* Aspect Ratio */}
-            {aspectRatios.length > 0 && (
-              <div className="space-y-2">
-                <Label className="text-sm font-medium">宽高比</Label>
-                <div className="flex flex-wrap gap-1.5">
-                  {aspectRatios.map((ratio) => (
+            {/* ========== 功能模式选择 ========== */}
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">功能模式</Label>
+              <div className="grid grid-cols-1 gap-1.5">
+                {availableFeatureModes.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setVideoFeatureMode(opt.value)}
+                    className={`flex items-center gap-2 rounded-md border px-3 py-2 text-left text-sm transition-colors ${
+                      videoFeatureMode === opt.value
+                        ? 'border-primary bg-primary/10 text-primary'
+                        : 'border-border hover:border-primary/40 text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {opt.icon}
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-xs">{opt.label}</div>
+                      <div className="text-[11px] opacity-70 truncate">{opt.desc}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* ========== 宽高比（始终显示） ========== */}
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">宽高比</Label>
+              <div className="flex flex-wrap gap-1.5">
+                {(aspectRatios.length > 0 ? aspectRatios : ASPECT_RATIO_OPTIONS.map((o) => o.value)).map((ratio) => {
+                  const meta = ASPECT_RATIO_OPTIONS.find((o) => o.value === ratio);
+                  return (
                     <Button
                       key={ratio}
                       variant={videoAspectRatio === ratio ? 'default' : 'outline'}
                       size="sm"
                       className="h-7 text-xs px-2.5"
                       onClick={() => setVideoAspectRatio(ratio)}
+                      title={meta?.desc}
                     >
                       {ratio}
                     </Button>
-                  ))}
-                </div>
+                  );
+                })}
               </div>
-            )}
+            </div>
 
-            {/* Duration */}
-            {durations.length > 0 && (
-              <div className="space-y-2">
-                <Label className="text-sm font-medium">时长 (秒)</Label>
-                <div className="flex flex-wrap gap-1.5">
-                  {durations.map((d) => (
+            {/* ========== 分辨率（始终显示） ========== */}
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">分辨率</Label>
+              <div className="flex flex-wrap gap-1.5">
+                {(resolutions.length > 0 ? resolutions : RESOLUTION_OPTIONS.map((o) => o.value)).map((r) => {
+                  const meta = RESOLUTION_OPTIONS.find((o) => o.value === String(r));
+                  return (
                     <Button
-                      key={d}
-                      variant={videoDuration === d ? 'default' : 'outline'}
+                      key={r}
+                      variant={videoResolution === String(r) ? 'default' : 'outline'}
                       size="sm"
                       className="h-7 text-xs px-2.5"
-                      onClick={() => setVideoDuration(d)}
+                      onClick={() => setVideoResolution(String(r))}
+                      title={meta?.desc}
                     >
-                      {d}s
+                      {String(r)}{meta ? ` ${meta.desc}` : ''}
                     </Button>
-                  ))}
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* ========== 视频时长（滑动条 + 输入框） ========== */}
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">视频时长 (秒)</Label>
+              <div className="flex items-center gap-3">
+                <span className="text-[11px] text-muted-foreground shrink-0">4s</span>
+                <Slider
+                  min={4}
+                  max={15}
+                  step={1}
+                  value={[Math.max(4, Math.min(15, videoDuration))]}
+                  onValueChange={([v]) => setVideoDuration(v)}
+                  className="flex-1"
+                />
+                <span className="text-[11px] text-muted-foreground shrink-0">15s</span>
+                <Input
+                  type="number"
+                  min={4}
+                  max={15}
+                  value={videoDuration}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    if (!Number.isNaN(v)) setVideoDuration(Math.max(4, Math.min(15, v)));
+                  }}
+                  className="w-14 h-7 text-xs text-center px-1 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                />
+              </div>
+            </div>
+
+            {/* ========== 图生视频模式：子模式 + 上传 ========== */}
+            {videoFeatureMode === 'image-to-video' && (
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium">图生视频子模式</Label>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {I2V_SUB_MODE_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => setVideoI2VSubMode(opt.value)}
+                        className={`rounded-md border px-2 py-1.5 text-xs transition-colors ${
+                          videoI2VSubMode === opt.value
+                            ? 'border-primary bg-primary/10 text-primary'
+                            : 'border-border hover:border-primary/40 text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        <div className="font-medium">{opt.label}</div>
+                        <div className="text-[10px] opacity-70">{opt.desc}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 首帧上传 */}
+                <div className={videoI2VSubMode === 'first-last-frame' ? 'grid grid-cols-2 gap-2' : ''}>
+                  {renderUploadSlot(
+                    '首帧图',
+                    firstFrameUpload,
+                    () => firstInputRef.current?.click(),
+                    () => setFirstFrameUpload(null),
+                    true,
+                  )}
+                  {videoI2VSubMode === 'first-last-frame' && renderUploadSlot(
+                    '尾帧图',
+                    lastFrameUpload,
+                    () => lastInputRef.current?.click(),
+                    () => setLastFrameUpload(null),
+                    false,
+                  )}
                 </div>
               </div>
             )}
 
-            {/* Resolution */}
-            {resolutions.length > 0 && (
-              <div className="space-y-2">
-                <Label className="text-sm font-medium">分辨率</Label>
-                <Select value={videoResolution} onValueChange={setVideoResolution}>
-                  <SelectTrigger className="h-9">
-                    <SelectValue placeholder="选择分辨率" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {resolutions.map((r) => (
-                      <SelectItem key={r} value={String(r)}>{String(r)}</SelectItem>
+            {/* ========== 多功能参考模式 ========== */}
+            {videoFeatureMode === 'multi-reference' && (
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium">参考素材（视频/图片/音频）</Label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {multiRefAssets.map((asset, index) => (
+                      <div
+                        key={asset.id}
+                        className="relative rounded border overflow-hidden group/card cursor-context-menu"
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          insertRefToPrompt(asset.id);
+                        }}
+                        title="右键点击插入引用到描述文字"
+                      >
+                        {asset.assetType === 'image' ? (
+                          <img
+                            src={asset.dataUrl}
+                            alt={`参考 ${index + 1}`}
+                            className="h-20 w-full object-cover"
+                          />
+                        ) : asset.assetType === 'video' ? (
+                          <div className="h-20 w-full flex flex-col items-center justify-center bg-muted/50 gap-1">
+                            <Film className="h-5 w-5 text-muted-foreground" />
+                            <span className="text-[10px] text-muted-foreground truncate max-w-full px-1">{asset.fileName}</span>
+                          </div>
+                        ) : (
+                          <div className="h-20 w-full flex flex-col items-center justify-center bg-muted/50 gap-1">
+                            <Music className="h-5 w-5 text-muted-foreground" />
+                            <span className="text-[10px] text-muted-foreground truncate max-w-full px-1">{asset.fileName}</span>
+                            {asset.audioDuration != null && (
+                              <span className="text-[9px] text-muted-foreground">{Math.round(asset.audioDuration)}s</span>
+                            )}
+                          </div>
+                        )}
+                        {/* 引用标签 */}
+                        <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-[9px] text-center py-0.5 opacity-0 group-hover/card:opacity-100 transition-opacity pointer-events-none">
+                          {getMultiRefTag(asset.id)} · 右键引用
+                        </span>
+                        <button
+                          type="button"
+                          className="absolute top-1 right-1 p-1 rounded bg-black/60 text-white"
+                          onClick={() => removeMultiRefAsset(asset.id)}
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
                     ))}
-                  </SelectContent>
-                </Select>
+                    {multiRefAssets.length < MULTI_REF_MAX_ASSETS && (
+                      <button
+                        type="button"
+                        onClick={() => multiRefInputRef.current?.click()}
+                        className="h-20 rounded border border-dashed flex flex-col items-center justify-center gap-1 text-muted-foreground hover:text-foreground hover:border-primary/40"
+                      >
+                        <Upload className="h-4 w-4" />
+                        <span className="text-[11px]">添加</span>
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    已上传 {multiRefAssets.length}/{MULTI_REF_MAX_ASSETS} 个素材 · 音频总时长限制 {MULTI_REF_AUDIO_MAX_SECONDS}s
+                    {multiRefAssets.some((a) => a.assetType === 'audio') && (
+                      <>（已用 {Math.round(multiRefAssets.filter((a) => a.assetType === 'audio').reduce((s, a) => s + (a.audioDuration ?? 0), 0))}s）</>
+                    )}
+                  </p>
+                </div>
               </div>
             )}
 
-            {/* Veo Dynamic Uploads */}
-            {veoCapability.isVeo && (
+            {/* ========== Veo 动态上传（仅文生视频模式下显示） ========== */}
+            {videoFeatureMode === 'text-to-video' && veoCapability.isVeo && (
               <div className="space-y-2">
                 <Label className="text-sm font-medium">上传素材（Veo）</Label>
                 {veoCapability.mode === 'none' ? (
@@ -606,6 +988,13 @@ export function VideoStudio() {
               accept="image/*"
               className="hidden"
               onChange={handleReferenceChange}
+            />
+            <input
+              ref={multiRefInputRef}
+              type="file"
+              accept="image/*,video/*,audio/*"
+              className="hidden"
+              onChange={handleMultiRefChange}
             />
 
             {/* Generate Button */}
