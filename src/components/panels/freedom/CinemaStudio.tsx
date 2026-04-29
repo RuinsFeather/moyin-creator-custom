@@ -43,6 +43,8 @@ export function CinemaStudio() {
   }, [cinemaPrompt, selectedCamera, selectedLens, selectedFocalLength, selectedAperture]);
 
   const handleGenerate = useCallback(async () => {
+    // 开始新任务前，关闭上一次保留的失败提示
+    toast.dismiss('freedom-cinema-error');
     if (!cinemaPrompt.trim()) {
       toast.error('请输入描述文字');
       return;
@@ -86,7 +88,11 @@ export function CinemaStudio() {
 
       toast.success('电影级图片生成成功！已保存到素材库');
     } catch (err: any) {
-      toast.error(`生成失败: ${err.message}`);
+      toast.error(`生成失败: ${err.message}`, {
+        id: 'freedom-cinema-error',
+        duration: Infinity,
+        closeButton: true,
+      });
     } finally {
       setCinemaGenerating(false);
     }

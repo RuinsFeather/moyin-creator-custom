@@ -667,6 +667,8 @@ export function VideoStudio() {
   };
 
   const handleGenerate = useCallback(async () => {
+    // 开始新任务前，关闭上一次保留的失败提示
+    toast.dismiss('freedom-video-error');
     if (!videoPrompt.trim()) {
       toast.error('请输入描述文字');
       return;
@@ -851,7 +853,11 @@ export function VideoStudio() {
             message,
             error: message,
           });
-          toast.error(`生成失败: ${message}`);
+          toast.error(`生成失败: ${message}`, {
+            id: 'freedom-video-error',
+            duration: Infinity,
+            closeButton: true,
+          });
           setTimeout(() => removeActiveTask(taskId), 6000);
         }
       } finally {

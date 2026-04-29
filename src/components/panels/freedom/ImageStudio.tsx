@@ -147,6 +147,8 @@ export function ImageStudio() {
   }, [addReferenceFiles]);
 
   const handleGenerate = useCallback(async () => {
+    // 开始新任务前，关闭上一次保留的失败提示
+    toast.dismiss('freedom-image-error');
     if (!imagePrompt.trim()) {
       toast.error('请输入描述文字');
       return;
@@ -242,7 +244,12 @@ export function ImageStudio() {
           setTimeout(() => removeActiveTask(taskId), 2500);
         } else {
           updateActiveTask(taskId, { status: 'error', message: err?.message || '生成失败', error: err?.message });
-          toast.error(`生成失败: ${err?.message || err}`);
+          // 保留提示直到下一次生成（duration: Infinity + 固定 id）
+          toast.error(`生成失败: ${err?.message || err}`, {
+            id: 'freedom-image-error',
+            duration: Infinity,
+            closeButton: true,
+          });
           setTimeout(() => removeActiveTask(taskId), 6000);
         }
       } finally {
