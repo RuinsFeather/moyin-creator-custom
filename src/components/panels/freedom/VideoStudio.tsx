@@ -4,6 +4,7 @@ import { useMemo, useCallback, useEffect, useRef, useState } from 'react';
 import { VideoIcon, Loader2, Download, Sparkles, Upload, X, Type, ImageIcon, Layers, Film, Music, StopCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { PromptTextarea } from './PromptTextarea';
 import { Label } from '@/components/ui/label';
 import { Slider } from '@/components/ui/slider';
 import { Input } from '@/components/ui/input';
@@ -1247,10 +1248,11 @@ export function VideoStudio() {
             {/* Prompt */}
             <div className="space-y-2">
               <Label className="text-sm font-medium">描述文字</Label>
-              <Textarea
+              <PromptTextarea
                 placeholder="描述你想生成的视频..."
                 value={videoPrompt}
-                onChange={(e) => setVideoPrompt(e.target.value)}
+                onChange={setVideoPrompt}
+                expandTitle="编辑描述文字（视频生成）"
                 className="min-h-[120px] resize-none"
               />
             </div>

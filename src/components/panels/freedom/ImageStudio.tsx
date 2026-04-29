@@ -4,6 +4,7 @@ import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { ImageIcon, Loader2, Download, Save, Sparkles, Archive, Upload, X, StopCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { PromptTextarea } from './PromptTextarea';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Slider } from '@/components/ui/slider';
@@ -484,10 +485,11 @@ export function ImageStudio() {
             {/* Prompt Input */}
             <div className="space-y-2">
               <Label className="text-sm font-medium">描述文字</Label>
-              <Textarea
+              <PromptTextarea
                 placeholder="描述你想生成的图片..."
                 value={imagePrompt}
-                onChange={(e) => setImagePrompt(e.target.value)}
+                onChange={setImagePrompt}
+                expandTitle="编辑描述文字（图片生成）"
                 className="min-h-[120px] resize-none"
               />
             </div>

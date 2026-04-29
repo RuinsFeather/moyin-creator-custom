@@ -4,6 +4,7 @@ import { useMemo, useCallback } from 'react';
 import { CameraIcon, Loader2, Download, Sparkles, Film } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { PromptTextarea } from './PromptTextarea';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
@@ -133,10 +134,11 @@ export function CinemaStudio() {
 
         {/* Prompt + Generate */}
         <div className="p-4 border-t space-y-3">
-          <Textarea
+          <PromptTextarea
             placeholder="描述你的电影场景..."
             value={cinemaPrompt}
-            onChange={(e) => setCinemaPrompt(e.target.value)}
+            onChange={setCinemaPrompt}
+            expandTitle="编辑描述文字（电影级生成）"
             className="min-h-[80px] resize-none"
           />
 
