@@ -93,9 +93,6 @@
 - 支持多个 AI 图像/视频生成服务商
 - API Key 轮询负载均衡
 - 任务队列管理，自动重试
-### 下载
-打包程序版本0.1.7，对应开源源码
-链接: https://pan.baidu.com/s/1ImH6tOIiuFxIDXC0fC-6Lg 提取码: 8888 
 
 
 ## 快速开始
@@ -184,14 +181,6 @@ moyin-creator/
 
 - 📧 Email: [memecalculate@gmail.com](mailto:memecalculate@gmail.com)
 - 🐙 GitHub: [https://github.com/MemeCalculate/moyin-creator](https://github.com/MemeCalculate/moyin-creator)
-
-### 联系我们
-
-
-
-<img src="https://github.com/user-attachments/assets/3469e172-8c4f-4da3-9865-7ed7a4a16734" width="200" alt="交流群" />
-
-<img src="docs/images/wechat-contact.png" width="200" alt="微信联系" />
 
 
 ---
