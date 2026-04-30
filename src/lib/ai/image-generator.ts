@@ -557,7 +557,19 @@ async function submitImageTask(
 
   if (referenceImages && referenceImages.length > 0) {
     console.log('[ImageGenerator] Adding reference images:', referenceImages.length);
-    requestData.image_urls = referenceImages;
+    // 压缩 base64 参考图，避免超大 payload 导致 API 错误
+    const compressed = await Promise.all(referenceImages.map((img) => compressReferenceImage(img)));
+    const originalSize = referenceImages.reduce((s, r) => s + r.length, 0);
+    const compressedSize = compressed.reduce((s, r) => s + r.length, 0);
+    console.log(
+      `[ImageGenerator] Compressed ${referenceImages.length} refs: ${(originalSize / 1024).toFixed(0)}KB → ${(compressedSize / 1024).toFixed(0)}KB`,
+    );
+
+    // 写入多个字段名以兼容不同提供商
+    requestData.image_urls = compressed;
+    requestData.images = compressed;
+    requestData.reference_images = compressed;
+    requestData.image = compressed.length === 1 ? compressed[0] : compressed;
   }
 
   console.log('[ImageGenerator] Submitting image task:', {
@@ -774,14 +786,39 @@ async function pollTaskStatus(
 
       if (mappedStatus === 'completed') {
         onProgress?.(100);
-        const images = data.result?.images ?? data.data?.result?.images;
+        const normalize = (v: any): string | undefined => {
+          if (!v) return undefined;
+          if (Array.isArray(v)) return normalize(v[0]);
+          if (typeof v === 'string') return v;
+          if (typeof v === 'object' && typeof v.url === 'string') return v.url;
+          return undefined;
+        };
+        const images = data.result?.images ?? data.data?.result?.images ?? data.images ?? data.data?.images;
+        const dataArr = Array.isArray(data.data) ? data.data : null;
         let resultUrl: string | undefined;
         if (images?.[0]) {
-          const urlField = images[0].url;
-          resultUrl = Array.isArray(urlField) ? urlField[0] : urlField;
+          resultUrl = normalize(images[0].url) || normalize(images[0].image_url) || normalize(images[0].output_url);
+          if (!resultUrl && typeof images[0].b64_json === 'string') {
+            const b64 = images[0].b64_json;
+            resultUrl = b64.startsWith('data:') ? b64 : `data:image/png;base64,${b64}`;
+          }
         }
-        resultUrl = resultUrl || data.output_url || data.result_url || data.url;
-        if (!resultUrl) throw new Error('Task completed but no URL in result');
+        if (!resultUrl && dataArr?.[0]) {
+          resultUrl = normalize(dataArr[0].url) || normalize(dataArr[0].image_url) || normalize(dataArr[0].output_url);
+          if (!resultUrl && typeof dataArr[0].b64_json === 'string') {
+            const b64 = dataArr[0].b64_json;
+            resultUrl = b64.startsWith('data:') ? b64 : `data:image/png;base64,${b64}`;
+          }
+        }
+        resultUrl = resultUrl || normalize(data.output_url) || normalize(data.result_url) || normalize(data.url) || normalize(data.image_url);
+        if (!resultUrl && typeof data.b64_json === 'string') {
+          const b64 = data.b64_json;
+          resultUrl = b64.startsWith('data:') ? b64 : `data:image/png;base64,${b64}`;
+        }
+        if (!resultUrl) {
+          console.error('[ImageGenerator] Poll completed but unexpected shape:', JSON.stringify(data).slice(0, 800));
+          throw new Error('Task completed but no URL in result');
+        }
         return resultUrl;
       }
 
@@ -855,10 +892,30 @@ export async function submitGridImageRequest(params: {
     requestBody.resolution = resolution;
   }
   if (referenceImages && referenceImages.length > 0) {
-    requestBody.image_urls = referenceImages;
+    // 压缩 base64 参考图，避免超大 payload 被中转站丢弃 / 截断
+    const compressed = await Promise.all(referenceImages.map((img) => compressReferenceImage(img)));
+    const originalSize = referenceImages.reduce((s, r) => s + r.length, 0);
+    const compressedSize = compressed.reduce((s, r) => s + r.length, 0);
+    console.log(
+      `[GridImageAPI] Compressed ${referenceImages.length} refs: ${(originalSize / 1024).toFixed(0)}KB → ${(compressedSize / 1024).toFixed(0)}KB`,
+    );
+
+    // 不同提供商对参考图字段的命名不同，全部写入以兼容：
+    // - OpenAI / 部分中转: image_urls
+    // - 火山方舟 / Doubao Seedream: image (单图) / images (数组)
+    // - 部分中转站: reference_images
+    requestBody.image_urls = compressed;
+    requestBody.images = compressed;
+    requestBody.reference_images = compressed;
+    // image 字段：单图模式取首张（doubao-seedream 严格要求 image 而不是 images）
+    requestBody.image = compressed.length === 1 ? compressed[0] : compressed;
   }
 
-  console.log('[GridImageAPI] Submitting to', endpoint);
+  console.log('[GridImageAPI] Submitting to', endpoint, {
+    model,
+    refCount: referenceImages?.length || 0,
+    bodyKeys: Object.keys(requestBody),
+  });
 
   const data = await retryOperation(async () => {
     // 每次重试动态取当前 key（利用 keyManager rotate 后的新 key）
@@ -915,21 +972,36 @@ export async function submitGridImageRequest(params: {
     if (!url) return undefined;
     if (Array.isArray(url)) return url[0] || undefined;
     if (typeof url === 'string') return url;
+    if (typeof url === 'object' && typeof url.url === 'string') return url.url;
     return undefined;
   };
 
   const dataField = data.data;
   const firstItem = Array.isArray(dataField) ? dataField[0] : dataField;
+  const imagesField = (data as any).images;
+  const firstImage = Array.isArray(imagesField) ? imagesField[0] : imagesField;
 
-  const imageUrl = normalizeUrl(firstItem?.url)
+  let imageUrl = normalizeUrl(firstItem?.url)
     || normalizeUrl(firstItem?.image_url)
     || normalizeUrl(firstItem?.output_url)
+    || normalizeUrl(firstImage?.url)
+    || normalizeUrl(firstImage?.image_url)
     || normalizeUrl(data.url)
     || normalizeUrl(data.image_url)
     || normalizeUrl(data.output_url);
 
+  // 兼容 b64_json 字段（DALL-E/GPT Image 原生格式）
+  if (!imageUrl) {
+    const b64 = firstItem?.b64_json || firstImage?.b64_json || (data as any).b64_json;
+    if (typeof b64 === 'string' && b64.length > 0) {
+      imageUrl = b64.startsWith('data:') ? b64 : `data:image/png;base64,${b64}`;
+    }
+  }
+
   const taskId = firstItem?.task_id?.toString()
     || firstItem?.id?.toString()
+    || firstImage?.task_id?.toString()
+    || firstImage?.id?.toString()
     || data.task_id?.toString()
     || data.id?.toString();
 
@@ -945,6 +1017,10 @@ export async function submitGridImageRequest(params: {
   if (taskId) {
     const pollUrl = `${rootBase}${imagePaths.poll(taskId)}`;
     return { imageUrl, taskId, pollUrl };
+  }
+
+  if (!imageUrl) {
+    console.error('[GridImageAPI] Unexpected response shape:', JSON.stringify(data).slice(0, 800));
   }
 
   return { imageUrl, taskId };

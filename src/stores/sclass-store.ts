@@ -233,6 +233,8 @@ export interface SClassEditorPrefs {
   useExemplar: boolean;
   activeTab: 'editing' | 'trailer';
   episodeViewScope: 'all' | 'episode';
+  /** 导演面板视频生成功能模式 */
+  directorVideoMode?: 'text-to-video' | 'image-to-video' | 'multi-reference';
 }
 
 // ==================== Store ====================
@@ -310,6 +312,7 @@ const defaultEditorPrefs: SClassEditorPrefs = {
   useExemplar: true,
   activeTab: 'editing',
   episodeViewScope: 'episode',
+  directorVideoMode: 'image-to-video',
 };
 
 const defaultProjectData = (): SClassProjectData => ({

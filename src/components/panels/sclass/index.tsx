@@ -21,9 +21,18 @@ import { useMediaPanelStore } from "@/stores/media-panel-store";
 import { useSClassStore } from "@/stores/sclass-store";
 import { SClassScenes } from "./sclass-scenes";
 import { Button } from "@/components/ui/button";
-import { Settings, Sparkles } from "lucide-react";
+import { Settings, Sparkles, Clapperboard, Film } from "lucide-react";
 
-export function SClassView() {
+interface SClassViewProps {
+  /**
+   * 'image'：分镜表菜单（仅分镜图片生成与提示词编辑）
+   * 'video'：导演菜单（仅分镜视频生成与预告片排列）
+   * undefined：默认 = video（兼容）
+   */
+  mode?: 'image' | 'video';
+}
+
+export function SClassView({ mode = 'director' }: SClassViewProps = {}) {
   // Sync active project ID from project-store
   const { activeProjectId } = useProjectStore();
   const { setActiveProjectId, ensureProject } = useDirectorStore();
@@ -48,13 +57,18 @@ export function SClassView() {
 
   // 判断是否有分镜数据可用
   const hasSplitScenes = splitScenes.length > 0;
+
+  // 根据 mode 派生头部文案
+  const headerTitle = mode === 'image' ? '分镜表' : '导演';
+  const headerHint = mode === 'image' ? '分镜图片生成' : '分镜视频生成';
+  const HeaderIcon = mode === 'image' ? Film : Clapperboard;
   
   // Render empty state when no split scenes available
   const renderEmptyState = () => (
     <div className="flex flex-col items-center justify-center h-full gap-4 p-6 text-center">
       <Sparkles className="h-12 w-12 text-muted-foreground/30" />
       <div>
-        <h3 className="font-medium text-sm mb-1">S级 · Seedance 2.0 多模态创作</h3>
+        <h3 className="font-medium text-sm mb-1">{headerTitle} · {mode === 'image' ? '分镜提示词与图片生成' : '分镜视频生成'}</h3>
         <p className="text-xs text-muted-foreground max-w-[280px]">
           请在右侧「剧本结构」栏中，点击 <span className="text-green-500 font-medium">+</span> 添加分镜到本面板，系统将自动分组进行多镜头合并叙事视频生成。
         </p>
@@ -80,9 +94,9 @@ export function SClassView() {
       <div className="p-3 pb-2 bg-panel">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Sparkles className="h-4 w-4 text-primary" />
-            <h2 className="font-semibold text-sm">S级</h2>
-            <span className="text-xs text-muted-foreground">Seedance 2.0</span>
+            <HeaderIcon className="h-4 w-4 text-primary" />
+            <h2 className="font-semibold text-sm">{headerTitle}</h2>
+            <span className="text-xs text-muted-foreground">{headerHint}</span>
           </div>
           <div className="flex items-center gap-2">
             {hasSplitScenes && (
@@ -106,7 +120,7 @@ export function SClassView() {
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-3 pt-1 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
         {hasSplitScenes || storyboardStatus === 'editing' ? (
-          <SClassScenes />
+          <SClassScenes mode={mode} />
         ) : (
           renderEmptyState()
         )}

@@ -16,7 +16,6 @@ import {
 
 // Panel imports
 import { ScriptView } from "@/components/panels/script";
-import { DirectorView } from "@/components/panels/director";
 import { SClassView } from "@/components/panels/sclass";
 import { CharactersView } from "@/components/panels/characters";
 import { ScenesView } from "@/components/panels/scenes";
@@ -26,6 +25,7 @@ import { SettingsPanel } from "@/components/panels/SettingsPanel";
 import { ExportView } from "@/components/panels/export";
 import { OverviewPanel } from "@/components/panels/overview";
 import { AssetsView } from "@/components/panels/assets";
+import { StoryboardTablePanel } from "@/components/panels/storyboard-table";
 
 export function Layout() {
   const { activeTab, inProject } = useMediaPanelStore();
@@ -44,7 +44,7 @@ export function Layout() {
 
   // Full-screen views (no resizable panels)
   // 这些板块有自己的多栏布局，不需要全局的预览和属性面板
-  const fullScreenTabs = ["export", "settings", "overview", "script", "characters", "scenes", "freedom", "assets"];
+  const fullScreenTabs = ["export", "settings", "overview", "script", "characters", "scenes", "freedom", "assets", "storyboard"];
   if (fullScreenTabs.includes(activeTab)) {
     return (
       <div className="h-full flex bg-background">
@@ -59,12 +59,14 @@ export function Layout() {
           {activeTab === "scenes" && <ScenesView />}
           {activeTab === "freedom" && <FreedomView />}
           {activeTab === "assets" && <AssetsView />}
+          {activeTab === "storyboard" && <StoryboardTablePanel />}
         </div>
       </div>
     );
   }
 
   // Only show timeline for director and media tabs
+  // 分镜表(storyboard) 不需要底部时间线（仅图片生成）
   const showTimeline = activeTab === "director" || activeTab === "sclass" || activeTab === "media";
 
   // Left panel content based on active tab
@@ -73,10 +75,9 @@ export function Layout() {
       case "script":
         return <ScriptView />;
       case "director":
-        // 保持原有 AI 导演功能
-        return <DirectorView />;
       case "sclass":
-        return <SClassView />;
+        // 导演：仅视频生成（分镜视频 + 预告片排列）
+        return <SClassView mode="video" />;
       case "characters":
         return <CharactersView />;
       case "scenes":

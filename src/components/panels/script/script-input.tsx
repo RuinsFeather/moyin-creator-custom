@@ -482,7 +482,7 @@ export function ScriptInput({
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="w-4 h-4 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px] font-bold">3</span>
-                    <span>选择分镜 → 右栏点「去AI导演生成视频」</span>
+                    <span>选择分镜 → 右栏点「去分镜表制作分镜图」</span>
                   </div>
                 </div>
               </div>

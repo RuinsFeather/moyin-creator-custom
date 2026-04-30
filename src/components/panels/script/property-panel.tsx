@@ -1368,7 +1368,7 @@ export function PropertyPanel({
               onClick={() => onGoToDirectorFromScene?.(scene.id)}
             >
               <Film className="h-4 w-4 mr-2" />
-              去AI导演生成视频
+              去分镜表制作分镜图
             </Button>
             <Button
               variant="outline"
@@ -1633,7 +1633,7 @@ export function PropertyPanel({
               onClick={() => onGoToDirector?.(shot.id)}
             >
               <ArrowRight className="h-4 w-4 mr-2" />
-              去AI导演生成
+              去分镜表制作分镜图
             </Button>
             <Button
               variant="secondary"

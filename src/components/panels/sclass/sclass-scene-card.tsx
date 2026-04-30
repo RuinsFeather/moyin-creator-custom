@@ -122,6 +122,13 @@ export interface SplitSceneCardProps {
   isAngleSwitching?: boolean;
   isQuadGridGenerating?: boolean;
   isGeneratingAny?: boolean;
+  /**
+   * 卡片展示模式：
+   * - 'image'：分镜表（仅图片生成与提示词编辑）
+   * - 'video'：导演（仅视频生成、起始帧只读、视频提示词与预览）
+   * - undefined：全量（兼容旧入口）
+   */
+  cardMode?: 'image' | 'video';
 }
 
 export function SClassSceneCard({
@@ -158,6 +165,7 @@ export function SClassSceneCard({
   isAngleSwitching,
   isQuadGridGenerating,
   isGeneratingAny,
+  cardMode,
 }: SplitSceneCardProps) {
   // 编辑状态：'none' | 'image' | 'video' | 'endFrame'
   const [editingPrompt, setEditingPrompt] = useState<'none' | 'image' | 'video' | 'endFrame'>('none');
@@ -758,7 +766,7 @@ export function SClassSceneCard({
 
         {/* 第二排：生成图片/视频按钮 + 视频预览/状态 */}
         <div className="flex items-center gap-2">
-          {!hasImage ? (
+          {cardMode !== 'video' && !hasImage ? (
             <div className="flex items-center gap-1">
               <Button
                 size="sm"
@@ -785,7 +793,7 @@ export function SClassSceneCard({
                 </Button>
               )}
             </div>
-          ) : (
+          ) : cardMode === 'image' ? null : (
             <div className="flex items-center gap-1">
               <Button
                 size="sm"
@@ -816,7 +824,7 @@ export function SClassSceneCard({
             </div>
           )}
           
-          {isVideoReady && scene.videoUrl && (
+          {isVideoReady && scene.videoUrl && cardMode !== 'image' && (
             <div className="flex items-center gap-1">
               <div 
                 className="flex-1 aspect-video max-w-[120px] bg-muted rounded overflow-hidden cursor-pointer relative"
@@ -859,7 +867,7 @@ export function SClassSceneCard({
             </div>
           )}
 
-          {isVideoFailed && (
+          {isVideoFailed && cardMode !== 'image' && (
             <span className={cn(
               "text-xs flex items-center gap-1",
               isVideoModerationSkipped 
@@ -1024,7 +1032,8 @@ export function SClassSceneCard({
                 )}
               </div>
 
-              {/* ━━ 视频提示词 ━━ 绿色左边框 */}
+              {/* ━━ 视频提示词 ━━ 绿色左边框（image 模式隐藏） */}
+              {cardMode !== 'image' && (
               <div className="border-l-[3px] border-green-500 pl-3 py-1 space-y-1.5">
                 <Label className="text-[10px] text-green-600 dark:text-green-400 flex items-center gap-1 font-medium">
                   <Play className="h-3 w-3" />
@@ -1061,6 +1070,7 @@ export function SClassSceneCard({
                   </div>
                 )}
               </div>
+              )}
             </div>
           ) : (
             /* 折叠摘要视图：彩色图标标签 + 内容预览 */
@@ -1088,6 +1098,7 @@ export function SClassSceneCard({
                   <span className="text-orange-600/70 dark:text-orange-400/70">{scene.endFramePromptZh || scene.endFramePrompt || '未设置'}</span>
                 </p>
               )}
+              {cardMode !== 'image' && (
               <p className="text-[10px] truncate flex items-center gap-1.5">
                 <span className="shrink-0 inline-flex items-center gap-0.5 text-green-600 dark:text-green-400 font-medium">
                   <Play className="h-2.5 w-2.5" /> 视频:
@@ -1103,6 +1114,7 @@ export function SClassSceneCard({
                   {scene.duration && <span className="ml-1 text-green-500/50">{scene.duration}s</span>}
                 </span>
               </p>
+              )}
             </div>
           )}
         </div>

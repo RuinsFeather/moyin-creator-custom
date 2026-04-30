@@ -755,15 +755,28 @@ async function callVolcVideoApi(
 
   const requestBody = { model, content };
 
-  console.log('[VideoGen] Volc format → POST /volc/v1/contents/generations/tasks', {
+  // 路径分支：火山方舟原生域名（ark.cn-beijing.volces.com/api/v3）使用 /contents/generations/tasks
+  // MemeFast 等中转使用 /volc/v1/contents/generations/tasks
+  const isVolcNative = /\.volces\.com|ark\.cn-beijing/i.test(baseUrl);
+  const normalizedBase = baseUrl.replace(/\/+$/, '');
+  const rootBase = normalizedBase.replace(/\/v\d+$/, '');
+  const submitUrl = isVolcNative
+    ? `${normalizedBase}/contents/generations/tasks`
+    : `${rootBase}/volc/v1/contents/generations/tasks`;
+  const pollUrlPrefix = isVolcNative
+    ? `${normalizedBase}/contents/generations/tasks`
+    : `${rootBase}/volc/v1/contents/generations/tasks`;
+
+  console.log('[VideoGen] Volc format → POST', submitUrl, {
     model,
     resolution,
     aspectRatio,
     duration,
     imageCount: imageWithRoles.filter(i => i.url).length,
+    isVolcNative,
   });
 
-  const submitResponse = await corsFetch(`${baseUrl}/volc/v1/contents/generations/tasks`, {
+  const submitResponse = await corsFetch(submitUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -817,7 +830,7 @@ async function callVolcVideoApi(
     throw new Error(detail || `doubao-seedance 返回空的任务 ID（响应格式未识别，请检查控制台日志）`);
   }
 
-  // 轮询: GET /volc/v1/contents/generations/tasks/{taskId}
+  // 轮询: GET <pollUrlPrefix>/{taskId}
   const pollInterval = 5000;
   const maxAttempts = 240; // 20分钟（Seedance 多模态参考耗时较长）
 
@@ -825,7 +838,7 @@ async function callVolcVideoApi(
     onProgress?.(Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99));
 
     const statusResponse = await corsFetch(
-      `${baseUrl}/volc/v1/contents/generations/tasks/${taskId}`,
+      `${pollUrlPrefix}/${taskId}`,
       {
         method: 'GET',
         headers: {

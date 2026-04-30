@@ -10,6 +10,7 @@ export function RightPanel() {
   // 根据当前Tab显示不同内容
   const renderContent = () => {
     switch (activeTab) {
+      case "storyboard":
       case "director":
       case "sclass":
         return (

@@ -19,7 +19,7 @@ import { create } from "zustand";
 import type { CharacterIdentityAnchors, CharacterNegativePrompt } from "@/types/script";
 
 // Tab-based navigation (simpler flat structure)
-export type Tab = "dashboard" | "overview" | "script" | "characters" | "scenes" | "freedom" | "director" | "sclass" | "assets" | "media" | "export" | "settings";
+export type Tab = "dashboard" | "overview" | "script" | "characters" | "scenes" | "freedom" | "storyboard" | "director" | "sclass" | "assets" | "media" | "export" | "settings";
 
 export interface NavItem {
   id: Tab;
@@ -34,8 +34,8 @@ export const mainNavItems: NavItem[] = [
   { id: "script", label: "剧本", icon: FileTextIcon, phase: "01" },
   { id: "characters", label: "角色", icon: UsersIcon, phase: "02" },
   { id: "scenes", label: "场景", icon: MapPinIcon, phase: "02" },
+  { id: "storyboard", label: "分镜表", icon: FilmIcon, phase: "03" },
   { id: "director", label: "导演", icon: ClapperboardIcon, phase: "03" },
-  { id: "sclass", label: "S级", icon: SparklesIcon, phase: "03" },
   { id: "assets", label: "资产", icon: FolderOpenIcon },
   { id: "media", label: "素材", icon: VideoIcon },
   { id: "export", label: "导出", icon: FilmIcon, phase: "04" },
@@ -59,7 +59,7 @@ export interface StageConfig {
 export const stages: StageConfig[] = [
   { id: "script", label: "剧本", phase: "Phase 01", icon: FileTextIcon, tabs: ["script"] },
   { id: "assets", label: "角色与场景", phase: "Phase 02", icon: UsersIcon, tabs: ["characters", "scenes"] },
-  { id: "director", label: "导演工作台", phase: "Phase 03", icon: ClapperboardIcon, tabs: ["director"] },
+  { id: "director", label: "导演工作台", phase: "Phase 03", icon: ClapperboardIcon, tabs: ["storyboard", "director"] },
   { id: "export", label: "成片与导出", phase: "Phase 04", icon: FilmIcon, tabs: ["export"] },
 ];
 
@@ -70,6 +70,7 @@ export const tabs: { [key in Tab]: { icon: LucideIcon; label: string; stage?: St
   characters: { icon: UsersIcon, label: "角色", stage: "assets" },
   scenes: { icon: MapPinIcon, label: "场景", stage: "assets" },
   freedom: { icon: PaletteIcon, label: "自由" },
+  storyboard: { icon: FilmIcon, label: "分镜表", stage: "director" },
   director: { icon: ClapperboardIcon, label: "导演", stage: "director" },
   sclass: { icon: SparklesIcon, label: "S级", stage: "director" },
   assets: { icon: FolderOpenIcon, label: "资产" },
@@ -208,6 +209,8 @@ interface MediaPanelStore {
   pendingDirectorData: PendingDirectorData | null;
   setPendingDirectorData: (data: PendingDirectorData | null) => void;
   goToDirectorWithData: (data: PendingDirectorData) => void;
+  /** 跳到「分镜表」页面（复用 pendingDirectorData，因为右侧 DirectorContextPanel 是共用的） */
+  goToStoryboardWithData: (data: PendingDirectorData) => void;
   // Character library data passing
   pendingCharacterData: PendingCharacterData | null;
   setPendingCharacterData: (data: PendingCharacterData | null) => void;
@@ -275,6 +278,12 @@ export const useMediaPanelStore = create<MediaPanelStore>((set) => ({
   goToDirectorWithData: (data) => set({
     pendingDirectorData: data,
     activeTab: "director",
+    activeStage: "director",
+    inProject: true,
+  }),
+  goToStoryboardWithData: (data) => set({
+    pendingDirectorData: data,
+    activeTab: "storyboard",
     activeStage: "director",
     inProject: true,
   }),
