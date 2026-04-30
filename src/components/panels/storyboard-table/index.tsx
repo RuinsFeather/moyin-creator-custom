@@ -54,12 +54,18 @@ import {
   Film,
   Users,
   MapPin,
+  Sparkles,
+  Camera,
 } from "lucide-react";
 import { CharacterSelector } from "@/components/panels/director/character-selector";
 import { SceneLibrarySelector } from "@/components/panels/director/scene-library-selector";
 import { generateFreedomImage } from "@/lib/freedom/freedom-api";
 import { persistSceneImage } from "@/lib/utils/image-persist";
 import { readImageAsBase64 } from "@/lib/image-storage";
+import {
+  optimizeScenePrompt,
+  analyzeShotDetails,
+} from "@/lib/script/prompt-optimizer";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
@@ -93,6 +99,8 @@ interface RowProps {
   onDeleteImage: (sceneId: number, frame: "first" | "end") => void;
   onAddExtraRefs: (sceneId: number, files: File[]) => Promise<void>;
   onRemoveExtraRef: (sceneId: number, idx: number) => void;
+  onOptimizePrompt: (sceneId: number, frame: "first" | "end") => Promise<void>;
+  optimizingPrompt: "first" | "end" | null;
   onDelete: (sceneId: number) => void;
 }
 
@@ -107,6 +115,8 @@ function StoryboardRow({
   onDeleteImage,
   onAddExtraRefs,
   onRemoveExtraRef,
+  onOptimizePrompt,
+  optimizingPrompt,
   onDelete,
 }: RowProps) {
   const [dragOver, setDragOver] = useState<"first" | "end" | "extra" | null>(null);
@@ -466,7 +476,23 @@ function StoryboardRow({
       <td className="p-2 w-[300px] text-xs">
         <div className="flex flex-col gap-1.5">
           <div>
-            <div className="text-[10px] text-muted-foreground mb-0.5">首帧提示词</div>
+            <div className="flex items-center justify-between mb-0.5">
+              <div className="text-[10px] text-muted-foreground">首帧提示词</div>
+              <button
+                type="button"
+                onClick={() => onOptimizePrompt(scene.id, "first")}
+                disabled={optimizingPrompt !== null}
+                title="AI 优化首帧提示词"
+                className="flex items-center gap-1 text-[10px] text-primary hover:text-primary/80 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {optimizingPrompt === "first" ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Sparkles className="h-3 w-3" />
+                )}
+                AI 优化
+              </button>
+            </div>
             <Textarea
               value={scene.imagePromptZh || ""}
               onChange={(e) =>
@@ -478,7 +504,23 @@ function StoryboardRow({
           </div>
           {scene.needsEndFrame && (
             <div>
-              <div className="text-[10px] text-muted-foreground mb-0.5">尾帧提示词</div>
+              <div className="flex items-center justify-between mb-0.5">
+                <div className="text-[10px] text-muted-foreground">尾帧提示词</div>
+                <button
+                  type="button"
+                  onClick={() => onOptimizePrompt(scene.id, "end")}
+                  disabled={optimizingPrompt !== null}
+                  title="AI 优化尾帧提示词"
+                  className="flex items-center gap-1 text-[10px] text-primary hover:text-primary/80 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {optimizingPrompt === "end" ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Sparkles className="h-3 w-3" />
+                  )}
+                  AI 优化
+                </button>
+              </div>
               <Textarea
                 value={scene.endFramePromptZh || ""}
                 onChange={(e) =>
@@ -657,6 +699,11 @@ export function StoryboardTablePanel() {
     updateSplitSceneImageStatus,
     updateSplitSceneEndFrame,
     updateSplitSceneEndFrameStatus,
+    updateSplitSceneImagePrompt,
+    updateSplitSceneEndFramePrompt,
+    updateSplitSceneShotSize,
+    updateSplitSceneDuration,
+    updateSplitSceneField,
   } = useDirectorStore();
 
   const { resourceSharing } = useAppSettingsStore();
@@ -669,6 +716,13 @@ export function StoryboardTablePanel() {
 
   // 每行额外参考图（sceneId -> dataURL[]）；本组件内 state，跟随会话
   const [extraRefsMap, setExtraRefsMap] = useState<Record<number, string[]>>({});
+
+  // AI 优化 / 分析状态
+  const [optimizingByScene, setOptimizingByScene] = useState<
+    Record<number, "first" | "end" | null>
+  >({});
+  const [isOptimizingAll, setIsOptimizingAll] = useState(false);
+  const [isAnalyzingShots, setIsAnalyzingShots] = useState(false);
 
   const filesToDataUrls = useCallback((files: File[]): Promise<string[]> => {
     return Promise.all(
@@ -707,6 +761,151 @@ export function StoryboardTablePanel() {
       return { ...prev, [sceneId]: list.filter((_, i) => i !== idx) };
     });
   }, []);
+
+  // ============ AI 提示词优化 ============
+
+  const optimizeOne = useCallback(
+    async (sceneId: number, frame: "first" | "end") => {
+      const scene = splitScenes.find((s) => s.id === sceneId);
+      if (!scene) return;
+      setOptimizingByScene((prev) => ({ ...prev, [sceneId]: frame }));
+      try {
+        const result = await optimizeScenePrompt({
+          frame,
+          promptZh:
+            frame === "first" ? scene.imagePromptZh : scene.endFramePromptZh,
+          prompt: frame === "first" ? scene.imagePrompt : scene.endFramePrompt,
+          sceneDescription: scene.sceneName || "",
+          actionSummary: scene.actionSummary || "",
+          dialogue: scene.dialogue || "",
+          shotSize: scene.shotSize || "",
+          cameraMovement: scene.cameraMovement || "",
+        });
+        if (frame === "first") {
+          updateSplitSceneImagePrompt(sceneId, result.prompt, result.promptZh);
+        } else {
+          updateSplitSceneEndFramePrompt(sceneId, result.prompt, result.promptZh);
+        }
+      } finally {
+        setOptimizingByScene((prev) => ({ ...prev, [sceneId]: null }));
+      }
+    },
+    [
+      splitScenes,
+      updateSplitSceneImagePrompt,
+      updateSplitSceneEndFramePrompt,
+    ],
+  );
+
+  const handleOptimizePrompt = useCallback(
+    async (sceneId: number, frame: "first" | "end") => {
+      const tid = `optimize-${sceneId}-${frame}`;
+      toast.loading(
+        `分镜 ${sceneId + 1} ${frame === "first" ? "首帧" : "尾帧"}提示词优化中…`,
+        { id: tid },
+      );
+      try {
+        await optimizeOne(sceneId, frame);
+        toast.success(
+          `分镜 ${sceneId + 1} ${frame === "first" ? "首帧" : "尾帧"}提示词已优化`,
+          { id: tid },
+        );
+      } catch (err: any) {
+        toast.error(`优化失败：${err?.message || err}`, { id: tid });
+      }
+    },
+    [optimizeOne],
+  );
+
+  const handleOptimizeAll = useCallback(async () => {
+    if (splitScenes.length === 0) {
+      toast.info("暂无分镜可优化");
+      return;
+    }
+    setIsOptimizingAll(true);
+    const tid = "optimize-all";
+    toast.loading(`正在批量优化 ${splitScenes.length} 个分镜的提示词…`, { id: tid });
+    let ok = 0;
+    let fail = 0;
+    for (const scene of splitScenes) {
+      const hasFirst = (scene.imagePromptZh || scene.imagePrompt || "").trim().length > 0;
+      const hasEnd =
+        scene.needsEndFrame &&
+        (scene.endFramePromptZh || scene.endFramePrompt || "").trim().length > 0;
+      if (hasFirst) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          await optimizeOne(scene.id, "first");
+          ok++;
+        } catch (err) {
+          console.error("[storyboard] optimize first failed", err);
+          fail++;
+        }
+      }
+      if (hasEnd) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          await optimizeOne(scene.id, "end");
+          ok++;
+        } catch (err) {
+          console.error("[storyboard] optimize end failed", err);
+          fail++;
+        }
+      }
+    }
+    setIsOptimizingAll(false);
+    if (fail === 0) {
+      toast.success(`已优化 ${ok} 条提示词`, { id: tid });
+    } else {
+      toast.warning(`成功 ${ok} 条，失败 ${fail} 条`, { id: tid });
+    }
+  }, [splitScenes, optimizeOne]);
+
+  // ============ AI 分析镜头参数（景别 / 时长 / 镜头运动） ============
+
+  const handleAnalyzeShots = useCallback(async () => {
+    if (splitScenes.length === 0) {
+      toast.info("暂无分镜可分析");
+      return;
+    }
+    setIsAnalyzingShots(true);
+    const tid = "analyze-shots";
+    toast.loading(`正在分析 ${splitScenes.length} 个分镜的镜头参数…`, { id: tid });
+    let ok = 0;
+    let fail = 0;
+    for (const scene of splitScenes) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const r = await analyzeShotDetails({
+          promptZh: scene.imagePromptZh,
+          prompt: scene.imagePrompt,
+          sceneDescription: scene.sceneName,
+          actionSummary: scene.actionSummary,
+          dialogue: scene.dialogue,
+          narrativeFunction: scene.narrativeFunction,
+        });
+        updateSplitSceneShotSize(scene.id, r.shotSize);
+        updateSplitSceneDuration(scene.id, r.duration);
+        updateSplitSceneField(scene.id, "cameraMovement", r.cameraMovement);
+        ok++;
+      } catch (err) {
+        console.error("[storyboard] analyze shot failed", err);
+        fail++;
+      }
+    }
+    setIsAnalyzingShots(false);
+    if (fail === 0) {
+      toast.success(`已分析并填充 ${ok} 个分镜的镜头参数`, { id: tid });
+    } else {
+      toast.warning(`成功 ${ok} 个，失败 ${fail} 个`, { id: tid });
+    }
+  }, [
+    splitScenes,
+    updateSplitSceneShotSize,
+    updateSplitSceneDuration,
+    updateSplitSceneField,
+  ]);
+
 
   // 收集角色参考图
   const allCharacters = useCharacterLibraryStore((s) => s.characters);
@@ -965,6 +1164,46 @@ export function StoryboardTablePanel() {
           </Button>
           <Button
             size="sm"
+            variant="outline"
+            className="h-7 text-xs"
+            disabled={isOptimizingAll || isAnalyzingShots || splitScenes.length === 0}
+            onClick={handleOptimizeAll}
+            title="使用「剧本分析」模型批量优化所有分镜的中英文提示词"
+          >
+            {isOptimizingAll ? (
+              <>
+                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                优化中
+              </>
+            ) : (
+              <>
+                <Sparkles className="h-3 w-3 mr-1" />
+                AI 优化提示词
+              </>
+            )}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 text-xs"
+            disabled={isOptimizingAll || isAnalyzingShots || splitScenes.length === 0}
+            onClick={handleAnalyzeShots}
+            title="根据描述自动推断景别 / 时长 / 镜头运动"
+          >
+            {isAnalyzingShots ? (
+              <>
+                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                分析中
+              </>
+            ) : (
+              <>
+                <Camera className="h-3 w-3 mr-1" />
+                AI 补全镜头参数
+              </>
+            )}
+          </Button>
+          <Button
+            size="sm"
             className="h-7 text-xs"
             disabled={isAnyGenerating || splitScenes.length === 0}
             onClick={handleGenerateAll}
@@ -1069,6 +1308,8 @@ export function StoryboardTablePanel() {
                   onDeleteImage={handleDeleteImage}
                   onAddExtraRefs={handleAddExtraRefs}
                   onRemoveExtraRef={handleRemoveExtraRef}
+                  onOptimizePrompt={handleOptimizePrompt}
+                  optimizingPrompt={optimizingByScene[scene.id] || null}
                   onDelete={deleteSplitScene}
                 />
               ))}
