@@ -4,7 +4,7 @@ import { useMemo, useCallback, useEffect, useRef, useState } from 'react';
 import { VideoIcon, Loader2, Download, Sparkles, Upload, X, Type, ImageIcon, Layers, Film, Music, StopCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { PromptTextarea } from './PromptTextarea';
+import { PromptTextarea, type PromptTextareaRef } from './PromptTextarea';
 import { Label } from '@/components/ui/label';
 import { Slider } from '@/components/ui/slider';
 import { Input } from '@/components/ui/input';
@@ -280,6 +280,8 @@ export function VideoStudio() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const selectedTaskIdRef = useRef<string | null>(null);
   selectedTaskIdRef.current = selectedTaskId;
+
+  const promptTextareaRef = useRef<PromptTextareaRef>(null);
 
   // 仅本 studio (video) 的活动任务
   const videoActiveTasks = useMemo(
@@ -570,14 +572,20 @@ export function VideoStudio() {
     return `@${prefix}_${sameTypeIndex}`;
   }, [multiRefAssets]);
 
-  /** 右键素材卡片 → 在 prompt 末尾插入引用标签 */
+  /** 右键素材卡片 → 在光标位置插入引用标签 */
   const insertRefToPrompt = useCallback((assetId: string) => {
     const tag = getMultiRefTag(assetId);
     if (!tag) return;
-    const prev = videoPrompt;
-    const sep = prev.length > 0 && !prev.endsWith(' ') && !prev.endsWith('\n') ? ' ' : '';
-    setVideoPrompt(`${prev}${sep}${tag} `);
-    toast.success(`已插入 ${tag}`);
+    if (promptTextareaRef.current) {
+      promptTextareaRef.current.insertAtCursor(tag);
+      toast.success(`已在光标位置插入 ${tag}`);
+    } else {
+      // 回退：末尾追加
+      const prev = videoPrompt;
+      const sep = prev.length > 0 && !prev.endsWith(' ') && !prev.endsWith('\n') ? ' ' : '';
+      setVideoPrompt(`${prev}${sep}${tag} `);
+      toast.success(`已插入 ${tag}`);
+    }
   }, [getMultiRefTag, videoPrompt, setVideoPrompt]);
 
   const veoUploadFiles = useMemo(
@@ -1249,6 +1257,7 @@ export function VideoStudio() {
             <div className="space-y-2">
               <Label className="text-sm font-medium">描述文字</Label>
               <PromptTextarea
+                ref={promptTextareaRef}
                 placeholder="描述你想生成的视频..."
                 value={videoPrompt}
                 onChange={setVideoPrompt}
