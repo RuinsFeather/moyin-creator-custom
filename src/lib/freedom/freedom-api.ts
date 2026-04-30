@@ -1008,6 +1008,10 @@ function mapFriendlyErrorMessage(body: string): string | null {
       || /input image may contain real person/i.test(body)) {
     return '疑似包含真实人物，因隐私保护策略拒绝处理';
   }
+  // 火山引擎：账户欠费
+  if (/AccountOverdueError/i.test(body) || /account has an overdue balance/i.test(body)) {
+    return '服务端拒绝请求，可能因为火山引擎（Volc）账户余额不足或已欠费';
+  }
   return null;
 }
 
