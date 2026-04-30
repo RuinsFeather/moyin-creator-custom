@@ -15,7 +15,6 @@ import type { CharacterIdentityAnchors, CharacterNegativePrompt, PromptLanguage 
 import { useActiveScriptProject } from "@/stores/script-store";
 import { useMediaPanelStore } from "@/stores/media-panel-store";
 import { useMediaStore } from "@/stores/media-store";
-import { generateCharacterImage as generateCharacterImageAPI } from "@/lib/ai/image-generator";
 import { saveImageToLocal } from "@/lib/image-storage";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,17 +36,16 @@ import {
   Loader2,
   ImagePlus,
   X,
-  Shuffle,
   FileImage,
   ChevronDown,
   ChevronRight,
   AlertTriangle,
   CheckCircle2,
   Copy,
+  UploadCloud,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
-import { StylePicker } from "@/components/ui/style-picker";
 import { getStyleById, getStylePrompt, type VisualStyleId, DEFAULT_STYLE_ID } from "@/lib/constants/visual-styles";
 
 // Gender presets
@@ -89,8 +87,6 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
     selectCharacter,
     generationStatus,
     generatingCharacterId,
-    setGenerationStatus,
-    setGeneratingCharacter,
     currentFolderId,
   } = useCharacterLibraryStore();
   const { activeProjectId } = useProjectStore();
@@ -128,14 +124,11 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
   // === 集作用域（从 pending 数据透传）===
   const [sourceEpisodeId, setSourceEpisodeId] = useState<string | undefined>();
   const [referenceImages, setReferenceImages] = useState<string[]>([]);
+  const [isDraggingDesignImage, setIsDraggingDesignImage] = useState(false);
   const [styleId, setStyleId] = useState<string>(DEFAULT_STYLE_ID);
   const [selectedElements, setSelectedElements] = useState<SheetElementId[]>(
     SHEET_ELEMENTS.filter(e => e.default).map(e => e.id)
   );
-  
-  // Preview state
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [previewCharacterId, setPreviewCharacterId] = useState<string | null>(null);
   
   // AI 校准信息折叠区状态：有数据时默认展开
   const [calibrationExpanded, setCalibrationExpanded] = useState(true);
@@ -266,12 +259,12 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
     );
   };
 
-  const handleImageChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
+  const addDesignImages = async (files: FileList | File[]) => {
     if (!files) return;
 
     const newImages: string[] = [];
     for (const file of Array.from(files)) {
+      if (!file.type.startsWith('image/')) continue;
       if (referenceImages.length + newImages.length >= 3) break;
       try {
         const base64 = await fileToBase64(file);
@@ -284,7 +277,18 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
     if (newImages.length > 0) {
       setReferenceImages([...referenceImages, ...newImages].slice(0, 3));
     }
+  };
+
+  const handleImageChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    await addDesignImages(files || []);
     e.target.value = "";
+  };
+
+  const handleDesignImageDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDraggingDesignImage(false);
+    await addDesignImages(e.dataTransfer.files);
   };
 
   const removeImage = (index: number) => {
@@ -319,14 +323,12 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
     setReferenceImages([]);
     setStyleId(DEFAULT_STYLE_ID);
     setSelectedElements(SHEET_ELEMENTS.filter(e => e.default).map(e => e.id));
-    setPreviewUrl(null);
-    setPreviewCharacterId(null);
     // === 重置 AI 校准状态 ===
     setCalibrationExpanded(false);
     setIsManuallyModified(false);
   };
 
-  // 创建新角色并生成图片（始终新建，不会覆盖已有角色）
+  // 创建新角色（始终新建，不会覆盖已有角色）
   const handleCreateAndGenerate = async () => {
     if (!name.trim()) {
       toast.error("请输入角色名称");
@@ -336,11 +338,6 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
       toast.error("请输入角色描述");
       return;
     }
-    if (selectedElements.length === 0) {
-      toast.error("请至少选择一个生成内容");
-      return;
-    }
-
     // 始终创建新角色
     const targetId = addCharacter({
       name: name.trim(),
@@ -370,156 +367,41 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
     });
     selectCharacter(targetId);
     onCharacterCreated?.(targetId);
+    if (referenceImages.length > 0) {
+      toast.loading("正在保存人物设定图...", { id: 'saving-character-design' });
+      try {
+        const localPath = await saveImageToLocal(
+          referenceImages[0],
+          'characters',
+          `${name.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_')}_${Date.now()}.png`
+        );
+        addCharacterView(targetId, { viewType: 'front', imageUrl: localPath });
 
-    // 开始生成图片
-    setGenerationStatus('generating');
-    setGeneratingCharacter(targetId);
-
-    try {
-      // 构建提示词：根据语言偏好选择提示词 + 6层身份锚点 + 参考图优先级逻辑 + 年代信息
-      // 获取实时的语言偏好（优先使用 pending 传来的，其次从 scriptProject 读取）
-      const effectiveLang = promptLanguage || scriptProject?.promptLanguage || 'zh';
-      const prompt = buildCharacterSheetPrompt(
-        description, 
-        name, 
-        selectedElements, 
-        styleId, 
-        visualPromptEn,
-        visualPromptZh,
-        effectiveLang,
-        identityAnchors,
-        referenceImages.length > 0,  // 有参考图时简化描述
-        storyYear,
-        era
-      );
-      const stylePreset = styleId && styleId !== 'random' 
-        ? getStyleById(styleId) 
-        : null;
-      const isRealistic = stylePreset?.category === 'real';
-      
-      // 构建负面提示词：合并角色特定的负面提示词
-      let negativePrompt = isRealistic
-        ? 'blurry, low quality, watermark, text, cropped, anime, cartoon, illustration'
-        : 'blurry, low quality, watermark, text, cropped';
-      
-      // 如果有角色特定的负面提示词，追加到后面
-      if (charNegativePrompt) {
-        const avoidList = charNegativePrompt.avoid || [];
-        const styleExclusions = charNegativePrompt.styleExclusions || [];
-        const charNegatives = [...avoidList, ...styleExclusions].join(', ');
-        if (charNegatives) {
-          negativePrompt = `${negativePrompt}, ${charNegatives}`;
-        }
+        const aiFolderId = getOrCreateCategoryFolder('ai-image');
+        addMediaFromUrl({
+          url: localPath,
+          name: `角色-${name || '未命名'}-设定图`,
+          type: 'image',
+          source: 'ai-image',
+          folderId: aiFolderId,
+          projectId: activeProjectId || undefined,
+        });
+        toast.success("角色已创建，人物设定图已保存", { id: 'saving-character-design' });
+      } catch (error) {
+        console.error('Failed to save character design image:', error);
+        toast.error("角色已创建，但设定图保存失败", { id: 'saving-character-design' });
       }
-
-      const result = await generateCharacterImageAPI({
-        prompt,
-        negativePrompt,
-        aspectRatio: '1:1',
-        referenceImages,
-        styleId,
-      });
-      
-      setPreviewUrl(result.imageUrl);
-      setPreviewCharacterId(targetId);
-      setGenerationStatus('completed');
-      toast.success("图片生成完成，请预览确认");
-    } catch (error) {
-      const err = error as Error;
-      setGenerationStatus('error', err.message);
-      toast.error(`生成失败: ${err.message}`);
-    } finally {
-      setGeneratingCharacter(null);
+    } else {
+      toast.success("角色已创建，可在详情页的“生成图像”中生成设定图");
     }
+
+    resetForm();
   };
-
-  const handleSavePreview = async () => {
-    if (!previewUrl || !previewCharacterId) return;
-
-    toast.loading("正在保存图片到本地...", { id: 'saving-preview' });
-    
-    try {
-      // Save image to local storage
-      const localPath = await saveImageToLocal(
-        previewUrl, 
-        'characters', 
-        `${name.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_')}.png`
-      );
-
-      // Save view with local path
-      addCharacterView(previewCharacterId, {
-        viewType: 'front',
-        imageUrl: localPath,
-      });
-
-      const visualTraits = `${name} character, ${description.substring(0, 200)}`;
-      updateCharacter(previewCharacterId, { visualTraits });
-
-      // 同步归档到素材库 AI图片 文件夹
-      const aiFolderId = getOrCreateCategoryFolder('ai-image');
-      addMediaFromUrl({
-        url: localPath,
-        name: `角色-${name || '未命名'}`,
-        type: 'image',
-        source: 'ai-image',
-        folderId: aiFolderId,
-        projectId: activeProjectId || undefined,
-      });
-
-      setPreviewUrl(null);
-      setPreviewCharacterId(null);
-      toast.success("角色设定图已保存到本地！", { id: 'saving-preview' });
-    } catch (error) {
-      console.error('Failed to save preview:', error);
-      toast.error("保存失败", { id: 'saving-preview' });
-    }
-  };
-
-  const handleDiscardPreview = () => {
-    setPreviewUrl(null);
-    setPreviewCharacterId(null);
-  };
-
-  // If showing preview
-  if (previewUrl) {
-    return (
-      <div className="h-full flex flex-col overflow-hidden">
-        <div className="p-3 pb-2 border-b shrink-0">
-          <h3 className="font-medium text-sm">预览角色设定图</h3>
-        </div>
-        <ScrollArea className="flex-1 min-h-0">
-          <div className="p-3 space-y-4 pb-32">
-            <div className="relative rounded-lg overflow-hidden border-2 border-amber-500/50 bg-muted">
-              <img 
-                src={previewUrl} 
-                alt="角色设定预览"
-                className="w-full h-auto"
-              />
-              <div className="absolute top-2 left-2 bg-amber-500 text-white text-xs px-2 py-1 rounded">
-                预览
-              </div>
-            </div>
-          </div>
-        </ScrollArea>
-        <div className="p-3 border-t space-y-2 shrink-0">
-          <Button onClick={handleSavePreview} className="w-full">
-            保存设定图
-          </Button>
-          <Button onClick={handleCreateAndGenerate} variant="outline" className="w-full" disabled={isGenerating}>
-            重新生成
-          </Button>
-          <Button onClick={handleDiscardPreview} variant="ghost" className="w-full text-muted-foreground" size="sm">
-            放弃并返回
-          </Button>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
       <div className="p-3 pb-2 border-b shrink-0">
-        <h3 className="font-medium text-sm">生成控制台</h3>
+        <h3 className="font-medium text-sm">角色创作台</h3>
       </div>
       
       <div className="flex-1 min-h-0 overflow-y-auto">
@@ -884,28 +766,36 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
             </div>
           )}
 
-          {/* Style */}
-          <div className="space-y-2">
-            <Label className="text-xs">视觉风格</Label>
-            <StylePicker
-              value={styleId}
-              onChange={(id) => setStyleId(id)}
-              disabled={isGenerating}
-            />
-          </div>
-
-          {/* Reference images */}
+          {/* Character design image upload */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <Label className="text-xs">参考图片</Label>
+              <Label className="text-xs">人物设定图</Label>
               <span className="text-xs text-muted-foreground">{referenceImages.length}/3</span>
+            </div>
+            <div
+              className={cn(
+                "rounded-lg border-2 border-dashed p-3 transition-colors",
+                isDraggingDesignImage ? "border-primary bg-primary/5" : "border-muted-foreground/25",
+                isGenerating && "opacity-50 pointer-events-none"
+              )}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDraggingDesignImage(true);
+              }}
+              onDragLeave={() => setIsDraggingDesignImage(false)}
+              onDrop={handleDesignImageDrop}
+            >
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <UploadCloud className="h-4 w-4" />
+                <span>拖拽上传人物设定图，或点击下方上传。第一张将作为角色主设定图。</span>
+              </div>
             </div>
             <div className="flex gap-2 flex-wrap">
               {referenceImages.map((img, i) => (
                 <div key={i} className="relative group">
                   <img
                     src={img}
-                    alt={`参考图 ${i + 1}`}
+                    alt={`人物设定图 ${i + 1}`}
                     className="w-14 h-14 object-cover rounded-md border"
                   />
                   <button
@@ -939,37 +829,12 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
             </div>
           </div>
 
-          {/* Sheet elements */}
-          <div className="space-y-2">
-            <Label className="text-xs">生成内容</Label>
-            <div className="space-y-1.5">
-              {SHEET_ELEMENTS.map((element) => (
-                <div
-                  key={element.id}
-                  className={cn(
-                    "flex items-center gap-2 p-2 rounded border text-sm cursor-pointer transition-all",
-                    "hover:border-foreground/20",
-                    selectedElements.includes(element.id) && "border-primary bg-primary/5",
-                    isGenerating && "opacity-50 cursor-not-allowed"
-                  )}
-                  onClick={() => !isGenerating && toggleElement(element.id)}
-                >
-                  <Checkbox
-                    checked={selectedElements.includes(element.id)}
-                    disabled={isGenerating}
-                  />
-                  <span>{element.label}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
           {/* Action button - inside scroll area */}
           <div className="pt-2 pb-4 space-y-2">
             <Button 
               onClick={handleCreateAndGenerate} 
               className="w-full"
-              disabled={isGenerating || !name.trim() || !description.trim() || selectedElements.length === 0}
+              disabled={isGenerating || !name.trim() || !description.trim()}
             >
               {isGenerating ? (
                 <>
@@ -979,7 +844,7 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
               ) : (
                 <>
                   <FileImage className="h-4 w-4 mr-2" />
-                  生成设定图
+                  创建此角色
                 </>
               )}
             </Button>

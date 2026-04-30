@@ -31,6 +31,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Badge } from "@/components/ui/badge";
 import {
   Select,
   SelectContent,
@@ -56,9 +57,11 @@ import {
   LayoutGrid,
   ImagePlus,
   X,
+  UploadCloud,
 } from "lucide-react";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { toast } from "sonner";
+import { cn } from "@/lib/utils";
 import { StylePicker } from "@/components/ui/style-picker";
 import { 
   VISUAL_STYLE_PRESETS, 
@@ -72,9 +75,17 @@ import {
 interface GenerationPanelProps {
   selectedScene: Scene | null;
   onSceneCreated?: (id: string) => void;
+  /**
+   * UI 模式：
+   * - 'creation' (默认)：左侧场景创作台，仅展示基础表单 + 拖拽上传概念图 + "创建此场景"按钮，
+   *   不展示任何生成相关 UI；
+   * - 'generation'：详情页"生成图像"标签页，展示完整生成 UI（单图/联合图/四视图等），
+   *   不展示创建按钮。
+   */
+  viewMode?: 'creation' | 'generation';
 }
 
-export function GenerationPanel({ selectedScene, onSceneCreated }: GenerationPanelProps) {
+export function GenerationPanel({ selectedScene, onSceneCreated, viewMode = 'creation' }: GenerationPanelProps) {
   const {
     addScene,
     updateScene,
@@ -112,6 +123,16 @@ export function GenerationPanel({ selectedScene, onSceneCreated }: GenerationPan
   const [notes, setNotes] = useState("");               // 场景备注
   const [styleId, setStyleId] = useState<string>(DEFAULT_STYLE_ID);
   const [referenceImages, setReferenceImages] = useState<string[]>([]);
+
+  // 创作台：拖拽/上传概念图（直接作为 scene.referenceImage 写入，跳过 AI 生成）
+  const [designImages, setDesignImages] = useState<string[]>([]);
+  const [isDraggingDesignImage, setIsDraggingDesignImage] = useState(false);
+
+  // 单图模式：提示词编辑
+  // - customPrompt 非空时优先使用用户编辑后的提示词，否则使用 buildScenePrompt 自动生成
+  // - showPromptEditor 控制编辑区展开/折叠
+  const [customPrompt, setCustomPrompt] = useState<string>("");
+  const [showPromptEditor, setShowPromptEditor] = useState(false);
 
   // Preview state
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -575,13 +596,9 @@ ${gridItemsZh}
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contactSheetAspectRatio]); // 只监听宽高比变化
 
-  const handleCreateScene = () => {
+  const handleCreateScene = async () => {
     if (!name.trim()) {
       toast.error("请输入场景名称");
-      return;
-    }
-    if (!location.trim()) {
-      toast.error("请输入地点描述");
       return;
     }
 
@@ -607,9 +624,91 @@ ${gridItemsZh}
       linkedEpisodeId: manualEpisodeId,
     });
 
-    toast.success("场景已创建");
     selectScene(id);
     onSceneCreated?.(id);
+
+    // 如果上传了概念图，第一张作为场景概念图保存到本地
+    if (designImages.length > 0) {
+      toast.loading("正在保存场景概念图...", { id: 'saving-scene-design' });
+      try {
+        const safeName = name.trim().replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_');
+        const localPath = await saveImageToLocal(
+          designImages[0],
+          'scenes',
+          `${safeName}_${Date.now()}.png`
+        );
+        updateScene(id, { referenceImage: localPath });
+
+        // 同步归档到素材库 AI 图片 文件夹
+        const aiFolderId = getOrCreateCategoryFolder('ai-image');
+        addMediaFromUrl({
+          url: localPath,
+          name: `场景-${name.trim()}`,
+          type: 'image',
+          source: 'ai-image',
+          folderId: aiFolderId,
+          projectId: resourceProjectId || undefined,
+        });
+        toast.success("场景已创建，概念图已保存", { id: 'saving-scene-design' });
+      } catch (err) {
+        console.error('Failed to save scene design image:', err);
+        toast.error("场景已创建，但概念图保存失败", { id: 'saving-scene-design' });
+      }
+    } else {
+      toast.success("场景已创建");
+    }
+
+    // 重置表单
+    resetCreationForm();
+  };
+
+  const resetCreationForm = () => {
+    setName("");
+    setLocation("");
+    setTime("day");
+    setAtmosphere("peaceful");
+    setVisualPrompt("");
+    setTags([]);
+    setNotes("");
+    setStyleId(DEFAULT_STYLE_ID);
+    setDesignImages([]);
+    setReferenceImages([]);
+  };
+
+  // 概念图上传处理
+  const addDesignImages = async (files: FileList | File[]) => {
+    const fileArray = Array.from(files).filter(f => f.type.startsWith('image/'));
+    if (fileArray.length === 0) return;
+    const newImages: string[] = [];
+    for (const file of fileArray) {
+      if (designImages.length + newImages.length >= 3) break;
+      try {
+        const base64 = await fileToBase64(file);
+        newImages.push(base64);
+      } catch (err) {
+        console.error("Failed to convert image:", err);
+      }
+    }
+    if (newImages.length > 0) {
+      setDesignImages([...designImages, ...newImages].slice(0, 3));
+    }
+  };
+
+  const handleDesignImageChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    await addDesignImages(files);
+    e.target.value = "";
+  };
+
+  const handleDesignImageDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDraggingDesignImage(false);
+    await addDesignImages(e.dataTransfer.files);
+  };
+
+  const removeDesignImage = (index: number) => {
+    setDesignImages(designImages.filter((_, i) => i !== index));
   };
 
   const handleGenerate = async () => {
@@ -662,7 +761,8 @@ ${gridItemsZh}
       console.log('[SceneGeneration] 找到', sceneShots.length, '个分镜用于场景:', selectedScene?.name);
       console.log('[SceneGeneration] 动作描写:', actionDescriptions);
       
-      const prompt = buildScenePrompt({ ...selectedScene, location, time, atmosphere, styleId }, actionDescriptions);
+      const autoPrompt = buildScenePrompt({ ...selectedScene, location, time, atmosphere, styleId }, actionDescriptions);
+      const prompt = customPrompt.trim() ? customPrompt.trim() : autoPrompt;
       const stylePreset = styleId ? getStyleById(styleId) : null;
       const isRealistic = stylePreset?.category === 'real';
       const negativePrompt = isRealistic
@@ -703,15 +803,18 @@ ${gridItemsZh}
         `${sceneName}_${Date.now()}.png`
       );
 
+      const finalPrompt = customPrompt.trim()
+        ? customPrompt.trim()
+        : buildScenePrompt({ 
+            ...selectedScene!, 
+            location, 
+            time, 
+            atmosphere, 
+            styleId 
+          });
       updateScene(previewSceneId, {
         referenceImage: localPath,
-        visualPrompt: buildScenePrompt({ 
-          ...selectedScene!, 
-          location, 
-          time, 
-          atmosphere, 
-          styleId 
-        }),
+        visualPrompt: finalPrompt,
       });
 
       // 同步归档到素材库 AI图片 文件夹
@@ -1757,7 +1860,7 @@ ${gridItemsZh}
         const createdVariantIds: string[] = [];
 
         // 补全分镜 shotIds — 使用 effectiveViewpoints（含 fallback）
-        let viewpointsToSave = effectiveViewpoints.map((vp) => ({
+        const viewpointsToSave = effectiveViewpoints.map((vp) => ({
           ...vp,
           shotIds: [...(vp.shotIds || [])],
         }));
@@ -3114,10 +3217,175 @@ ${anchor} 的背面直视镜头。展示后部结构。背景是物体面向的�
     );
   }
 
+  // ========== 创作台模式（左侧栏） ==========
+  if (viewMode === 'creation') {
+    return (
+      <div className="h-full flex flex-col">
+        <div className="p-3 pb-2 border-b">
+          <h3 className="font-medium text-sm">场景创作台</h3>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            填写基础信息并创建场景。可拖拽上传已有概念图，或在右侧详情页"生成图像"标签使用 AI 生成。
+          </p>
+        </div>
+
+        <ScrollArea className="flex-1 p-3">
+          <div className="space-y-4">
+            {/* Scene name */}
+            <div className="space-y-2">
+              <Label className="text-xs">场景名称 *</Label>
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="例如：城市街道、森林小屋"
+              />
+            </div>
+
+            {/* Location */}
+            <div className="space-y-2">
+              <Label className="text-xs">地点描述</Label>
+              <Textarea
+                value={location}
+                onChange={(e) => setLocation(e.target.value)}
+                placeholder="详细描述场景的环境，例如：繁华的东京涩谷十字路口，霓虹灯闪烁..."
+                className="min-h-[80px] text-sm resize-none"
+              />
+            </div>
+
+            {/* Time and Atmosphere */}
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-2">
+                <Label className="text-xs">时间</Label>
+                <Select value={time} onValueChange={setTime}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="选择" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {TIME_PRESETS.map((t) => (
+                      <SelectItem key={t.id} value={t.id}>{t.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label className="text-xs">氛围</Label>
+                <Select value={atmosphere} onValueChange={setAtmosphere}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="选择" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {ATMOSPHERE_PRESETS.map((a) => (
+                      <SelectItem key={a.id} value={a.id}>{a.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            {/* Visual prompt */}
+            <div className="space-y-2">
+              <Label className="text-xs">视觉提示词（可选）</Label>
+              <Textarea
+                value={visualPrompt}
+                onChange={(e) => setVisualPrompt(e.target.value)}
+                placeholder="补充视觉细节描述..."
+                className="min-h-[60px] text-sm resize-none"
+              />
+            </div>
+
+            {/* Notes */}
+            <div className="space-y-2">
+              <Label className="text-xs">备注（可选）</Label>
+              <Textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="剧情相关备注..."
+                className="min-h-[50px] text-sm resize-none"
+              />
+            </div>
+
+            {/* 概念图上传（拖拽 + 点击） */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label className="text-xs">场景概念图</Label>
+                <span className="text-xs text-muted-foreground">{designImages.length}/3</span>
+              </div>
+              <div
+                className={cn(
+                  "rounded-md border-2 border-dashed p-3 transition-colors",
+                  isDraggingDesignImage ? "border-primary bg-primary/5" : "border-muted-foreground/25",
+                )}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDraggingDesignImage(true);
+                }}
+                onDragLeave={() => setIsDraggingDesignImage(false)}
+                onDrop={handleDesignImageDrop}
+              >
+                <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">
+                  <UploadCloud className="h-4 w-4" />
+                  <span>拖拽上传场景概念图，或点击下方上传。第一张将作为场景主概念图。</span>
+                </div>
+                <div className="flex gap-2 flex-wrap">
+                  {designImages.map((img, i) => (
+                    <div key={i} className="relative group">
+                      <img
+                        src={img}
+                        alt={`场景概念图 ${i + 1}`}
+                        className="w-14 h-14 object-cover rounded-md border"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => removeDesignImage(i)}
+                        className="absolute -top-1 -right-1 bg-destructive text-destructive-foreground rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+                  {designImages.length < 3 && (
+                    <>
+                      <input
+                        id="scene-creation-design-image"
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        className="hidden"
+                        onChange={handleDesignImageChange}
+                      />
+                      <div
+                        className="w-14 h-14 border-2 border-dashed rounded-md flex flex-col items-center justify-center text-muted-foreground hover:text-foreground hover:border-foreground/50 transition-colors gap-1 cursor-pointer"
+                        onClick={() => document.getElementById('scene-creation-design-image')?.click()}
+                      >
+                        <ImagePlus className="h-4 w-4" />
+                        <span className="text-[10px]">上传</span>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </ScrollArea>
+
+        {/* 创建按钮 */}
+        <div className="p-3 border-t">
+          <Button
+            onClick={handleCreateScene}
+            className="w-full"
+            disabled={!name.trim()}
+          >
+            <Plus className="h-4 w-4 mr-2" />
+            创建此场景
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="h-full flex flex-col">
       <div className="p-3 pb-2 border-b space-y-2">
-        <h3 className="font-medium text-sm">生成控制台</h3>
+        <h3 className="font-medium text-sm">生成图像</h3>
         {/* 生成模式切换 */}
         <ToggleGroup 
           type="single" 
@@ -3252,6 +3520,94 @@ ${anchor} 的背面直视镜头。展示后部结构。背景是物体面向的�
               AI 将参考这些图片生成场景概念图
             </p>
           </div>
+
+          {/* 单图模式：提示词预览/编辑 */}
+          {generationMode === 'single' && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label className="text-xs">提示词</Label>
+                <div className="flex items-center gap-1">
+                  {customPrompt.trim() && (
+                    <Badge variant="secondary" className="text-[10px] h-4 px-1.5">已自定义</Badge>
+                  )}
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 px-2 text-[11px]"
+                    onClick={() => setShowPromptEditor((v) => !v)}
+                  >
+                    {showPromptEditor ? '收起' : '展开编辑'}
+                  </Button>
+                </div>
+              </div>
+
+              {showPromptEditor && (() => {
+                const autoPrompt = selectedScene
+                  ? buildScenePrompt(
+                      { ...selectedScene, location, time, atmosphere, styleId },
+                      []
+                    )
+                  : buildScenePrompt(
+                      {
+                        location: location || undefined,
+                        time,
+                        atmosphere,
+                        styleId,
+                        visualPrompt: visualPrompt || undefined,
+                      } as Partial<Scene> & { styleId?: string },
+                      []
+                    );
+                const effectivePrompt = customPrompt.trim() ? customPrompt : autoPrompt;
+                return (
+                  <div className="space-y-2">
+                    <Textarea
+                      value={effectivePrompt}
+                      onChange={(e) => setCustomPrompt(e.target.value)}
+                      placeholder="留空则使用自动生成的提示词"
+                      className="min-h-[140px] text-xs font-mono resize-y"
+                      disabled={isGenerating}
+                    />
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[10px] text-muted-foreground flex-1">
+                        💡 编辑后将覆盖自动生成的提示词，提交时实际发送给 AI 的内容
+                      </p>
+                      <div className="flex gap-1">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-6 px-2 text-[11px]"
+                          onClick={() => {
+                            navigator.clipboard.writeText(effectivePrompt);
+                            toast.success('提示词已复制');
+                          }}
+                        >
+                          <Copy className="h-3 w-3 mr-1" />
+                          复制
+                        </Button>
+                        {customPrompt.trim() && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-6 px-2 text-[11px]"
+                            onClick={() => {
+                              setCustomPrompt('');
+                              toast.success('已重置为自动生成');
+                            }}
+                          >
+                            <RotateCcw className="h-3 w-3 mr-1" />
+                            重置
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
         </div>
       </ScrollArea>
 

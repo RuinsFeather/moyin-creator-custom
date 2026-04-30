@@ -5,7 +5,7 @@
 
 /**
  * Character Library View - Three Column Layout
- * Left: Generation Console
+ * Left: Character Creation Desk
  * Middle: Character Gallery (folders + cards)
  * Right: Character Detail Panel
  */
@@ -46,7 +46,7 @@ export function CharactersView() {
   return (
     <div className="h-full">
       <ResizablePanelGroup direction="horizontal" className="h-full">
-        {/* Left column - Generation Console */}
+        {/* Left column - Character Creation Desk */}
         <ResizablePanel defaultSize={25} minSize={20} maxSize={35}>
           <GenerationPanel 
             selectedCharacter={selectedCharacter}

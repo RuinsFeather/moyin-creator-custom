@@ -5,9 +5,9 @@
 
 /**
  * Scenes View - Three Column Layout
- * Left: Generation Console
+ * Left: Scene Creation Desk (basic info + drag-drop concept image upload)
  * Middle: Scene Gallery (folders + cards)
- * Right: Scene Detail Panel
+ * Right: Scene Detail Panel (info / generate image tabs)
  */
 
 import { useMemo } from "react";
@@ -46,9 +46,10 @@ export function ScenesView() {
   return (
     <div className="h-full">
       <ResizablePanelGroup direction="horizontal" className="h-full">
-        {/* Left column - Generation Console */}
+        {/* Left column - Scene Creation Desk */}
         <ResizablePanel defaultSize={25} minSize={20} maxSize={35}>
           <GenerationPanel 
+            viewMode="creation"
             selectedScene={selectedScene}
             onSceneCreated={(id) => selectScene(id)}
           />

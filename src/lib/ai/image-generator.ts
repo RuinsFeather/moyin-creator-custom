@@ -441,7 +441,7 @@ async function submitViaChatCompletions(
     // Fallback: accumulate SSE delta chunks into a single message
     const lines = responseText.split('\n').filter(l => l.startsWith('data: '));
     let accumulatedText = '';
-    let accumulatedParts: any[] = [];
+    const accumulatedParts: any[] = [];
     let lastChunk: any = null;
 
     for (const line of lines) {
@@ -662,19 +662,52 @@ async function submitImageTask(
       if (urlMatch) return { imageUrl: urlMatch[1] };
     }
 
-    // 标准格式: { data: [{ url }] }
-    let taskId: string | undefined;
-    const dataList = data.data;
-    if (Array.isArray(dataList) && dataList.length > 0) {
-      // 直接返回 URL（doubao-seedream、DALL-E 等同步模型）
-      if (dataList[0].url) return { imageUrl: dataList[0].url };
-      taskId = dataList[0].task_id?.toString();
+    // 兼容多种返回格式
+    // - 标准格式: { data: [{ url }] } 或 { data: [{ b64_json }] }（DALL-E / GPT Image）
+    // - { data: [{ image_url | output_url }] }
+    // - { data: { url | image_url | output_url } }（非数组）
+    // - { url | image_url | output_url } 顶层
+    // - { images: [{ url }] }（部分 SD 风格 API）
+    // - { task_id } / { data: [{ task_id }] }
+    const normalizeUrl = (url: unknown): string | undefined => {
+      if (!url) return undefined;
+      if (Array.isArray(url)) return typeof url[0] === 'string' ? url[0] : undefined;
+      if (typeof url === 'string') return url;
+      if (typeof url === 'object') {
+        const obj = url as Record<string, unknown>;
+        if (typeof obj.url === 'string') return obj.url;
+      }
+      return undefined;
+    };
+
+    const dataField = data.data;
+    const firstItem = Array.isArray(dataField) ? dataField[0] : dataField;
+    const firstImage = Array.isArray(data.images) ? data.images[0] : undefined;
+
+    const directUrl = normalizeUrl(firstItem?.url)
+      || normalizeUrl(firstItem?.image_url)
+      || normalizeUrl(firstItem?.output_url)
+      || normalizeUrl(firstImage?.url)
+      || normalizeUrl(firstImage?.image_url)
+      || normalizeUrl(data.url)
+      || normalizeUrl(data.image_url)
+      || normalizeUrl(data.output_url);
+    if (directUrl) return { imageUrl: directUrl };
+
+    // base64 内联返回
+    const b64 = firstItem?.b64_json || firstImage?.b64_json || data.b64_json;
+    if (typeof b64 === 'string' && b64.length > 0) {
+      const dataUri = b64.startsWith('data:') ? b64 : `data:image/png;base64,${b64}`;
+      return { imageUrl: dataUri };
     }
-    taskId = taskId || data.task_id?.toString();
+
+    const taskId = firstItem?.task_id?.toString()
+      || firstItem?.id?.toString()
+      || data.task_id?.toString()
+      || data.id?.toString();
 
     if (!taskId) {
-      const directUrl = data.data?.[0]?.url || data.url;
-      if (directUrl) return { imageUrl: directUrl };
+      console.error('[ImageGenerator] Unexpected response shape:', JSON.stringify(data).slice(0, 500));
       throw new Error('No task_id or image URL in response');
     }
 

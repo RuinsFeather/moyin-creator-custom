@@ -23,18 +23,19 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
+import { StylePicker } from "@/components/ui/style-picker";
 import { 
-  Wand2,
   Loader2,
   Check,
   AlertCircle,
   RotateCcw,
-  User,
   FileImage,
+  ImagePlus,
+  X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
-import { getStyleById, getStylePrompt } from "@/lib/constants/visual-styles";
+import { getStyleById, DEFAULT_STYLE_ID } from "@/lib/constants/visual-styles";
 
 // Character sheet elements that can be included
 const SHEET_ELEMENTS = [
@@ -65,6 +66,8 @@ export function CharacterGenerator({ character }: CharacterGeneratorProps) {
   const [selectedElements, setSelectedElements] = useState<SheetElementId[]>(
     SHEET_ELEMENTS.filter(e => e.default).map(e => e.id)
   );
+  const [styleId, setStyleId] = useState(character.styleId || DEFAULT_STYLE_ID);
+  const [referenceImages, setReferenceImages] = useState<string[]>(character.referenceImages || []);
   // Preview state - generated image waiting for confirmation
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewPrompt, setPreviewPrompt] = useState<string>('');
@@ -84,6 +87,42 @@ export function CharacterGenerator({ character }: CharacterGeneratorProps) {
       updateCharacter(character.id, { description: description.trim() });
       toast.success("描述已保存");
     }
+  };
+
+  const handleStyleChange = (nextStyleId: string) => {
+    setStyleId(nextStyleId);
+    updateCharacter(character.id, { styleId: nextStyleId === 'random' ? undefined : nextStyleId });
+  };
+
+  const addReferenceImages = async (files: FileList | File[]) => {
+    const newImages: string[] = [];
+    for (const file of Array.from(files)) {
+      if (!file.type.startsWith('image/')) continue;
+      if (referenceImages.length + newImages.length >= 3) break;
+      try {
+        newImages.push(await fileToBase64(file));
+      } catch (error) {
+        console.error('Failed to read reference image:', error);
+      }
+    }
+
+    if (newImages.length > 0) {
+      const nextImages = [...referenceImages, ...newImages].slice(0, 3);
+      setReferenceImages(nextImages);
+      updateCharacter(character.id, { referenceImages: nextImages });
+      toast.success("参考图片已添加");
+    }
+  };
+
+  const handleReferenceImageChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    await addReferenceImages(e.target.files || []);
+    e.target.value = '';
+  };
+
+  const removeReferenceImage = (index: number) => {
+    const nextImages = referenceImages.filter((_, i) => i !== index);
+    setReferenceImages(nextImages);
+    updateCharacter(character.id, { referenceImages: nextImages.length > 0 ? nextImages : undefined });
   };
 
   const handleGenerateSheet = async () => {
@@ -107,14 +146,11 @@ export function CharacterGenerator({ character }: CharacterGeneratorProps) {
 
     try {
       // Build comprehensive character sheet prompt with selected style
-      const sheetPrompt = buildCharacterSheetPrompt(description, character.name, selectedElements, character.styleId);
+      const sheetPrompt = buildCharacterSheetPrompt(description, character.name, selectedElements, styleId);
       setPreviewPrompt(sheetPrompt);
 
-      // Get reference images if available
-      const referenceImages = character.referenceImages || [];
-
       // Get style preset for negative prompt
-      const stylePreset = character.styleId ? getStyleById(character.styleId) : null;
+      const stylePreset = styleId ? getStyleById(styleId) : null;
       const isRealistic = stylePreset?.category === 'real';
       const negativePrompt = isRealistic
         ? 'blurry, low quality, watermark, text, cropped, anime, cartoon, illustration'
@@ -126,7 +162,7 @@ export function CharacterGenerator({ character }: CharacterGeneratorProps) {
         negativePrompt,
         aspectRatio: '1:1',
         referenceImages,
-        styleId: character.styleId,
+        styleId,
       });
 
       // Show preview instead of saving directly
@@ -166,7 +202,7 @@ export function CharacterGenerator({ character }: CharacterGeneratorProps) {
 
       // Generate visual traits from description (English)
       const visualTraits = generateVisualTraits(description, character.name);
-      updateCharacter(character.id, { visualTraits });
+      updateCharacter(character.id, { visualTraits, styleId: styleId === 'random' ? undefined : styleId });
 
       // 同步归档到素材库 AI图片 文件夹
       const aiFolderId = getOrCreateCategoryFolder('ai-image');
@@ -310,6 +346,64 @@ export function CharacterGenerator({ character }: CharacterGeneratorProps) {
         />
       </div>
 
+      {/* Visual style */}
+      <div className="space-y-2">
+        <Label className="text-xs">视觉风格</Label>
+        <StylePicker
+          value={styleId}
+          onChange={handleStyleChange}
+          disabled={isGenerating}
+        />
+      </div>
+
+      {/* Reference images */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <Label className="text-xs">参考图片</Label>
+          <span className="text-xs text-muted-foreground">{referenceImages.length}/3</span>
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          {referenceImages.map((img, i) => (
+            <div key={i} className="relative group">
+              <img
+                src={img}
+                alt={`参考图 ${i + 1}`}
+                className="w-14 h-14 object-cover rounded-md border"
+              />
+              <button
+                type="button"
+                onClick={() => removeReferenceImage(i)}
+                className="absolute -top-1 -right-1 bg-destructive text-destructive-foreground rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
+          {referenceImages.length < 3 && (
+            <>
+              <input
+                id={`character-generator-ref-${character.id}`}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={handleReferenceImageChange}
+              />
+              <div
+                className="w-14 h-14 border-2 border-dashed rounded-md flex flex-col items-center justify-center text-muted-foreground hover:text-foreground hover:border-foreground/50 transition-colors gap-1 cursor-pointer"
+                onClick={() => document.getElementById(`character-generator-ref-${character.id}`)?.click()}
+              >
+                <ImagePlus className="h-4 w-4" />
+                <span className="text-[10px]">上传</span>
+              </div>
+            </>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          AI 将参考这些图片生成设定图，适合补齐缺失的人物设定图。
+        </p>
+      </div>
+
       {/* Sheet content selection */}
       <div className="space-y-2">
         <Label className="text-xs">设定图内容</Label>
@@ -364,26 +458,6 @@ export function CharacterGenerator({ character }: CharacterGeneratorProps) {
         )}
       </Button>
 
-      {/* Reference images preview */}
-      {character.referenceImages && character.referenceImages.length > 0 && (
-        <div className="space-y-2">
-          <Label className="text-xs">参考图片</Label>
-          <div className="flex gap-2 flex-wrap">
-            {character.referenceImages.map((img, i) => (
-              <img
-                key={i}
-                src={img}
-                alt={`参考图 ${i + 1}`}
-                className="w-12 h-12 object-cover rounded border"
-              />
-            ))}
-          </div>
-          <p className="text-xs text-muted-foreground">
-            AI将参考这些图片生成角色设定图
-          </p>
-        </div>
-      )}
-
       {/* Tips */}
       <div className="text-xs text-muted-foreground space-y-1">
         <p>💡 生成后可预览确认，满意再保存</p>
@@ -391,6 +465,15 @@ export function CharacterGenerator({ character }: CharacterGeneratorProps) {
       </div>
     </div>
   );
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
 }
 
 // Helper: Build comprehensive character sheet prompt

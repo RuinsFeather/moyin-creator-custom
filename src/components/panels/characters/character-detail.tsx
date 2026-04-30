@@ -17,6 +17,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { 
   User,
   Image as ImageIcon,
@@ -34,6 +35,7 @@ import {
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { WardrobeModal } from "./wardrobe-modal";
+import { CharacterGenerator } from "./character-generator";
 import { LocalImage } from "@/components/ui/local-image";
 import { ImagePreviewModal } from "@/components/panels/director/media-preview-modal";
 
@@ -210,8 +212,17 @@ export function CharacterDetail({ character }: CharacterDetailProps) {
         )}
       </div>
 
-      <ScrollArea className="flex-1">
-        <div className="p-3 space-y-4 pb-32">
+      <Tabs defaultValue="info" className="flex-1 min-h-0 flex flex-col">
+        <div className="px-3 pt-2 border-b">
+          <TabsList className="grid w-full grid-cols-2 h-8">
+            <TabsTrigger value="info" className="text-xs">角色详情</TabsTrigger>
+            <TabsTrigger value="generate" className="text-xs">生成图像</TabsTrigger>
+          </TabsList>
+        </div>
+
+        <TabsContent value="info" className="flex-1 min-h-0 m-0">
+          <ScrollArea className="h-full">
+            <div className="p-3 space-y-4 pb-32">
           {/* Main preview */}
           <div className="space-y-2">
             <div 
@@ -466,8 +477,18 @@ export function CharacterDetail({ character }: CharacterDetailProps) {
           <div className="text-xs text-muted-foreground space-y-1">
             <p>💡 拖拽角色图片到 AI 导演面板使用</p>
           </div>
-        </div>
-      </ScrollArea>
+            </div>
+          </ScrollArea>
+        </TabsContent>
+
+        <TabsContent value="generate" className="flex-1 min-h-0 m-0">
+          <ScrollArea className="h-full">
+            <div className="p-3 pb-32">
+              <CharacterGenerator character={character} />
+            </div>
+          </ScrollArea>
+        </TabsContent>
+      </Tabs>
 
       {/* Wardrobe Modal */}
       <WardrobeModal

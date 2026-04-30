@@ -24,6 +24,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { 
   MapPin,
   Edit3,
@@ -42,6 +43,7 @@ import {
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { ImagePreviewModal } from "@/components/panels/director/media-preview-modal";
+import { GenerationPanel } from "./generation-panel";
 
 interface SceneDetailProps {
   scene: Scene | null;
@@ -195,7 +197,14 @@ export function SceneDetail({ scene }: SceneDetailProps) {
         )}
       </div>
 
-      <ScrollArea className="flex-1">
+      <Tabs defaultValue="info" className="flex-1 min-h-0 flex flex-col">
+        <TabsList className="grid grid-cols-2 mx-3 mt-2">
+          <TabsTrigger value="info" className="text-xs">基础信息</TabsTrigger>
+          <TabsTrigger value="generate" className="text-xs">生成图像</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="info" className="flex-1 min-h-0 mt-2 data-[state=inactive]:hidden">
+        <ScrollArea className="h-full">
         <div className="p-3 space-y-4 pb-32">
           {/* Main preview */}
           <div className="space-y-2">
@@ -450,7 +459,7 @@ export function SceneDetail({ scene }: SceneDetailProps) {
                 size="sm"
                 onClick={() => {
                   selectScene(scene.id);
-                  toast.info("请在左侧生成控制台选择「四视图」模式，然后点击生成");
+                  toast.info("请切换到「生成图像」标签并选择「四视图」模式，然后点击生成");
                 }}
               >
                 <Box className="h-4 w-4 mr-2" />
@@ -476,6 +485,15 @@ export function SceneDetail({ scene }: SceneDetailProps) {
           </div>
         </div>
       </ScrollArea>
+        </TabsContent>
+
+        <TabsContent value="generate" className="flex-1 min-h-0 mt-2 data-[state=inactive]:hidden">
+          <GenerationPanel
+            viewMode="generation"
+            selectedScene={scene}
+          />
+        </TabsContent>
+      </Tabs>
 
       {/* Image Preview Lightbox */}
       <ImagePreviewModal
