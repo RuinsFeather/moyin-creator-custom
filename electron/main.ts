@@ -202,7 +202,7 @@ async function resolveAvailableUpdate(currentVersion: string): Promise<Available
 
 function createWindow() {
   win = new BrowserWindow({
-    title: '魔因漫创',
+    title: '有点创艺',
     width: 1400,
     height: 900,
     minWidth: 1200,

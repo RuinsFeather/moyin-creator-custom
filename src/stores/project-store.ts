@@ -29,7 +29,7 @@ interface ProjectStore {
 // Default project for desktop app
 const DEFAULT_PROJECT: Project = {
   id: "default-project",
-  name: "魔因漫创项目",
+  name: "有点创意项目",
   createdAt: Date.now(),
   updatedAt: Date.now(),
 };
