@@ -144,6 +144,68 @@ declare global {
         remainingBytes: number;
       }>;
     };
+    volcAsset?: {
+      saveConfig: (cfg: {
+        accessKeyId: string;
+        secretAccessKey: string;
+        projectName?: string;
+      }) => Promise<{ ok: true }>;
+      getConfig: () => Promise<{
+        accessKeyId: string;
+        secretAccessKey: string;
+        projectName: string;
+      } | null>;
+      isConfigured: () => Promise<boolean>;
+      createGroup: (payload: {
+        name: string;
+        description?: string;
+        projectName?: string;
+      }) => Promise<{ groupId: string; name: string }>;
+      createAsset: (payload: {
+        groupId: string;
+        imageUrl: string;
+        name?: string;
+        projectName?: string;
+      }) => Promise<{ assetId: string }>;
+      getStatus: (payload: {
+        assetId: string;
+        projectName?: string;
+      }) => Promise<{
+        id: string;
+        status: 'Processing' | 'Active' | 'Failed';
+        url?: string;
+        error?: string;
+      }>;
+      uploadFull: (payload: {
+        imageUrl: string;
+        groupName: string;
+        groupDescription?: string;
+        assetName?: string;
+        existingGroupId?: string;
+        projectName?: string;
+      }) => Promise<{
+        assetId: string;
+        assetUri: string;
+        url: string;
+        groupId: string;
+      }>;
+      batchUpload: (payload: {
+        imageUrls: string[];
+        groupName: string;
+        groupDescription?: string;
+        existingGroupId?: string;
+        projectName?: string;
+      }) => Promise<{
+        groupId: string;
+        results: Array<{
+          imageUrl: string;
+          assetId?: string;
+          assetUri?: string;
+          url?: string;
+          error?: string;
+        }>;
+      }>;
+    };
     netProxy?: {
       fetch: (req: {
         url: string;

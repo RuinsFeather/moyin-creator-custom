@@ -10,6 +10,7 @@ import os from 'node:os'
 import packageMetadata from '../package.json'
 import type { AvailableUpdateInfo, OpenExternalResult, UpdateCheckResult, UpdateManifest } from '../src/types/update'
 import { registerUploaderIpc } from './uploader'
+import { registerVolcAssetIpc } from './volc-asset-uploader'
 
 // electron-vite 构建后的目录结构
 //
@@ -1778,6 +1779,9 @@ app.whenReady().then(() => {
 
   // 注册对象存储 IPC（视频/音频上传通道）
   registerUploaderIpc()
+
+  // 注册火山引擎素材资产上传 IPC（私域虚拟人像素材）
+  registerVolcAssetIpc()
 
   scheduleAutoClean()
   // Handle local-image:// protocol

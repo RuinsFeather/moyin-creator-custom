@@ -152,6 +152,35 @@ contextBridge.exposeInMainWorld('objectStorage', {
     ipcRenderer.invoke('object-storage:cleanup', opts),
 })
 
+// 火山引擎方舟素材资产上传（私域虚拟人像 AK/SK 鉴权）
+contextBridge.exposeInMainWorld('volcAsset', {
+  saveConfig: (cfg: { accessKeyId: string; secretAccessKey: string; projectName?: string }) =>
+    ipcRenderer.invoke('volc-asset:save-config', cfg),
+  getConfig: () => ipcRenderer.invoke('volc-asset:get-config'),
+  isConfigured: (): Promise<boolean> => ipcRenderer.invoke('volc-asset:is-configured'),
+  createGroup: (payload: { name: string; description?: string; projectName?: string }) =>
+    ipcRenderer.invoke('volc-asset:create-group', payload),
+  createAsset: (payload: { groupId: string; imageUrl: string; name?: string; projectName?: string }) =>
+    ipcRenderer.invoke('volc-asset:create-asset', payload),
+  getStatus: (payload: { assetId: string; projectName?: string }) =>
+    ipcRenderer.invoke('volc-asset:get-status', payload),
+  uploadFull: (payload: {
+    imageUrl: string
+    groupName: string
+    groupDescription?: string
+    assetName?: string
+    existingGroupId?: string
+    projectName?: string
+  }) => ipcRenderer.invoke('volc-asset:upload-full', payload),
+  batchUpload: (payload: {
+    imageUrls: string[]
+    groupName: string
+    groupDescription?: string
+    existingGroupId?: string
+    projectName?: string
+  }) => ipcRenderer.invoke('volc-asset:batch-upload', payload),
+})
+
 // 通用网络代理：让渲染进程通过主进程发起请求，绕过 Chromium CORS 限制
 // 用于直连第三方 API（如 ark.cn-beijing.volces.com 火山方舟原生域）
 contextBridge.exposeInMainWorld('netProxy', {

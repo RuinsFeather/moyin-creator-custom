@@ -62,6 +62,8 @@ export interface FreedomVideoUploadFile {
   assetType?: 'image' | 'video' | 'audio';
   /** 本地绝对路径（来自 webUtils.getPathForFile），有则可走对象存储上传 */
   localPath?: string;
+  /** 火山引擎素材资产 URI（如 Asset://Asset-xxx），来自素材资产管理面板，直传不需要再上传 */
+  volcAssetUri?: string;
 }
 
 export interface FreedomVideoParams {
@@ -1010,7 +1012,13 @@ function mapFriendlyErrorMessage(body: string): string | null {
   }
   // 火山引擎：账户欠费
   if (/AccountOverdueError/i.test(body) || /account has an overdue balance/i.test(body)) {
-    return '服务端拒绝请求，可能因为火山引擎（Volc）账户余额不足或已欠费';
+    return '服务端拒绝请求，可能因为火山引擎（Volc）账户余额不足或已欠费，或者是网络环境问题导致无法验证账户状态。请检查火山引擎账户余额和网络连接，确保账户正常且网络畅通后重试';
+  }
+  // 火山引擎：输出视频版权限制
+  if (/output video may be related to copyright restrictions/i.test(body)) {
+    const reqIdMatch = body.match(/[Rr]equest\s*id[:\s]*([0-9a-fA-Fx]+)/);
+    const reqId = reqIdMatch ? reqIdMatch[1] : '未知';
+    return `该请求未能成功，因为输出的视频可能受到版权限制的约束。该请求id如下：${reqId}`;
   }
   return null;
 }
@@ -1488,6 +1496,9 @@ function validateVeoVideoUploads(
 }
 
 async function toUploadHttpUrl(file: FreedomVideoUploadFile): Promise<string> {
+  // 0) 火山引擎素材资产 URI（Asset://xxx），直接透传给方舟 API
+  if (file.volcAssetUri) return file.volcAssetUri;
+
   // 1) 已经是 http(s) URL，直接复用
   if (file.dataUrl && /^https?:\/\//i.test(file.dataUrl)) return file.dataUrl;
 

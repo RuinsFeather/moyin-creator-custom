@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useCallback, useEffect, useRef, useState } from 'react';
-import { VideoIcon, Loader2, Download, Sparkles, Upload, X, Type, ImageIcon, Layers, Film, Music, StopCircle } from 'lucide-react';
+import { VideoIcon, Loader2, Download, Sparkles, Upload, X, Type, ImageIcon, Layers, Film, Music, StopCircle, FolderOpen } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { PromptTextarea, type PromptTextareaRef } from './PromptTextarea';
@@ -17,6 +17,7 @@ import { ModelSelector } from './ModelSelector';
 import { GenerationHistory } from './GenerationHistory';
 import { ActiveTaskCard, formatElapsed } from './ActiveTaskCard';
 import { generateFreedomVideo, FreedomCancelledError, type FreedomVideoUploadFile, type FreedomVideoUploadRole } from '@/lib/freedom/freedom-api';
+import { VolcAssetPanel, type VolcAssetItem } from './VolcAssetPanel';
 import {
   getAspectRatiosForT2VModel,
   getDurationsForModel,
@@ -81,6 +82,10 @@ interface MultiRefAsset {
   audioDuration?: number;
   localPath?: string;
   fileSize?: number;
+  /** 火山引擎素材资产 URI（如 Asset://Asset-xxx），来自素材资产管理面板 */
+  volcAssetUri?: string;
+  /** 火山引擎素材资产 ID */
+  volcAssetId?: string;
 }function resolveVideoCapabilityModelId(modelId: string): string {
   const lower = modelId.toLowerCase();
   // Kling 版本化模型（kling-v* / kling-video-o1）沿用 kling-video 的能力定义
@@ -275,6 +280,9 @@ export function VideoStudio() {
     () => modelEndpointTypes[selectedVideoModel] || [],
     [modelEndpointTypes, selectedVideoModel],
   );
+
+  // 素材资产管理弹窗
+  const [volcAssetDialogOpen, setVolcAssetDialogOpen] = useState(false);
 
   // 当前选中的任务 ID（用于在中央预览区展示任务进度）
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -563,6 +571,32 @@ export function VideoStudio() {
     setUploadProgress(id, null);
   }, [setMultiRefAssets, setUploadProgress]);
 
+  /** 从素材资产管理面板导入素材到参考列表 */
+  const importVolcAsset = useCallback((asset: VolcAssetItem) => {
+    // 检查是否已导入
+    const alreadyImported = multiRefAssets.some((a) => a.volcAssetId === asset.assetId);
+    if (alreadyImported) {
+      toast.info('该素材已在参考列表中');
+      return;
+    }
+    // 检查数量限制
+    if (multiRefAssets.length >= MULTI_REF_MAX_ASSETS) {
+      toast.error(`参考素材已达上限 ${MULTI_REF_MAX_ASSETS} 个`);
+      return;
+    }
+    const newAsset: MultiRefAsset = {
+      id: `volc_${asset.assetId}_${Date.now()}`,
+      dataUrl: asset.url, // 缩略图 URL 用于展示
+      fileName: asset.name,
+      mimeType: 'image/png',
+      assetType: 'image',
+      volcAssetUri: asset.assetUri,
+      volcAssetId: asset.assetId,
+    };
+    setMultiRefAssets((prev) => [...prev, newAsset]);
+    toast.success(`已导入素材: ${asset.name}`);
+  }, [multiRefAssets, setMultiRefAssets]);
+
   /** 计算某个素材在同类型中的序号标签，如 @image_file_1 */
   const getMultiRefTag = useCallback((assetId: string): string => {
     const asset = multiRefAssets.find((a) => a.id === assetId);
@@ -760,6 +794,7 @@ export function VideoStudio() {
         mimeType: a.mimeType,
         assetType: a.assetType,
         localPath: a.localPath,
+        volcAssetUri: a.volcAssetUri,
       }));
     }
 
@@ -1087,7 +1122,7 @@ export function VideoStudio() {
                           e.preventDefault();
                           insertRefToPrompt(asset.id);
                         }}
-                        title="右键点击插入引用到描述文字"
+                        title={asset.volcAssetUri ? `素材资产: ${asset.volcAssetUri}\n右键点击插入引用到描述文字` : "右键点击插入引用到描述文字"}
                       >
                         {asset.assetType === 'image' ? (
                           <img
@@ -1113,6 +1148,12 @@ export function VideoStudio() {
                         <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-[9px] text-center py-0.5 opacity-0 group-hover/card:opacity-100 transition-opacity pointer-events-none">
                           {getMultiRefTag(asset.id)} · 右键引用
                         </span>
+                        {/* 素材资产标记 */}
+                        {asset.volcAssetUri && (
+                          <span className="absolute top-1 left-1 px-1 py-0.5 rounded text-[8px] font-medium bg-emerald-600/90 text-white leading-none">
+                            Asset
+                          </span>
+                        )}
                         <button
                           type="button"
                           className="absolute top-1 right-1 p-1 rounded bg-black/60 text-white"
@@ -1153,6 +1194,31 @@ export function VideoStudio() {
                     )}
                   </p>
                 </div>
+
+                {/* 素材资产管理按钮（火山引擎） */}
+                {isSeedance && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full h-8 text-xs"
+                    onClick={() => setVolcAssetDialogOpen(true)}
+                  >
+                    <FolderOpen className="h-3.5 w-3.5 mr-1.5" />
+                    素材资产管理
+                    {multiRefAssets.filter((a) => a.volcAssetId).length > 0 && (
+                      <span className="ml-1 text-muted-foreground">
+                        ({multiRefAssets.filter((a) => a.volcAssetId).length} 个已导入)
+                      </span>
+                    )}
+                  </Button>
+                )}
+                {/* 素材资产管理弹窗 */}
+                <VolcAssetPanel
+                  open={volcAssetDialogOpen}
+                  onOpenChange={setVolcAssetDialogOpen}
+                  onSelectAsset={importVolcAsset}
+                  selectedAssetIds={multiRefAssets.filter((a) => a.volcAssetId).map((a) => a.volcAssetId!)}
+                />
               </div>
             )}
 

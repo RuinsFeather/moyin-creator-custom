@@ -57,6 +57,10 @@ export interface VideoMultiRefAsset {
   localPath?: string;
   /** 文件大小（字节） */
   fileSize?: number;
+  /** 火山引擎素材资产 URI（如 Asset://Asset-xxx），来自素材资产管理面板 */
+  volcAssetUri?: string;
+  /** 火山引擎素材资产 ID */
+  volcAssetId?: string;
 }
 
 /** 上传进度（按 asset id 索引）。0~1 之间，1 表示完成。undefined 表示未开始 */

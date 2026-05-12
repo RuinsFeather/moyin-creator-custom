@@ -27,6 +27,7 @@ import { AddProviderDialog, EditProviderDialog, FeatureBindingPanel } from "@/co
 import { AddImageHostDialog } from "@/components/image-host-manager/AddImageHostDialog";
 import { EditImageHostDialog } from "@/components/image-host-manager/EditImageHostDialog";
 import { ObjectStorageSettings } from "@/components/image-host-manager/ObjectStorageSettings";
+import { VolcAssetSettings } from "@/components/image-host-manager/VolcAssetSettings";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -1264,6 +1265,12 @@ export function SettingsPanel() {
                   >
                     视频 / 音频（对象存储）
                   </TabsTrigger>
+                  <TabsTrigger
+                    value="volc-asset"
+                    className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-primary rounded-none px-3 h-10"
+                  >
+                    虚拟人像素材（火山引擎）
+                  </TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="image-host" className="space-y-8 mt-0">
@@ -1366,6 +1373,10 @@ export function SettingsPanel() {
 
                 <TabsContent value="object-storage" className="space-y-8 mt-0">
                   <ObjectStorageSettings />
+                </TabsContent>
+
+                <TabsContent value="volc-asset" className="space-y-8 mt-0">
+                  <VolcAssetSettings />
                 </TabsContent>
               </Tabs>
 
