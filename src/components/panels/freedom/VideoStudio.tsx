@@ -56,6 +56,8 @@ const I2V_SUB_MODE_OPTIONS: { value: ImageToVideoSubMode; label: string; desc: s
 /** 多功能参考模式常量 */
 const MULTI_REF_MAX_ASSETS = 12;
 const MULTI_REF_AUDIO_MAX_SECONDS = 15;
+/** HappyHorse 多功能参考模式：仅图片，最多 9 张 */
+const HAPPYHORSE_MULTI_REF_MAX_IMAGES = 9;
 
 /** Seedance 多功能参考模式可选视频时长范围 (4s–15s) */
 const SEEDANCE_MULTI_REF_DURATIONS = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] as const;
@@ -123,6 +125,11 @@ interface MultiRefAsset {
 function isSeedanceGroupModel(modelId: string): boolean {
   const lower = modelId.toLowerCase();
   return lower.includes('seedance');
+}
+
+/** 判断模型是否属于 HappyHorse 系列 */
+function isHappyHorseModel(modelId: string): boolean {
+  return modelId.toLowerCase().includes('happyhorse');
 }
 
 function fileToDataUrl(file: File): Promise<string> {
@@ -337,22 +344,28 @@ export function VideoStudio() {
 
   /** 是否属于 seedance 组 */
   const isSeedance = useMemo(() => isSeedanceGroupModel(selectedVideoModel), [selectedVideoModel]);
+  /** 是否属于 HappyHorse 系列 */
+  const isHappyHorse = useMemo(() => isHappyHorseModel(selectedVideoModel), [selectedVideoModel]);
+  /** 是否支持多功能参考模式（Seedance 或 HappyHorse） */
+  const supportsMultiRef = isSeedance || isHappyHorse;
+  /** 多功能参考模式的最大素材数量（HappyHorse 仅支持 9 张图片） */
+  const multiRefMaxAssets = isHappyHorse ? HAPPYHORSE_MULTI_REF_MAX_IMAGES : MULTI_REF_MAX_ASSETS;
 
   const multiRefInputRef = useRef<HTMLInputElement>(null);
 
-  /** 计算当前功能模式下可用的 feature mode 列表（多功能参考仅对 seedance） */
+  /** 计算当前功能模式下可用的 feature mode 列表（多功能参考仅对 seedance / happyhorse） */
   const availableFeatureModes = useMemo(() => {
     return FEATURE_MODE_OPTIONS.filter(
-      (opt) => opt.value !== 'multi-reference' || isSeedance,
+      (opt) => opt.value !== 'multi-reference' || supportsMultiRef,
     );
-  }, [isSeedance]);
+  }, [supportsMultiRef]);
 
   /** 当前模型不支持多功能参考时，自动回退 */
   useEffect(() => {
-    if (videoFeatureMode === 'multi-reference' && !isSeedance) {
+    if (videoFeatureMode === 'multi-reference' && !supportsMultiRef) {
       setVideoFeatureMode('text-to-video');
     }
-  }, [isSeedance, videoFeatureMode, setVideoFeatureMode]);
+  }, [supportsMultiRef, videoFeatureMode, setVideoFeatureMode]);
 
   /** 仅在用户**主动切换模型**时清空已上传素材；mount 时不清空，避免切 Tab 后丢失。 */
   const prevVideoModelRef = useRef<string | null>(null);
@@ -472,13 +485,16 @@ export function VideoStudio() {
     setReferenceUploads((prev) => prev.filter((item) => item.id !== id));
   }, [setReferenceUploads]);
 
-  /** 多功能参考模式：处理一组文件（支持视频/图片/音频，依次入队） */
+  /** 多功能参考模式：处理一组文件（支持视频/图片/音频，依次入队；HappyHorse 仅支持图片） */
   const ingestMultiRefFiles = useCallback(async (files: File[]) => {
     if (files.length === 0) return;
 
-    let remaining = MULTI_REF_MAX_ASSETS - multiRefAssets.length;
+    const maxAssets = isHappyHorse ? HAPPYHORSE_MULTI_REF_MAX_IMAGES : MULTI_REF_MAX_ASSETS;
+    let remaining = maxAssets - multiRefAssets.length;
     if (remaining <= 0) {
-      toast.error(`最多支持上传 ${MULTI_REF_MAX_ASSETS} 个参考素材`);
+      toast.error(isHappyHorse
+        ? `最多支持上传 ${HAPPYHORSE_MULTI_REF_MAX_IMAGES} 张参考图片`
+        : `最多支持上传 ${MULTI_REF_MAX_ASSETS} 个参考素材`);
       return;
     }
 
@@ -490,7 +506,9 @@ export function VideoStudio() {
 
     for (const file of files) {
       if (remaining <= 0) {
-        toast.error(`最多支持上传 ${MULTI_REF_MAX_ASSETS} 个参考素材`);
+        toast.error(isHappyHorse
+          ? `最多支持上传 ${HAPPYHORSE_MULTI_REF_MAX_IMAGES} 张参考图片`
+          : `最多支持上传 ${MULTI_REF_MAX_ASSETS} 个参考素材`);
         break;
       }
       try {
@@ -499,6 +517,12 @@ export function VideoStudio() {
         else if (file.type.startsWith('audio/')) assetType = 'audio';
         else if (!file.type.startsWith('image/')) {
           // 不支持的类型，跳过
+          continue;
+        }
+
+        // HappyHorse 仅支持图片参考
+        if (isHappyHorse && assetType !== 'image') {
+          toast.error('HappyHorse 多功能参考模式暂时仅支持图片');
           continue;
         }
 
@@ -557,7 +581,7 @@ export function VideoStudio() {
     if (newAssets.length > 0) {
       setMultiRefAssets((prev) => [...prev, ...newAssets]);
     }
-  }, [multiRefAssets, setMultiRefAssets]);
+  }, [multiRefAssets, setMultiRefAssets, isHappyHorse]);
 
   /** 多功能参考模式：上传文件（视频/图片/音频） */
   const handleMultiRefChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -580,8 +604,9 @@ export function VideoStudio() {
       return;
     }
     // 检查数量限制
-    if (multiRefAssets.length >= MULTI_REF_MAX_ASSETS) {
-      toast.error(`参考素材已达上限 ${MULTI_REF_MAX_ASSETS} 个`);
+    const maxAssets = isHappyHorse ? HAPPYHORSE_MULTI_REF_MAX_IMAGES : MULTI_REF_MAX_ASSETS;
+    if (multiRefAssets.length >= maxAssets) {
+      toast.error(`参考素材已达上限 ${maxAssets} 个`);
       return;
     }
     const newAsset: MultiRefAsset = {
@@ -595,7 +620,7 @@ export function VideoStudio() {
     };
     setMultiRefAssets((prev) => [...prev, newAsset]);
     toast.success(`已导入素材: ${asset.name}`);
-  }, [multiRefAssets, setMultiRefAssets]);
+  }, [multiRefAssets, setMultiRefAssets, isHappyHorse]);
 
   /** 计算某个素材在同类型中的序号标签，如 @image_file_1 */
   const getMultiRefTag = useCallback((assetId: string): string => {
@@ -1098,7 +1123,9 @@ export function VideoStudio() {
             {videoFeatureMode === 'multi-reference' && (
               <div className="space-y-3">
                 <div className="space-y-2">
-                  <Label className="text-sm font-medium">参考素材（视频/图片/音频）</Label>
+                  <Label className="text-sm font-medium">
+                    {isHappyHorse ? '参考图片' : '参考素材（视频/图片/音频）'}
+                  </Label>
                   <div
                     className="grid grid-cols-3 gap-2 rounded-md border border-dashed border-transparent transition-colors p-1 -m-1 hover:border-primary/30"
                     onDragOver={(e) => {
@@ -1118,11 +1145,13 @@ export function VideoStudio() {
                       <div
                         key={asset.id}
                         className="relative rounded border overflow-hidden group/card cursor-context-menu"
-                        onContextMenu={(e) => {
+                        onContextMenu={isHappyHorse ? undefined : (e) => {
                           e.preventDefault();
                           insertRefToPrompt(asset.id);
                         }}
-                        title={asset.volcAssetUri ? `素材资产: ${asset.volcAssetUri}\n右键点击插入引用到描述文字` : "右键点击插入引用到描述文字"}
+                        title={isHappyHorse
+                          ? `参考图片 ${index + 1}`
+                          : asset.volcAssetUri ? `素材资产: ${asset.volcAssetUri}\n右键点击插入引用到描述文字` : "右键点击插入引用到描述文字"}
                       >
                         {asset.assetType === 'image' ? (
                           <img
@@ -1144,10 +1173,12 @@ export function VideoStudio() {
                             )}
                           </div>
                         )}
-                        {/* 引用标签 */}
-                        <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-[9px] text-center py-0.5 opacity-0 group-hover/card:opacity-100 transition-opacity pointer-events-none">
-                          {getMultiRefTag(asset.id)} · 右键引用
-                        </span>
+                        {/* 引用标签（HappyHorse 不显示） */}
+                        {!isHappyHorse && (
+                          <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-[9px] text-center py-0.5 opacity-0 group-hover/card:opacity-100 transition-opacity pointer-events-none">
+                            {getMultiRefTag(asset.id)} · 右键引用
+                          </span>
+                        )}
                         {/* 素材资产标记 */}
                         {asset.volcAssetUri && (
                           <span className="absolute top-1 left-1 px-1 py-0.5 rounded text-[8px] font-medium bg-emerald-600/90 text-white leading-none">
@@ -1176,7 +1207,7 @@ export function VideoStudio() {
                         )}
                       </div>
                     ))}
-                    {multiRefAssets.length < MULTI_REF_MAX_ASSETS && (
+                    {multiRefAssets.length < multiRefMaxAssets && (
                       <button
                         type="button"
                         onClick={() => multiRefInputRef.current?.click()}
@@ -1188,9 +1219,15 @@ export function VideoStudio() {
                     )}
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    已上传 {multiRefAssets.length}/{MULTI_REF_MAX_ASSETS} 个素材 · 音频总时长限制 {MULTI_REF_AUDIO_MAX_SECONDS}s
-                    {multiRefAssets.some((a) => a.assetType === 'audio') && (
-                      <>（已用 {Math.round(multiRefAssets.filter((a) => a.assetType === 'audio').reduce((s, a) => s + (a.audioDuration ?? 0), 0))}s）</>
+                    {isHappyHorse ? (
+                      <>已上传 {multiRefAssets.length}/{HAPPYHORSE_MULTI_REF_MAX_IMAGES} 张参考图片</>
+                    ) : (
+                      <>
+                        已上传 {multiRefAssets.length}/{MULTI_REF_MAX_ASSETS} 个素材 · 音频总时长限制 {MULTI_REF_AUDIO_MAX_SECONDS}s
+                        {multiRefAssets.some((a) => a.assetType === 'audio') && (
+                          <>（已用 {Math.round(multiRefAssets.filter((a) => a.assetType === 'audio').reduce((s, a) => s + (a.audioDuration ?? 0), 0))}s）</>
+                        )}
+                      </>
                     )}
                   </p>
                 </div>
@@ -1324,7 +1361,11 @@ export function VideoStudio() {
               <Label className="text-sm font-medium">描述文字</Label>
               <PromptTextarea
                 ref={promptTextareaRef}
-                placeholder="描述你想生成的视频..."
+                placeholder={
+                  isHappyHorse && videoFeatureMode === 'multi-reference'
+                    ? "使用 [Image 1]、[Image 2] 等指代上方参考图片，例如：[Image 1]中的女孩走在城市街头..."
+                    : "描述你想生成的视频..."
+                }
                 value={videoPrompt}
                 onChange={setVideoPrompt}
                 expandTitle="编辑描述文字（视频生成）"
@@ -1364,7 +1405,7 @@ export function VideoStudio() {
             <input
               ref={multiRefInputRef}
               type="file"
-              accept="image/*,video/*,audio/*"
+              accept={isHappyHorse ? "image/*" : "image/*,video/*,audio/*"}
               multiple
               className="hidden"
               onChange={handleMultiRefChange}

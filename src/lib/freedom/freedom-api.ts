@@ -393,7 +393,7 @@ function detectFreedomVideoRoute(model: string, endpointTypes?: string[]): Freed
   // MemeFast 中转的 /volc/v1/contents/generations/tasks）。统一格式 /v1/video/generations
   // 不支持这两个模型，会直接 404。
   if (m.includes('seedance') || m.includes('doubao')) return 'volc';
-  if (m.includes('wan')) return 'wan';
+  if (m.includes('wan') || m.includes('happyhorse')) return 'wan';
   return 'unified';
 }
 
@@ -1959,6 +1959,14 @@ async function generateVideoViaWan(
   baseUrl: string,
 ): Promise<GenerationResult> {
   const rootBase = getRootBaseUrl(baseUrl);
+  const isHappyHorse = model.toLowerCase().includes('happyhorse');
+
+  // HappyHorse 参考生视频（multi-reference with images）
+  const references = (params.uploadFiles || []).filter((f) => f.role === 'reference');
+  if (isHappyHorse && references.length > 0) {
+    return generateVideoViaHappyHorseR2V(params, references, apiKey, rootBase);
+  }
+
   const body: Record<string, any> = {
     model,
     input: { prompt: params.prompt },
@@ -2009,6 +2017,98 @@ async function generateVideoViaWan(
   }
 
   throw new Error('Wan 视频生成超时');
+}
+
+/**
+ * HappyHorse 参考生视频（Reference-to-Video）
+ * API 文档: https://help.aliyun.com/zh/model-studio/happyhorse-reference-to-video-api-reference
+ * - 模型固定为 happyhorse-1.0-r2v
+ * - input.media 数组传入 { type: "reference_image", url: "..." } 对象
+ * - prompt 中通过 [Image 1]、[Image 2] 指代 media 数组中对应的参考图
+ * - 需要 X-DashScope-Async: enable 头
+ */
+async function generateVideoViaHappyHorseR2V(
+  params: FreedomVideoParams,
+  references: FreedomVideoUploadFile[],
+  apiKey: string,
+  rootBase: string,
+): Promise<GenerationResult> {
+  // 将参考图片上传为 HTTP URL
+  const imageUrls: string[] = await Promise.all(
+    references.map((ref) => toUploadHttpUrl(ref)),
+  );
+
+  const body: Record<string, any> = {
+    model: 'happyhorse-1.0-r2v',
+    input: {
+      prompt: params.prompt,
+      media: imageUrls.map((url) => ({ type: 'reference_image', url })),
+    },
+    parameters: {} as Record<string, any>,
+  };
+
+  // 分辨率
+  const resolution = (params.resolution || '1080P').toUpperCase();
+  body.parameters.resolution = resolution === '720P' ? '720P' : '1080P';
+
+  // 宽高比：API 支持 16:9、9:16、3:4、4:3、1:1
+  if (params.aspectRatio) {
+    body.parameters.ratio = params.aspectRatio;
+  }
+
+  // 时长：3~15 秒整数，默认 5
+  if (params.duration) {
+    body.parameters.duration = Math.max(3, Math.min(15, params.duration));
+  }
+
+  // 不添加水印
+  body.parameters.watermark = false;
+
+  const submitResp = await corsFetch(
+    `${rootBase}/alibailian/api/v1/services/aigc/video-generation/video-synthesis`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'X-DashScope-Async': 'enable',
+      },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!submitResp.ok) {
+    throw toHttpError('HappyHorse R2V submit failed', submitResp.status, await submitResp.text());
+  }
+
+  const submitData = await submitResp.json();
+  const taskId = submitData.output?.task_id;
+  if (!taskId) throw new Error('HappyHorse R2V 返回空任务 ID');
+
+  // 轮询（参考生视频通常 1-5 分钟，使用较长超时）
+  const POLL_INTERVAL = 5000;
+  const POLL_MAX_ATTEMPTS = 240; // 240 * 5s = 20min
+  const pollUrl = `${rootBase}/alibailian/api/v1/tasks/${taskId}`;
+
+  for (let i = 0; i < POLL_MAX_ATTEMPTS; i++) {
+    await abortableSleep(POLL_INTERVAL, params.signal);
+    const pollResp = await corsFetch(pollUrl, {
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+      signal: params.signal,
+    });
+    if (!pollResp.ok) continue;
+    const pollData = await pollResp.json();
+    const status = String(pollData.output?.task_status || '').toUpperCase();
+    if (status === 'SUCCEEDED' || status === 'COMPLETED') {
+      const videoUrl = pollData.output?.video_url || extractVideoUrl(pollData);
+      if (!videoUrl) throw new Error('HappyHorse R2V 成功但无视频 URL');
+      return { url: videoUrl, taskId: String(taskId) };
+    }
+    if (status === 'FAILED' || status === 'ERROR' || status === 'CANCELLED') {
+      throw new Error(pollData.output?.message || pollData.output?.error || 'HappyHorse 参考生视频失败');
+    }
+  }
+
+  throw new Error('HappyHorse 参考生视频超时（已等待 20 分钟）');
 }
 
 // Native Kling endpoint paths (relative to /kling/v1/videos/)

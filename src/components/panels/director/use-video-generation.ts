@@ -283,7 +283,7 @@ function detectVideoApiFormat(model: string): 'openai_official' | 'unified' | 'v
   if (m.includes('kling')) return 'kling';
   // doubao-seedance 走 volc 格式（/volc/v1/contents/generations/tasks）
   if (m.includes('doubao') || m.includes('seedance') || m.includes('seedream')) return 'volc';
-  if (m.includes('wan')) return 'wan';
+  if (m.includes('wan') || m.includes('happyhorse')) return 'wan';
   return 'unified';
 }
 

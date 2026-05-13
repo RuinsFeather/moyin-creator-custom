@@ -1229,8 +1229,8 @@ export function SettingsPanel() {
 
               {/* About */}
               <div className="text-center py-8 text-muted-foreground border-t border-border">
-                <p className="text-sm font-medium">魔因漫创 Moyin Creator</p>
-                <p className="text-xs mt-1">v{appVersion} · AI 驱动的动漫视频创作工具</p>
+                <p className="text-sm font-medium">有点创艺 Youdianchuangyi</p>
+                <p className="text-xs mt-1">v{appVersion} · AI 驱动的视频创作工具</p>
               </div>
             </div>
           </ScrollArea>
@@ -1382,8 +1382,8 @@ export function SettingsPanel() {
 
               {/* About */}
               <div className="text-center py-8 text-muted-foreground border-t border-border">
-                <p className="text-sm font-medium">魔因漫创 Moyin Creator</p>
-                <p className="text-xs mt-1">v{appVersion} · AI 驱动的动漫视频创作工具</p>
+                <p className="text-sm font-medium">有点创艺 Youdianchuangyi</p>
+                <p className="text-xs mt-1">v{appVersion} · AI 驱动的视频创作工具</p>
               </div>
             </div>
           </ScrollArea>

@@ -160,6 +160,8 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
   'veo3.1': ['video_generation'],
   'sora-2-all': ['video_generation'],
   'wan2.6-i2v': ['video_generation'],
+  'happyhorse-text-to-video': ['video_generation'],
+  'happyhorse-image-to-video': ['video_generation'],
   'grok-video-3': ['video_generation'],
   'grok-video-3-10s': ['video_generation'],
   'grok-video-3-15s': ['video_generation'],

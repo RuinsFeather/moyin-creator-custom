@@ -26,6 +26,7 @@ import { ExportView } from "@/components/panels/export";
 import { OverviewPanel } from "@/components/panels/overview";
 import { AssetsView } from "@/components/panels/assets";
 import { StoryboardTablePanel } from "@/components/panels/storyboard-table";
+import { DebugPanel } from "@/components/panels/DebugPanel";
 
 export function Layout() {
   const { activeTab, inProject } = useMediaPanelStore();
@@ -36,7 +37,7 @@ export function Layout() {
       <div className="h-full flex bg-background">
         <TabBar />
         <div className="flex-1">
-          {activeTab === "settings" ? <SettingsPanel /> : <Dashboard />}
+          {activeTab === "settings" ? <SettingsPanel /> : activeTab === "debug" ? <DebugPanel /> : <Dashboard />}
         </div>
       </div>
     );
@@ -44,7 +45,7 @@ export function Layout() {
 
   // Full-screen views (no resizable panels)
   // 这些板块有自己的多栏布局，不需要全局的预览和属性面板
-  const fullScreenTabs = ["export", "settings", "overview", "script", "characters", "scenes", "freedom", "assets", "storyboard"];
+  const fullScreenTabs = ["export", "settings", "overview", "script", "characters", "scenes", "freedom", "assets", "storyboard", "debug"];
   if (fullScreenTabs.includes(activeTab)) {
     return (
       <div className="h-full flex bg-background">
@@ -60,6 +61,7 @@ export function Layout() {
           {activeTab === "freedom" && <FreedomView />}
           {activeTab === "assets" && <AssetsView />}
           {activeTab === "storyboard" && <StoryboardTablePanel />}
+          {activeTab === "debug" && <DebugPanel />}
         </div>
       </div>
     );

@@ -79,7 +79,7 @@ export function classifyModelByName(modelName: string): ModelCapability[] {
   const videoPatterns = [
     'veo', 'sora', 'wan', 'kling', 'runway', 'luma', 'seedance',
     'cogvideo', 'hunyuan-video', 'minimax-video', 'hailuo', 'pika',
-    'gen-3', 'gen3', 'mochi', 'ltx',
+    'gen-3', 'gen3', 'mochi', 'ltx', 'happyhorse',
   ];
   // 精确匹配：grok-video 类
   if (/grok[- ]?video/.test(name)) return ['video_generation'];

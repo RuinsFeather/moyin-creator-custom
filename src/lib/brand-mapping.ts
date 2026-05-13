@@ -87,7 +87,7 @@ const BRAND_PATTERNS: Array<{ pattern: RegExp; brand: string }> = [
   { pattern: /^grok/i,                                                    brand: 'grok' },
 
   // 阿里巴巴 / Qwen / 通义 / QVQ / QWQ
-  { pattern: /^(qwen|wan|tongyi|alibaba|bailian|qvq|qwq)/i,           brand: 'alibaba' },
+  { pattern: /^(qwen|wan|tongyi|alibaba|bailian|qvq|qwq|happyhorse)/i, brand: 'alibaba' },
 
   // Moonshot / Kimi
   { pattern: /^(moonshot|kimi)/i,                                         brand: 'moonshot' },

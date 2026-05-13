@@ -397,7 +397,7 @@ function isModelAllowedByPanelType(
   }
 
   // endpoint 缺失时用模型名兜底判定（避免自定义展开型号被误过滤）
-  return /kling|veo|sora|runway|vidu|hailuo|minimax\/video|wan|luma|grok-video|seedance|aigc-video/i.test(modelId);
+  return /kling|veo|sora|runway|vidu|hailuo|minimax\/video|wan|luma|grok-video|seedance|aigc-video|happyhorse/i.test(modelId);
 }
 
 export function ModelSelector({ type, value, onChange, className }: ModelSelectorProps) {

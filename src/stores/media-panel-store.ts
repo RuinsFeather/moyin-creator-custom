@@ -13,13 +13,14 @@ import {
   PaletteIcon,
   LayoutDashboardIcon,
   FolderOpenIcon,
+  BugIcon,
   LucideIcon,
 } from "lucide-react";
 import { create } from "zustand";
 import type { CharacterIdentityAnchors, CharacterNegativePrompt } from "@/types/script";
 
 // Tab-based navigation (simpler flat structure)
-export type Tab = "dashboard" | "overview" | "script" | "characters" | "scenes" | "freedom" | "storyboard" | "director" | "sclass" | "assets" | "media" | "export" | "settings";
+export type Tab = "dashboard" | "overview" | "script" | "characters" | "scenes" | "freedom" | "storyboard" | "director" | "sclass" | "assets" | "media" | "export" | "settings" | "debug";
 
 export interface NavItem {
   id: Tab;
@@ -77,6 +78,7 @@ export const tabs: { [key in Tab]: { icon: LucideIcon; label: string; stage?: St
   media: { icon: VideoIcon, label: "素材" },
   export: { icon: FilmIcon, label: "导出", stage: "export" },
   settings: { icon: SettingsIcon, label: "设置" },
+  debug: { icon: BugIcon, label: "调试" },
 };
 
 // Data passed from script panel to director

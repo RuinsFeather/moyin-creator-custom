@@ -10,7 +10,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { ChevronLeft, LayoutDashboard, Settings, Sun, Moon, HelpCircle } from "lucide-react";
+import { ChevronLeft, LayoutDashboard, Settings, Sun, Moon, Bug } from "lucide-react";
 
 export function TabBar() {
   const { activeTab, inProject, setActiveTab, setInProject } = useMediaPanelStore();
@@ -52,17 +52,18 @@ export function TabBar() {
           <TooltipProvider delayDuration={300}>
             <Tooltip>
               <TooltipTrigger asChild>
-                <a
-                  href="https://github.com/MemeCalculate/moyin-creator/blob/main/docs/WORKFLOW_GUIDE.md"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full flex flex-col items-center py-2 text-muted-foreground hover:text-foreground transition-colors"
+                <button
+                  onClick={() => setActiveTab("debug")}
+                  className={cn(
+                    "w-full flex flex-col items-center py-2 transition-colors",
+                    activeTab === "debug" ? "text-primary" : "text-muted-foreground hover:text-foreground"
+                  )}
                 >
-                  <HelpCircle className="h-4 w-4" />
-                  <span className="text-[8px]">帮助</span>
-                </a>
+                  <Bug className="h-4 w-4" />
+                  <span className="text-[8px]">调试</span>
+                </button>
               </TooltipTrigger>
-              <TooltipContent side="right">使用帮助</TooltipContent>
+              <TooltipContent side="right">API 调试面板</TooltipContent>
             </Tooltip>
           </TooltipProvider>
           <TooltipProvider delayDuration={300}>
@@ -164,17 +165,18 @@ export function TabBar() {
         <TooltipProvider delayDuration={300}>
           <Tooltip>
             <TooltipTrigger asChild>
-              <a
-                href="https://github.com/MemeCalculate/moyin-creator/blob/main/docs/WORKFLOW_GUIDE.md"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="w-full flex flex-col items-center py-2 text-muted-foreground hover:text-foreground transition-colors"
+              <button
+                onClick={() => setActiveTab("debug")}
+                className={cn(
+                  "w-full flex flex-col items-center py-2 transition-colors",
+                  activeTab === "debug" ? "text-primary" : "text-muted-foreground hover:text-foreground"
+                )}
               >
-                <HelpCircle className="h-4 w-4" />
-                <span className="text-[8px]">帮助</span>
-              </a>
+                <Bug className="h-4 w-4" />
+                <span className="text-[8px]">调试</span>
+              </button>
             </TooltipTrigger>
-            <TooltipContent side="right">使用帮助</TooltipContent>
+            <TooltipContent side="right">API 调试面板</TooltipContent>
           </Tooltip>
         </TooltipProvider>
         {bottomNavItems.map((item) => {

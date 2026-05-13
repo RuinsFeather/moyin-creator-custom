@@ -1077,6 +1077,39 @@ export const T2V_MODELS: T2VModel[] = [
       resolution: resolutionInput(['720p', '1080p']),
     },
   },
+  // happyhorse 系列（阿里云百炼）
+  {
+    id: 'happyhorse-text-to-video',
+    providerAliases: ["happyhorse-text-to-video","happyhorse-t2v"],
+    name: 'HappyHorse Text to Video',
+    inputs: {
+      prompt: promptInput(),
+      aspect_ratio: aspectRatioInput(['16:9', '9:16', '1:1']),
+      duration: durationInput({ enum: [5, 10] }),
+      resolution: resolutionInput(['720p', '1080p']),
+    },
+  },
+  {
+    id: 'happyhorse-image-to-video',
+    providerAliases: ["happyhorse-image-to-video","happyhorse-i2v"],
+    name: 'HappyHorse Image to Video',
+    inputs: {
+      prompt: promptInput(),
+      aspect_ratio: aspectRatioInput(['16:9', '9:16', '1:1']),
+      duration: durationInput({ enum: [5, 10] }),
+      resolution: resolutionInput(['720p', '1080p']),
+    },
+  },
+  {
+    id: 'happyhorse-reference-to-video',
+    providerAliases: ["happyhorse-reference-to-video","happyhorse-r2v","happyhorse-1.0-r2v"],
+    name: 'HappyHorse Reference to Video',
+    inputs: {
+      prompt: promptInput(),
+      aspect_ratio: aspectRatioInput(['16:9', '9:16', '3:4']),
+      resolution: resolutionInput(['720p', '1080p']),
+    },
+  },
   // 23
   {
     id: 'hunyuan-text-to-video',

@@ -13,7 +13,6 @@ import {
   FolderOpen,
   Search,
   Trash2,
-  Plus,
   ExternalLink,
   Copy,
   CheckCircle2,
@@ -59,16 +58,49 @@ interface VolcAssetPanelProps {
   selectedAssetIds?: string[];
 }
 
-// ==================== 本地存储 ====================
+// ==================== 持久化存储（fileStorage） ====================
 const STORAGE_KEY = "volc-asset-library";
 const GROUP_STORAGE_KEY = "volc-asset-group";
+
+/** 按 groupId 存储素材列表的 key */
+function getGroupAssetsKey(groupId: string): string {
+  return `volc-assets/${groupId}`;
+}
 
 interface StoredGroup {
   groupId: string;
   groupName: string;
 }
 
-function loadAssetLibrary(): VolcAssetItem[] {
+/** 从 fileStorage 加载素材（按 groupId） */
+async function loadAssetsByGroup(groupId: string): Promise<VolcAssetItem[]> {
+  try {
+    const fs = (window as any).fileStorage;
+    if (!fs) return loadAssetLibraryFallback();
+    const raw = await fs.getItem(getGroupAssetsKey(groupId));
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 保存素材到 fileStorage（按 groupId） */
+async function saveAssetsByGroup(groupId: string, items: VolcAssetItem[]): Promise<void> {
+  try {
+    const fs = (window as any).fileStorage;
+    if (!fs) {
+      // 降级到 localStorage
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+      return;
+    }
+    await fs.setItem(getGroupAssetsKey(groupId), JSON.stringify(items));
+  } catch (err) {
+    console.error("[VolcAssetPanel] 保存素材失败:", err);
+  }
+}
+
+/** localStorage 降级读取（兼容旧数据迁移） */
+function loadAssetLibraryFallback(): VolcAssetItem[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     return raw ? JSON.parse(raw) : [];
@@ -77,21 +109,38 @@ function loadAssetLibrary(): VolcAssetItem[] {
   }
 }
 
-function saveAssetLibrary(items: VolcAssetItem[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
-}
-
-function loadStoredGroup(): StoredGroup | null {
+/** 从 fileStorage 加载 group 信息 */
+async function loadStoredGroupAsync(): Promise<StoredGroup | null> {
   try {
-    const raw = localStorage.getItem(GROUP_STORAGE_KEY);
+    const fs = (window as any).fileStorage;
+    if (!fs) {
+      const raw = localStorage.getItem(GROUP_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    }
+    const raw = await fs.getItem(GROUP_STORAGE_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
 
-function saveStoredGroup(group: StoredGroup) {
-  localStorage.setItem(GROUP_STORAGE_KEY, JSON.stringify(group));
+/** 保存 group 信息到 fileStorage */
+async function saveStoredGroupAsync(group: StoredGroup | null): Promise<void> {
+  try {
+    const fs = (window as any).fileStorage;
+    if (!fs) {
+      if (group) localStorage.setItem(GROUP_STORAGE_KEY, JSON.stringify(group));
+      else localStorage.removeItem(GROUP_STORAGE_KEY);
+      return;
+    }
+    if (group) {
+      await fs.setItem(GROUP_STORAGE_KEY, JSON.stringify(group));
+    } else {
+      await fs.removeItem(GROUP_STORAGE_KEY);
+    }
+  } catch (err) {
+    console.error("[VolcAssetPanel] 保存 group 失败:", err);
+  }
 }
 
 // ==================== 组件 ====================
@@ -102,22 +151,53 @@ export function VolcAssetPanel({
   onSelectAsset,
   selectedAssetIds = [],
 }: VolcAssetPanelProps) {
-  const [assets, setAssets] = useState<VolcAssetItem[]>(() =>
-    loadAssetLibrary(),
-  );
+  const [assets, setAssets] = useState<VolcAssetItem[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState("");
   const [isConfigured, setIsConfigured] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [loadingAssets, setLoadingAssets] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Group 状态
-  const [group, setGroup] = useState<StoredGroup | null>(() =>
-    loadStoredGroup(),
-  );
-  const [newGroupName, setNewGroupName] = useState("");
-  const [creatingGroup, setCreatingGroup] = useState(false);
+  const [group, setGroup] = useState<StoredGroup | null>(null);
   const [copiedGroupId, setCopiedGroupId] = useState(false);
+
+  // 初始化：从 fileStorage 加载 group 信息
+  useEffect(() => {
+    if (!open) return;
+    loadStoredGroupAsync().then((g) => {
+      setGroup(g);
+    });
+  }, [open]);
+
+  // 当 group 变化时，从 fileStorage 加载该组的素材
+  useEffect(() => {
+    if (!group) {
+      // 无关联组时尝试加载旧 localStorage 数据（兼容迁移）
+      const fallback = loadAssetLibraryFallback();
+      setAssets(fallback);
+      return;
+    }
+    setLoadingAssets(true);
+    loadAssetsByGroup(group.groupId).then((items) => {
+      // 如果 fileStorage 为空但 localStorage 有旧数据，自动迁移
+      if (items.length === 0) {
+        const fallback = loadAssetLibraryFallback();
+        const groupItems = fallback.filter((a) => a.groupId === group.groupId);
+        if (groupItems.length > 0) {
+          setAssets(groupItems);
+          // 异步迁移保存
+          void saveAssetsByGroup(group.groupId, groupItems);
+        } else {
+          setAssets(fallback.length > 0 ? fallback : []);
+        }
+      } else {
+        setAssets(items);
+      }
+      setLoadingAssets(false);
+    });
+  }, [group]);
 
   // 检查配置
   useEffect(() => {
@@ -132,37 +212,11 @@ export function VolcAssetPanel({
       .catch(() => setIsConfigured(false));
   }, [open]);
 
-  // 同步 localStorage
+  // 素材变化时持久化保存（按 group）
   useEffect(() => {
-    saveAssetLibrary(assets);
-  }, [assets]);
-
-  // 创建素材组
-  const handleCreateGroup = useCallback(async () => {
-    if (!window.volcAsset) return;
-    const name = newGroupName.trim();
-    if (!name) {
-      toast.error("请输入素材组名称");
-      return;
-    }
-    setCreatingGroup(true);
-    try {
-      const result = await window.volcAsset.createGroup({ name });
-      const newGroup: StoredGroup = {
-        groupId: result.groupId,
-        groupName: result.name,
-      };
-      setGroup(newGroup);
-      saveStoredGroup(newGroup);
-      setNewGroupName("");
-      toast.success("素材组创建成功");
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      toast.error(`创建素材组失败：${msg}`);
-    } finally {
-      setCreatingGroup(false);
-    }
-  }, [newGroupName]);
+    if (!group) return;
+    void saveAssetsByGroup(group.groupId, assets);
+  }, [assets, group]);
 
   // 复制 GroupId
   const handleCopyGroupId = useCallback(() => {
@@ -339,7 +393,7 @@ export function VolcAssetPanel({
                   type="button"
                   onClick={() => {
                     setGroup(null);
-                    localStorage.removeItem(GROUP_STORAGE_KEY);
+                    void saveStoredGroupAsync(null);
                   }}
                   className="shrink-0 p-1 rounded hover:bg-destructive/10 transition-colors"
                   title="断开关联"
@@ -350,36 +404,11 @@ export function VolcAssetPanel({
             ) : (
               <div className="space-y-3 p-3 border rounded-lg bg-muted/30">
                 <p className="text-xs text-muted-foreground">
-                  请创建一个素材组来管理素材，或输入已有的 GroupId 关联。
+                  请输入已有的 GroupId 进行关联。如需创建素材组，请前往「设置 → 图床配置 → 虚拟人像素材」。
                 </p>
                 <div className="flex items-center gap-2">
                   <Input
-                    value={newGroupName}
-                    onChange={(e) => setNewGroupName(e.target.value)}
-                    placeholder="素材组名称，如：角色素材"
-                    className="h-8 text-sm flex-1"
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") void handleCreateGroup();
-                    }}
-                  />
-                  <Button
-                    size="sm"
-                    className="h-8 shrink-0"
-                    onClick={handleCreateGroup}
-                    disabled={creatingGroup || !newGroupName.trim()}
-                  >
-                    {creatingGroup ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />
-                    ) : (
-                      <Plus className="h-3.5 w-3.5 mr-1" />
-                    )}
-                    创建
-                  </Button>
-                </div>
-                {/* 手动关联已有 Group */}
-                <div className="flex items-center gap-2">
-                  <Input
-                    placeholder="或输入已有 GroupId 直接关联"
+                    placeholder="输入 GroupId 进行关联"
                     className="h-8 text-sm flex-1"
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
@@ -390,7 +419,7 @@ export function VolcAssetPanel({
                             groupName: "已关联组",
                           };
                           setGroup(g);
-                          saveStoredGroup(g);
+                          void saveStoredGroupAsync(g);
                           toast.success("已关联素材组");
                         }
                       }
@@ -401,9 +430,8 @@ export function VolcAssetPanel({
                     variant="outline"
                     className="h-8 shrink-0"
                     onClick={() => {
-                      // 从前面的 input 取值（通过 sibling）
                       const input = document.querySelector<HTMLInputElement>(
-                        '[placeholder="或输入已有 GroupId 直接关联"]',
+                        '[placeholder="输入 GroupId 进行关联"]',
                       );
                       const val = input?.value.trim();
                       if (val) {
@@ -412,7 +440,7 @@ export function VolcAssetPanel({
                           groupName: "已关联组",
                         };
                         setGroup(g);
-                        saveStoredGroup(g);
+                        void saveStoredGroupAsync(g);
                         toast.success("已关联素材组");
                       } else {
                         toast.error("请输入 GroupId");
@@ -440,6 +468,12 @@ export function VolcAssetPanel({
             )}
 
             {/* ===== 图库网格 ===== */}
+            {loadingAssets ? (
+              <div className="flex-1 flex items-center justify-center py-12">
+                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                <span className="ml-2 text-sm text-muted-foreground">加载素材中…</span>
+              </div>
+            ) : (
             <ScrollArea className="flex-1 min-h-0">
               <div className="grid grid-cols-5 gap-2 pb-2">
                 {/* 第一格：上传按钮 */}
@@ -541,6 +575,7 @@ export function VolcAssetPanel({
                 </div>
               )}
             </ScrollArea>
+            )}
 
             {/* 上传进度 */}
             {uploading && uploadProgress && (
