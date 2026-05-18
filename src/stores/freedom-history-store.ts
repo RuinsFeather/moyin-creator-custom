@@ -28,13 +28,12 @@ export type { HistoryEntry } from './freedom-store';
 export interface FreedomHistoryState {
   imageHistory: HistoryEntry[];
   videoHistory: HistoryEntry[];
-  cinemaHistory: HistoryEntry[];
 }
 
 export interface FreedomHistoryActions {
   addHistoryEntry: (entry: HistoryEntry) => void;
   removeHistoryEntry: (id: string) => void;
-  clearHistory: (type: 'image' | 'video' | 'cinema') => void;
+  clearHistory: (type: 'image' | 'video') => void;
 }
 
 export type FreedomHistoryStore = FreedomHistoryState & FreedomHistoryActions;
@@ -46,7 +45,6 @@ const MAX_HISTORY = 50;
 const initialState: FreedomHistoryState = {
   imageHistory: [],
   videoHistory: [],
-  cinemaHistory: [],
 };
 
 // ==================== Store ====================
@@ -58,11 +56,7 @@ export const useFreedomHistoryStore = create<FreedomHistoryStore>()(
 
       addHistoryEntry: (entry) => {
         const historyKey: keyof FreedomHistoryState =
-          entry.type === 'image'
-            ? 'imageHistory'
-            : entry.type === 'video'
-              ? 'videoHistory'
-              : 'cinemaHistory';
+          entry.type === 'image' ? 'imageHistory' : 'videoHistory';
         set((state) => {
           const current = state[historyKey];
           const updated = [entry, ...current].slice(0, MAX_HISTORY);
@@ -74,17 +68,12 @@ export const useFreedomHistoryStore = create<FreedomHistoryStore>()(
         set((state) => ({
           imageHistory: state.imageHistory.filter((h) => h.id !== id),
           videoHistory: state.videoHistory.filter((h) => h.id !== id),
-          cinemaHistory: state.cinemaHistory.filter((h) => h.id !== id),
         }));
       },
 
       clearHistory: (type) => {
         const key: keyof FreedomHistoryState =
-          type === 'image'
-            ? 'imageHistory'
-            : type === 'video'
-              ? 'videoHistory'
-              : 'cinemaHistory';
+          type === 'image' ? 'imageHistory' : 'videoHistory';
         set({ [key]: [] } as Partial<FreedomHistoryState>);
       },
     }),
@@ -96,7 +85,6 @@ export const useFreedomHistoryStore = create<FreedomHistoryStore>()(
       partialize: (state) => ({
         imageHistory: state.imageHistory,
         videoHistory: state.videoHistory,
-        cinemaHistory: state.cinemaHistory,
       }),
       // 切换项目时 rehydrate 会重新加载，但若新项目还没有任何历史文件，
       // 需要把当前 store 中残留的旧项目数据清空，避免"看似上一项目历史"
@@ -107,7 +95,6 @@ export const useFreedomHistoryStore = create<FreedomHistoryStore>()(
           ...currentState,
           imageHistory: Array.isArray(persisted.imageHistory) ? persisted.imageHistory : [],
           videoHistory: Array.isArray(persisted.videoHistory) ? persisted.videoHistory : [],
-          cinemaHistory: Array.isArray(persisted.cinemaHistory) ? persisted.cinemaHistory : [],
         };
       },
     },

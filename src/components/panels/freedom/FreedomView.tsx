@@ -4,7 +4,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useFreedomStore } from '@/stores/freedom-store';
 import { ImageStudio } from './ImageStudio';
 import { VideoStudio } from './VideoStudio';
-import { CinemaStudio } from './CinemaStudio';
 
 export function FreedomView() {
   const { activeStudio, setActiveStudio } = useFreedomStore();
@@ -24,9 +23,6 @@ export function FreedomView() {
             <TabsTrigger value="video" className="text-sm px-4">
               🎥 视频工作室
             </TabsTrigger>
-            <TabsTrigger value="cinema" className="text-sm px-4">
-              🎬 电影工作室
-            </TabsTrigger>
           </TabsList>
         </div>
         <TabsContent value="image" className="flex-1 m-0 overflow-hidden">
@@ -34,9 +30,6 @@ export function FreedomView() {
         </TabsContent>
         <TabsContent value="video" className="flex-1 m-0 overflow-hidden">
           <VideoStudio />
-        </TabsContent>
-        <TabsContent value="cinema" className="flex-1 m-0 overflow-hidden">
-          <CinemaStudio />
         </TabsContent>
       </Tabs>
     </div>

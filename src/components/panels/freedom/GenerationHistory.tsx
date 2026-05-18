@@ -6,22 +6,27 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { useFreedomHistoryStore, type HistoryEntry } from '@/stores/freedom-history-store';
 import { cn } from '@/lib/utils';
 
+/** 将毫秒数格式化为 "xx min xx s" 或 "xx s"（< 1min 时省略分钟） */
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  const totalSeconds = Math.round(ms / 1000);
+  const min = Math.floor(totalSeconds / 60);
+  const sec = totalSeconds % 60;
+  if (min <= 0) return `${sec} s`;
+  return `${min} min ${sec} s`;
+}
+
 interface GenerationHistoryProps {
-  type: 'image' | 'video' | 'cinema';
+  type: 'image' | 'video';
   onSelect?: (entry: HistoryEntry) => void;
   className?: string;
 }
 
 export function GenerationHistory({ type, onSelect, className }: GenerationHistoryProps) {
-  const { imageHistory, videoHistory, cinemaHistory, removeHistoryEntry, clearHistory } =
+  const { imageHistory, videoHistory, removeHistoryEntry, clearHistory } =
     useFreedomHistoryStore();
 
-  const history =
-    type === 'image'
-      ? imageHistory
-      : type === 'video'
-      ? videoHistory
-      : cinemaHistory;
+  const history = type === 'image' ? imageHistory : videoHistory;
 
   if (history.length === 0) {
     return (
@@ -76,14 +81,21 @@ export function GenerationHistory({ type, onSelect, className }: GenerationHisto
               <div className="p-2">
                 <p className="text-xs text-muted-foreground truncate">{entry.model}</p>
                 <p className="text-xs mt-0.5 line-clamp-2">{entry.prompt}</p>
-                <p className="text-[10px] text-muted-foreground mt-1">
-                  {new Date(entry.createdAt).toLocaleString('zh-CN', {
-                    month: '2-digit',
-                    day: '2-digit',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  })}
-                </p>
+                <div className="flex items-center justify-between gap-2 mt-1">
+                  <p className="text-[10px] text-muted-foreground">
+                    {new Date(entry.createdAt).toLocaleString('zh-CN', {
+                      month: '2-digit',
+                      day: '2-digit',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </p>
+                  {typeof entry.durationMs === 'number' && entry.durationMs > 0 && (
+                    <p className="text-[10px] text-muted-foreground shrink-0" title="本次生成耗时">
+                      耗时：{formatDuration(entry.durationMs)}
+                    </p>
+                  )}
+                </div>
               </div>
 
               {/* Delete button */}

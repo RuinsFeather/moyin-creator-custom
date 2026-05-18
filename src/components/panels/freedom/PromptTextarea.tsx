@@ -1,7 +1,7 @@
 // Copyright (c) 2025 hotflow2024
 // Licensed under AGPL-3.0-or-later. See LICENSE for details.
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
-import { useEffect, useState, useRef, useImperativeHandle, forwardRef } from 'react';
+import { useEffect, useState, useRef, useImperativeHandle, forwardRef, useCallback } from 'react';
 import { Maximize2, X } from 'lucide-react';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
@@ -23,6 +23,8 @@ interface PromptTextareaProps {
   expandTitle?: string;
   /** 是否禁用 */
   disabled?: boolean;
+  /** 防抖回写到 onChange 的毫秒数；默认 250ms。设为 0 则同步回写。 */
+  debounceMs?: number;
 }
 
 export interface PromptTextareaRef {
@@ -32,7 +34,11 @@ export interface PromptTextareaRef {
 
 /**
  * 带"放大编辑"按钮的描述文字输入框。
- * 适用于自由生成页面（图片/视频/电影），文字较多时点击右上角按钮可在大窗口中编辑。
+ * 适用于自由生成页面（图片/视频），文字较多时点击右上角按钮可在大窗口中编辑。
+ *
+ * 性能优化：内部维护一个本地 `inputValue` 镜像，所有按键先更新本地（即时反馈），
+ * 然后通过防抖（默认 250ms）才回写到父组件的 `onChange`。这样可避免每次按键
+ * 都触发 zustand persist 中间件的同步 stringify + 文件 IO 写入，导致输入卡顿。
  */
 export const PromptTextarea = forwardRef<PromptTextareaRef, PromptTextareaProps>(
   function PromptTextarea(
@@ -43,6 +49,7 @@ export const PromptTextarea = forwardRef<PromptTextareaRef, PromptTextareaProps>
       className = 'min-h-[120px] resize-none',
       expandTitle = '编辑描述文字',
       disabled,
+      debounceMs = 250,
     },
     ref,
   ) {
@@ -50,29 +57,110 @@ export const PromptTextarea = forwardRef<PromptTextareaRef, PromptTextareaProps>
     const [draft, setDraft] = useState(value);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-    // 打开时同步当前值到草稿
+    // —— 本地输入镜像（用于消除每键写盘卡顿）——
+    const [inputValue, setInputValue] = useState(value);
+    /** 标记当前 inputValue 是否是用户正在编辑（尚未 flush 到外部）。 */
+    const dirtyRef = useRef(false);
+    /** 待 flush 的最新文本（即 inputValue 的同步副本，避免闭包陈旧）。 */
+    const pendingValueRef = useRef(value);
+    const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const onChangeRef = useRef(onChange);
     useEffect(() => {
-      if (open) setDraft(value);
-    }, [open, value]);
+      onChangeRef.current = onChange;
+    }, [onChange]);
 
-    const charCount = value.length;
+    const flushNow = useCallback(() => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+      if (dirtyRef.current) {
+        dirtyRef.current = false;
+        // 仅在确实变化时才触发外部 setState
+        onChangeRef.current(pendingValueRef.current);
+      }
+    }, []);
+
+    // 外部 value 变化时（如：历史回填、放大对话框"应用"、清空等），同步到本地。
+    // 仅在用户没有正在输入（无 pending）时同步，避免把用户当前输入覆盖掉。
+    useEffect(() => {
+      if (!dirtyRef.current && value !== inputValue) {
+        setInputValue(value);
+        pendingValueRef.current = value;
+      }
+    }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // 卸载时确保 flush（避免输入丢失）
+    useEffect(() => {
+      return () => {
+        if (debounceTimerRef.current) {
+          clearTimeout(debounceTimerRef.current);
+          debounceTimerRef.current = null;
+        }
+        if (dirtyRef.current) {
+          onChangeRef.current(pendingValueRef.current);
+        }
+      };
+    }, []);
+
+    const handleLocalChange = useCallback((next: string) => {
+      pendingValueRef.current = next;
+      dirtyRef.current = true;
+      setInputValue(next);
+      if (debounceMs <= 0) {
+        // 同步回写
+        dirtyRef.current = false;
+        onChangeRef.current(next);
+        return;
+      }
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+      debounceTimerRef.current = setTimeout(() => {
+        debounceTimerRef.current = null;
+        if (dirtyRef.current) {
+          dirtyRef.current = false;
+          onChangeRef.current(pendingValueRef.current);
+        }
+      }, debounceMs);
+    }, [debounceMs]);
+
+    // 打开放大对话框时先 flush 一次，确保 draft 拿到最新文本
+    useEffect(() => {
+      if (open) {
+        flushNow();
+        setDraft(pendingValueRef.current);
+      }
+    }, [open, flushNow]);
+
+    const charCount = inputValue.length;
 
     useImperativeHandle(ref, () => ({
       insertAtCursor: (text: string) => {
+        // 先 flush 待写的本地值，保证基于"最新文本"插入
+        flushNow();
+        const current = pendingValueRef.current;
         const textarea = textareaRef.current;
         if (!textarea) {
           // 回退：末尾追加
-          const sep = value.length > 0 && !value.endsWith(' ') && !value.endsWith('\n') ? ' ' : '';
-          onChange(`${value}${sep}${text} `);
+          const sep = current.length > 0 && !current.endsWith(' ') && !current.endsWith('\n') ? ' ' : '';
+          const newValue = `${current}${sep}${text} `;
+          pendingValueRef.current = newValue;
+          dirtyRef.current = false;
+          setInputValue(newValue);
+          onChangeRef.current(newValue);
           return;
         }
-        const start = textarea.selectionStart ?? value.length;
-        const end = textarea.selectionEnd ?? value.length;
-        const before = value.slice(0, start);
-        const after = value.slice(end);
+        const start = textarea.selectionStart ?? current.length;
+        const end = textarea.selectionEnd ?? current.length;
+        const before = current.slice(0, start);
+        const after = current.slice(end);
         const sep = before.length > 0 && !before.endsWith(' ') && !before.endsWith('\n') ? ' ' : '';
         const newValue = `${before}${sep}${text} ${after}`;
-        onChange(newValue);
+        pendingValueRef.current = newValue;
+        dirtyRef.current = false;
+        setInputValue(newValue);
+        onChangeRef.current(newValue);
         // 恢复光标到插入文本后
         setTimeout(() => {
           const newPos = start + sep.length + text.length + 1;
@@ -80,15 +168,16 @@ export const PromptTextarea = forwardRef<PromptTextareaRef, PromptTextareaProps>
           textarea.focus();
         }, 0);
       },
-    }), [value, onChange]);
+    }), [flushNow]);
 
     return (
       <div className="relative">
         <Textarea
           ref={textareaRef}
           placeholder={placeholder}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
+          value={inputValue}
+          onChange={(e) => handleLocalChange(e.target.value)}
+          onBlur={flushNow}
           className={`${className} pr-10`}
           disabled={disabled}
         />
@@ -137,7 +226,7 @@ export const PromptTextarea = forwardRef<PromptTextareaRef, PromptTextareaProps>
                 <Button
                   variant="outline"
                   onClick={() => {
-                    setDraft(value);
+                    setDraft(pendingValueRef.current);
                     setOpen(false);
                   }}
                 >
@@ -145,7 +234,11 @@ export const PromptTextarea = forwardRef<PromptTextareaRef, PromptTextareaProps>
                 </Button>
                 <Button
                   onClick={() => {
-                    onChange(draft);
+                    // 应用：更新本地镜像并立即 flush 到外部
+                    pendingValueRef.current = draft;
+                    dirtyRef.current = false;
+                    setInputValue(draft);
+                    onChangeRef.current(draft);
                     setOpen(false);
                   }}
                 >

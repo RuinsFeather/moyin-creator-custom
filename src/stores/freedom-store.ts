@@ -8,7 +8,7 @@ import { fileStorage } from '../lib/indexed-db-storage';
 
 // ==================== Types ====================
 
-export type StudioMode = 'image' | 'video' | 'cinema';
+export type StudioMode = 'image' | 'video';
 
 /** 视频工作室功能模式 */
 export type VideoFeatureMode = 'text-to-video' | 'image-to-video' | 'multi-reference';
@@ -24,6 +24,8 @@ export interface HistoryEntry {
   thumbnailUrl?: string;
   params: Record<string, any>;
   createdAt: number;
+  /** 生成耗时（毫秒）。从用户点击"生成"到拿到最终结果的时长。 */
+  durationMs?: number;
   mediaId?: string;
   type: 'image' | 'video';
 }
@@ -77,7 +79,7 @@ export interface UploadProgressEntry {
  */
 export interface ActiveTask {
   id: string;
-  type: 'image' | 'video' | 'cinema';
+  type: 'image' | 'video';
   prompt: string;
   model: string;
   status: ActiveTaskStatus;
@@ -123,15 +125,6 @@ interface FreedomState {
   videoMultiRefAssets: VideoMultiRefAsset[];
   /** 上传进度（按 asset.id 索引），运行时状态，不持久化 */
   uploadProgress: Record<string, UploadProgressEntry>;
-  
-  // Cinema studio
-  cinemaPrompt: string;
-  selectedCamera: string;
-  selectedLens: string;
-  selectedFocalLength: number;
-  selectedAperture: string;
-  cinemaResult: string | null;
-  cinemaGenerating: boolean;
 
   // 进行中的任务（运行时状态，不入持久化）
   activeTasks: ActiveTask[];
@@ -168,15 +161,6 @@ interface FreedomActions {
   clearVideoUploads: () => void;
   setUploadProgress: (id: string, entry: UploadProgressEntry | null) => void;
   clearUploadProgress: () => void;
-  
-  // Cinema studio actions
-  setCinemaPrompt: (prompt: string) => void;
-  setSelectedCamera: (camera: string) => void;
-  setSelectedLens: (lens: string) => void;
-  setSelectedFocalLength: (fl: number) => void;
-  setSelectedAperture: (aperture: string) => void;
-  setCinemaResult: (url: string | null) => void;
-  setCinemaGenerating: (generating: boolean) => void;
 
   // Active task actions
   addActiveTask: (task: ActiveTask) => void;
@@ -216,14 +200,6 @@ const initialState: FreedomState = {
   videoReferenceUploads: [],
   videoMultiRefAssets: [],
   uploadProgress: {},
-  
-  cinemaPrompt: '',
-  selectedCamera: 'Modular 8K Digital',
-  selectedLens: 'Fast Prime Cine',
-  selectedFocalLength: 35,
-  selectedAperture: 'f/2.8',
-  cinemaResult: null,
-  cinemaGenerating: false,
 
   activeTasks: [],
 };
@@ -286,15 +262,6 @@ export const useFreedomStore = create<FreedomStore>()(
       }),
       clearUploadProgress: () => set({ uploadProgress: {} }),
 
-      // Cinema studio
-      setCinemaPrompt: (prompt) => set({ cinemaPrompt: prompt }),
-      setSelectedCamera: (camera) => set({ selectedCamera: camera }),
-      setSelectedLens: (lens) => set({ selectedLens: lens }),
-      setSelectedFocalLength: (fl) => set({ selectedFocalLength: fl }),
-      setSelectedAperture: (aperture) => set({ selectedAperture: aperture }),
-      setCinemaResult: (url) => set({ cinemaResult: url }),
-      setCinemaGenerating: (generating) => set({ cinemaGenerating: generating }),
-
       // Active tasks
       addActiveTask: (task) => {
         set((state) => ({ activeTasks: [task, ...state.activeTasks].slice(0, 20) }));
@@ -350,12 +317,7 @@ export const useFreedomStore = create<FreedomStore>()(
         videoResolution: state.videoResolution,
         videoFeatureMode: state.videoFeatureMode,
         videoI2VSubMode: state.videoI2VSubMode,
-        cinemaPrompt: state.cinemaPrompt,
-        selectedCamera: state.selectedCamera,
-        selectedLens: state.selectedLens,
-        selectedFocalLength: state.selectedFocalLength,
-        selectedAperture: state.selectedAperture,
-        // 注意：imageHistory / videoHistory / cinemaHistory 已迁移到独立的
+        // 注意：imageHistory / videoHistory 已迁移到独立的
         // `useFreedomHistoryStore`（按项目隔离的 per-project storage）。
       }),
       onRehydrateStorage: () => (state) => {
@@ -363,7 +325,6 @@ export const useFreedomStore = create<FreedomStore>()(
           // 双重保险：恢复后强制重置所有 generating 标志
           state.imageGenerating = false;
           state.videoGenerating = false;
-          state.cinemaGenerating = false;
           // 运行时任务列表不持久化，强制清空（防止旧版本残留）
           state.activeTasks = [];
         }
@@ -373,10 +334,18 @@ export const useFreedomStore = create<FreedomStore>()(
         if (version < 2 && persistedState) {
           delete persistedState.imageGenerating;
           delete persistedState.videoGenerating;
-          delete persistedState.cinemaGenerating;
           delete persistedState.imageResult;
           delete persistedState.videoResult;
+        }
+        // 移除已废弃的电影工作室相关字段（来自 v2 及更早版本）
+        if (persistedState) {
+          delete persistedState.cinemaPrompt;
+          delete persistedState.selectedCamera;
+          delete persistedState.selectedLens;
+          delete persistedState.selectedFocalLength;
+          delete persistedState.selectedAperture;
           delete persistedState.cinemaResult;
+          delete persistedState.cinemaGenerating;
         }
         return persistedState;
       },

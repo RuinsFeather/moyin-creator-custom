@@ -158,6 +158,7 @@ export function ImageStudio() {
 
     const taskId = `img_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const controller = new AbortController();
+    const startedAt = Date.now();
 
     // 快照当前参数（避免后台运行期间用户改了 store 状态影响任务）
     const snapshot = {
@@ -223,6 +224,7 @@ export function ImageStudio() {
             ...snapshot.extraParams,
           },
           createdAt: Date.now(),
+          durationMs: Date.now() - startedAt,
           mediaId: result.mediaId,
           type: 'image',
         });

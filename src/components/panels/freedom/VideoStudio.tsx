@@ -827,6 +827,7 @@ export function VideoStudio() {
     // 创建任务
     const taskId = `vid_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const controller = new AbortController();
+    const startedAt = Date.now();
 
     addActiveTask({
       id: taskId,
@@ -896,6 +897,7 @@ export function VideoStudio() {
             uploadCount: uploadFiles?.length ?? 0,
           },
           createdAt: Date.now(),
+          durationMs: Date.now() - startedAt,
           mediaId: result.mediaId,
           type: 'video',
         });
