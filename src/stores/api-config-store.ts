@@ -17,6 +17,7 @@ import {
   parseApiKeys,
   maskApiKey as maskKey,
   updateProviderKeys,
+  clearProviderManagers,
   classifyModelByName,
 } from '@/lib/api-key-manager';
 import { injectDiscoveryCache, type DiscoveredModelLimits } from '@/lib/ai/model-registry';
@@ -572,6 +573,8 @@ export const useAPIConfigStore = create<APIConfigStore>()(
         set((state) => ({
           providers: state.providers.filter(p => p.id !== id),
         }));
+        // 同步清除该 provider 的所有 ApiKeyManager 缓存（包括 scoped managers）
+        clearProviderManagers(id);
         if (provider) {
           console.log(`[APIConfig] Removed provider: ${provider.name}`);
         }

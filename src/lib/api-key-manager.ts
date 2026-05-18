@@ -294,8 +294,14 @@ export class ApiKeyManager {
   private keys: string[];
   private currentIndex: number;
   private blacklist: Map<string, BlacklistedKey> = new Map();
+  /**
+   * 保存当前所有 keys 拼接后的原始字符串（输入原样），
+   * 用于供外部快速判断“是否需要 reset”。
+   */
+  private sourceKeyString: string;
 
   constructor(apiKeyString: string) {
+    this.sourceKeyString = apiKeyString;
     this.keys = parseApiKeys(apiKeyString);
     // Start with a random index for load balancing
     this.currentIndex = this.keys.length > 0 ? Math.floor(Math.random() * this.keys.length) : 0;
@@ -430,9 +436,18 @@ export class ApiKeyManager {
    * Reset the manager with new keys
    */
   reset(apiKeyString: string): void {
+    this.sourceKeyString = apiKeyString;
     this.keys = parseApiKeys(apiKeyString);
     this.currentIndex = this.keys.length > 0 ? Math.floor(Math.random() * this.keys.length) : 0;
     this.blacklist.clear();
+  }
+
+  /**
+   * 返回创建 / 上次 reset 时使用的原始 apiKey 字符串。
+   * 用于缓存命中时快速判断是否需要同步新 key。
+   */
+  getSourceKeyString(): string {
+    return this.sourceKeyString;
   }
 }
 
@@ -447,29 +462,72 @@ function getScopedProviderKey(providerId: string, scopeKey?: string): string {
 
 /**
  * Get or create an ApiKeyManager for a provider
+ *
+ * 重要：缓存命中时也会比对 `apiKey` 字符串是否变化，若变化则自动 reset。
+ * 这样即使上游调用者未显式调用 `updateProviderKeys`（如忘记传 scopeKey），
+ * 下一次取 manager 时仍能拿到最新 key，避免“修改 key 后需重启”的 bug。
  */
 export function getProviderKeyManager(providerId: string, apiKey: string, scopeKey?: string): ApiKeyManager {
   const managerKey = getScopedProviderKey(providerId, scopeKey);
   let manager = providerManagers.get(managerKey);
-  
+
   if (!manager) {
     manager = new ApiKeyManager(apiKey);
     providerManagers.set(managerKey, manager);
+  } else if (manager.getSourceKeyString() !== apiKey) {
+    // 供应商 key 已变更 —— 同步刷新缓存的 manager
+    manager.reset(apiKey);
   }
-  
+
   return manager;
 }
 
 /**
  * Update the keys for a provider's manager
+ *
+ * 默认会同步刷新该 providerId 下的**所有** scoped manager（例如
+ * `${providerId}::image:gpt-image-1` 这种按 feature/model 拆分出的独立 manager），
+ * 避免只刷新了未指定 scopeKey 的默认 manager 而遗漏 scoped manager。
  */
 export function updateProviderKeys(providerId: string, apiKey: string, scopeKey?: string): void {
-  const managerKey = getScopedProviderKey(providerId, scopeKey);
-  const manager = providerManagers.get(managerKey);
-  if (manager) {
-    manager.reset(apiKey);
+  if (scopeKey !== undefined) {
+    const managerKey = getScopedProviderKey(providerId, scopeKey);
+    const manager = providerManagers.get(managerKey);
+    if (manager) {
+      manager.reset(apiKey);
+    } else {
+      providerManagers.set(managerKey, new ApiKeyManager(apiKey));
+    }
+    return;
+  }
+
+  // 未指定 scopeKey：刷新默认 manager + 该 provider 下所有 scoped manager
+  const defaultKey = getScopedProviderKey(providerId);
+  const defaultManager = providerManagers.get(defaultKey);
+  if (defaultManager) {
+    defaultManager.reset(apiKey);
   } else {
-    providerManagers.set(managerKey, new ApiKeyManager(apiKey));
+    providerManagers.set(defaultKey, new ApiKeyManager(apiKey));
+  }
+  const prefix = `${providerId}::`;
+  for (const [k, m] of providerManagers.entries()) {
+    if (k.startsWith(prefix)) {
+      m.reset(apiKey);
+    }
+  }
+}
+
+/**
+ * Clear all managers for a specific provider (default + all scoped)
+ * 用于删除供应商时从缓存中清除该 provider 的所有 ApiKeyManager。
+ */
+export function clearProviderManagers(providerId: string): void {
+  providerManagers.delete(getScopedProviderKey(providerId));
+  const prefix = `${providerId}::`;
+  for (const k of Array.from(providerManagers.keys())) {
+    if (k.startsWith(prefix)) {
+      providerManagers.delete(k);
+    }
   }
 }
 
