@@ -3,7 +3,8 @@
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { persist, createJSONStorage } from 'zustand/middleware';
+import { fileStorage } from '../lib/indexed-db-storage';
 
 // ==================== Types ====================
 
@@ -131,11 +132,6 @@ interface FreedomState {
   selectedAperture: string;
   cinemaResult: string | null;
   cinemaGenerating: boolean;
-  
-  // History
-  imageHistory: HistoryEntry[];
-  videoHistory: HistoryEntry[];
-  cinemaHistory: HistoryEntry[];
 
   // 进行中的任务（运行时状态，不入持久化）
   activeTasks: ActiveTask[];
@@ -181,11 +177,6 @@ interface FreedomActions {
   setSelectedAperture: (aperture: string) => void;
   setCinemaResult: (url: string | null) => void;
   setCinemaGenerating: (generating: boolean) => void;
-  
-  // History actions
-  addHistoryEntry: (entry: HistoryEntry) => void;
-  removeHistoryEntry: (id: string) => void;
-  clearHistory: (type: 'image' | 'video' | 'cinema') => void;
 
   // Active task actions
   addActiveTask: (task: ActiveTask) => void;
@@ -197,8 +188,6 @@ interface FreedomActions {
 type FreedomStore = FreedomState & FreedomActions;
 
 // ==================== Constants ====================
-
-const MAX_HISTORY = 50;
 
 const initialState: FreedomState = {
   activeStudio: 'image',
@@ -235,10 +224,6 @@ const initialState: FreedomState = {
   selectedAperture: 'f/2.8',
   cinemaResult: null,
   cinemaGenerating: false,
-  
-  imageHistory: [],
-  videoHistory: [],
-  cinemaHistory: [],
 
   activeTasks: [],
 };
@@ -310,37 +295,6 @@ export const useFreedomStore = create<FreedomStore>()(
       setCinemaResult: (url) => set({ cinemaResult: url }),
       setCinemaGenerating: (generating) => set({ cinemaGenerating: generating }),
 
-      // History
-      addHistoryEntry: (entry) => {
-        const historyKey = entry.type === 'image'
-          ? 'imageHistory'
-          : entry.type === 'video'
-          ? 'videoHistory'
-          : 'cinemaHistory';
-        set((state) => {
-          const current = state[historyKey as keyof FreedomState] as HistoryEntry[];
-          const updated = [entry, ...current].slice(0, MAX_HISTORY);
-          return { [historyKey]: updated };
-        });
-      },
-
-      removeHistoryEntry: (id) => {
-        set((state) => ({
-          imageHistory: state.imageHistory.filter(h => h.id !== id),
-          videoHistory: state.videoHistory.filter(h => h.id !== id),
-          cinemaHistory: state.cinemaHistory.filter(h => h.id !== id),
-        }));
-      },
-
-      clearHistory: (type) => {
-        const key = type === 'image'
-          ? 'imageHistory'
-          : type === 'video'
-          ? 'videoHistory'
-          : 'cinemaHistory';
-        set({ [key]: [] });
-      },
-
       // Active tasks
       addActiveTask: (task) => {
         set((state) => ({ activeTasks: [task, ...state.activeTasks].slice(0, 20) }));
@@ -372,6 +326,11 @@ export const useFreedomStore = create<FreedomStore>()(
     {
       name: 'moyin-freedom',
       version: 2,
+      // 将“自由”工作室的用户偏好与历史记录写入数据存储位置（fileStorage），
+      // 这样 SettingsPanel 中“导出/导入/链接/移动数据存储位置”等操作会自动
+      // 带上这些历史；清理时也与其它 moyin-* 项一致（localStorage + IndexedDB
+      // 清理已覆盖旧路径，新路径下的 fileStorage 文件随存储目录的导入/链接而切换）。
+      storage: createJSONStorage(() => fileStorage),
       // 仅持久化用户配置/历史，运行时状态（生成中标志、临时结果）不入库，
       // 避免上次任务异常中断后 imageGenerating 卡为 true 导致页面无法生图
       partialize: (state) => ({
@@ -396,9 +355,8 @@ export const useFreedomStore = create<FreedomStore>()(
         selectedLens: state.selectedLens,
         selectedFocalLength: state.selectedFocalLength,
         selectedAperture: state.selectedAperture,
-        imageHistory: state.imageHistory,
-        videoHistory: state.videoHistory,
-        cinemaHistory: state.cinemaHistory,
+        // 注意：imageHistory / videoHistory / cinemaHistory 已迁移到独立的
+        // `useFreedomHistoryStore`（按项目隔离的 per-project storage）。
       }),
       onRehydrateStorage: () => (state) => {
         if (state) {

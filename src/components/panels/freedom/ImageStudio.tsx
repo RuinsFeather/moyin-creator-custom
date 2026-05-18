@@ -14,6 +14,7 @@ import { Progress } from '@/components/ui/progress';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { useFreedomStore } from '@/stores/freedom-store';
+import { useFreedomHistoryStore } from '@/stores/freedom-history-store';
 import { ModelSelector } from './ModelSelector';
 import { GenerationHistory } from './GenerationHistory';
 import { ActiveTaskCard, formatElapsed } from './ActiveTaskCard';
@@ -52,10 +53,10 @@ export function ImageStudio() {
     imageReferenceImages, setImageReferenceImages,
     imageResult, setImageResult,
     imageGenerating, setImageGenerating,
-    addHistoryEntry,
     activeTasks,
     addActiveTask, updateActiveTask, removeActiveTask, cancelActiveTask,
   } = useFreedomStore();
+  const addHistoryEntry = useFreedomHistoryStore((s) => s.addHistoryEntry);
 
   // 当前查看的任务（用户点击历史栏中的活动任务卡片）
   const viewingTask = useMemo(

@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
 import { useFreedomStore } from '@/stores/freedom-store';
+import { useFreedomHistoryStore } from '@/stores/freedom-history-store';
 import { CameraControls } from './CameraControls';
 import { GenerationHistory } from './GenerationHistory';
 import { generateFreedomImage } from '@/lib/freedom/freedom-api';
@@ -29,8 +30,8 @@ export function CinemaStudio() {
     selectedAperture, setSelectedAperture,
     cinemaResult, setCinemaResult,
     cinemaGenerating, setCinemaGenerating,
-    addHistoryEntry,
   } = useFreedomStore();
+  const addHistoryEntry = useFreedomHistoryStore((s) => s.addHistoryEntry);
 
   // Build the compiled prompt preview
   const compiledPrompt = useMemo(() => {

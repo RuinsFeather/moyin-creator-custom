@@ -20,6 +20,7 @@ import { useCharacterLibraryStore } from '@/stores/character-library-store';
 import { useSceneStore } from '@/stores/scene-store';
 import { useSimpleTimelineStore } from '@/stores/simple-timeline-store';
 import { useSClassStore } from '@/stores/sclass-store';
+import { useFreedomHistoryStore } from '@/stores/freedom-history-store';
 
 /**
  * Switch to a different project. Saves current project data and loads new project data.
@@ -98,6 +99,13 @@ export async function switchProject(newProjectId: string): Promise<void> {
     await useSClassStore.persist.rehydrate();
   } catch (e) {
     console.warn('[ProjectSwitcher] Failed to rehydrate sclass store:', e);
+  }
+
+  try {
+    // “自由”工作室的生成历史与项目绑定：切换项目后重新加载对应项目的历史记录。
+    await useFreedomHistoryStore.persist.rehydrate();
+  } catch (e) {
+    console.warn('[ProjectSwitcher] Failed to rehydrate freedom history store:', e);
   }
 
   // 4. NOW sync internal activeProjectId in stores that track it.

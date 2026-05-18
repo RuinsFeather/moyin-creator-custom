@@ -87,8 +87,9 @@ export interface GenerationResult {
 
 const IMAGE_POLL_INTERVAL = 2000;
 const IMAGE_POLL_MAX_ATTEMPTS = 60;
+// 视频生成统一采用无限轮询：耗时由模型与队列决定，不再设置客户端超时上限。
+// 用户可通过任务卡片的取消按钮主动中断（AbortSignal）。
 const VIDEO_POLL_INTERVAL = 2000;
-const VIDEO_POLL_MAX_ATTEMPTS = 120;
 
 // Retry config
 const RETRY_MAX_ATTEMPTS = 3;
@@ -506,13 +507,16 @@ async function _generateFreedomImageInner(
   // ── Smart Routing: choose endpoint based on model metadata ──
   const endpointTypes = useAPIConfigStore.getState().modelEndpointTypes[model];
   const route = detectFreedomImageRoute(model, endpointTypes);
+  const isGptImageModel = model.toLowerCase().startsWith('gpt-image');
 
   console.log('[Freedom] Generating image:', {
     model,
     route,
+    isGptImageModel,
     endpointTypes,
     prompt: params.prompt.slice(0, 50),
   });
+
   if (route === 'midjourney') {
     return await generateViaMidjourneyEndpoint(params, model, apiKey, normalizedBase);
   }
@@ -538,6 +542,12 @@ async function _generateFreedomImageInner(
       return await generateViaChatCompletions(params, model, apiKey, normalizedBase);
     }
   }
+
+  if (route === 'openai_images' && isGptImageModel && params.referenceImages && params.referenceImages.length > 0) {
+    console.log('[Freedom] GPT Image with reference images: routing through chat completions for multimodal input');
+    return await generateViaChatCompletions(params, model, apiKey, normalizedBase);
+  }
+
   return await generateViaImagesEndpoint(params, model, apiKey, normalizedBase, endpointTypes);
 }
 
@@ -846,12 +856,22 @@ async function generateViaImagesEndpoint(
   if (params.extraParams) {
     Object.assign(body, params.extraParams);
   }
-  // 参考图：单张走 image，多张走 images。具体字段名随各供应商有差异，
-  // 这里同时附带 image / images，未识别字段会被服务端忽略
+  // 参考图：GPT-image 系列使用 image 字段（支持单张字符串或数组）
+  // 将 dataURL 转为纯 base64（去掉 data:xxx;base64, 前缀），兼容各类代理
   if (params.referenceImages && params.referenceImages.length > 0) {
-    const refs = params.referenceImages.slice(0, 10);
-    body.image = refs[0];
-    if (refs.length > 1) body.images = refs;
+    const refs = params.referenceImages.slice(0, 16);
+    const toImageValue = (dataUrl: string): string => {
+      // 如果已经是 http(s) URL，直接使用
+      if (/^https?:\/\//i.test(dataUrl)) return dataUrl;
+      // dataURL → 去掉前缀，保留纯 base64
+      const match = dataUrl.match(/^data:[^;]+;base64,(.+)$/);
+      return match ? match[1] : dataUrl;
+    };
+    if (refs.length === 1) {
+      body.image = toImageValue(refs[0]);
+    } else {
+      body.image = refs.map(toImageValue);
+    }
   }
 
   const imagePaths = getImageEndpointPaths(endpointTypes || []);
@@ -1654,7 +1674,9 @@ async function generateVideoViaOpenAIOfficial(
   if (!taskId) throw new Error('Sora 返回空任务 ID');
 
   const pollUrl = buildEndpoint(baseUrl, `videos/${taskId}`);
-  for (let i = 0; i < VIDEO_POLL_MAX_ATTEMPTS; i++) {
+  // 无限轮询：视频生成耗时不定，由用户手动取消或服务端返回失败状态
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
     await new Promise((r) => setTimeout(r, VIDEO_POLL_INTERVAL));
     const pollResp = await corsFetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
@@ -1670,8 +1692,6 @@ async function generateVideoViaOpenAIOfficial(
       throw new Error(pollData.error?.message || pollData.error || pollData.message || 'Sora 生成失败');
     }
   }
-
-  throw new Error('Sora 生成超时');
 }
 
 async function generateVideoViaUnified(
@@ -1817,10 +1837,11 @@ async function generateVideoViaUnified(
   if (directUrl) return { url: directUrl, taskId: taskId ? String(taskId) : undefined };
   if (!taskId) throw new Error('统一视频接口返回空任务 ID');
 
-  // 轮询：直接使用端点类型对应的 URL
+  // 轮询：直接使用端点类型对应的 URL（无限轮询，由用户手动取消或服务端返回失败）
   const pollUrl = `${rootBase}${endpointPaths.poll(String(taskId))}`;
 
-  for (let i = 0; i < VIDEO_POLL_MAX_ATTEMPTS; i++) {
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
     await abortableSleep(VIDEO_POLL_INTERVAL, params.signal);
     const pollResp = await corsFetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
@@ -1837,8 +1858,6 @@ async function generateVideoViaUnified(
       throw new Error(pollData.error?.message || pollData.error || pollData.message || '视频生成失败');
     }
   }
-
-  throw new Error('视频生成超时');
 }
 
 /**
@@ -1926,11 +1945,11 @@ async function generateVideoViaVolc(
   if (!taskId) throw new Error('Volc 返回空任务 ID');
 
   const pollUrl = `${submitPath}/${taskId}`;
-  // Seedance/Doubao 多模态参考耗时长（尤其带视频/音频参考时常需 5~15 分钟），
-  // 这里把 Volc 路径独立放宽到 ~20 分钟（间隔也拉长到 5s 减少无效请求）。
+  // 无限轮询：Seedance/Doubao 多模态参考耗时不定，不再设超时上限，
+  // 间隔保持 5s 减少无效请求，由用户手动取消或服务端返回失败状态。
   const VOLC_POLL_INTERVAL = 5000;
-  const VOLC_POLL_MAX_ATTEMPTS = 240; // 240 * 5s = 1200s = 20min
-  for (let i = 0; i < VOLC_POLL_MAX_ATTEMPTS; i++) {
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
     await abortableSleep(VOLC_POLL_INTERVAL, params.signal);
     const pollResp = await corsFetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
@@ -1948,8 +1967,6 @@ async function generateVideoViaVolc(
       throw new Error(pollData.error?.message || pollData.error || 'Volc 视频生成失败');
     }
   }
-
-  throw new Error('Volc 视频生成超时（已等待 20 分钟仍未完成，可前往火山方舟控制台查看任务进度）');
 }
 
 async function generateVideoViaWan(
@@ -1998,7 +2015,9 @@ async function generateVideoViaWan(
   if (!taskId) throw new Error('Wan 返回空任务 ID');
 
   const pollUrl = `${rootBase}/alibailian/api/v1/tasks/${taskId}`;
-  for (let i = 0; i < VIDEO_POLL_MAX_ATTEMPTS; i++) {
+  // 无限轮询：Wan 视频生成不再设超时上限，由服务端返回完成/失败状态。
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
     await new Promise((r) => setTimeout(r, VIDEO_POLL_INTERVAL));
     const pollResp = await corsFetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
@@ -2015,8 +2034,6 @@ async function generateVideoViaWan(
       throw new Error(pollData.output?.message || pollData.output?.error || 'Wan 视频生成失败');
     }
   }
-
-  throw new Error('Wan 视频生成超时');
 }
 
 /**
@@ -2084,12 +2101,12 @@ async function generateVideoViaHappyHorseR2V(
   const taskId = submitData.output?.task_id;
   if (!taskId) throw new Error('HappyHorse R2V 返回空任务 ID');
 
-  // 轮询（参考生视频通常 1-5 分钟，使用较长超时）
+  // 无限轮询（参考生视频耗时不定，不再设超时上限，由用户手动取消或服务端返回完成/失败）
   const POLL_INTERVAL = 5000;
-  const POLL_MAX_ATTEMPTS = 240; // 240 * 5s = 20min
   const pollUrl = `${rootBase}/alibailian/api/v1/tasks/${taskId}`;
 
-  for (let i = 0; i < POLL_MAX_ATTEMPTS; i++) {
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
     await abortableSleep(POLL_INTERVAL, params.signal);
     const pollResp = await corsFetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
@@ -2107,8 +2124,6 @@ async function generateVideoViaHappyHorseR2V(
       throw new Error(pollData.output?.message || pollData.output?.error || 'HappyHorse 参考生视频失败');
     }
   }
-
-  throw new Error('HappyHorse 参考生视频超时（已等待 20 分钟）');
 }
 
 // Native Kling endpoint paths (relative to /kling/v1/videos/)
@@ -2180,7 +2195,9 @@ async function generateVideoViaKling(
 
   // Poll URL mirrors the submit path: GET /kling/v1/videos/{path}/{task_id}
   const pollUrl = `${rootBase}/kling/v1/videos/${endpointPath}/${taskId}`;
-  for (let i = 0; i < VIDEO_POLL_MAX_ATTEMPTS; i++) {
+  // 无限轮询：Kling 视频生成耗时不定，不再设超时上限。
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
     await new Promise((r) => setTimeout(r, VIDEO_POLL_INTERVAL));
     const pollResp = await corsFetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
@@ -2200,8 +2217,6 @@ async function generateVideoViaKling(
       throw new Error(pollData.data?.task_status_msg || pollData.message || 'Kling 视频生成失败');
     }
   }
-
-  throw new Error('Kling 视频生成超时');
 }
 
 /**
@@ -2246,7 +2261,9 @@ async function generateVideoViaReplicate(
   if (!predictionId) throw new Error('Replicate 返回空 prediction ID');
 
   const pollUrl = `${rootBase}/replicate/v1/predictions/${predictionId}`;
-  for (let i = 0; i < VIDEO_POLL_MAX_ATTEMPTS; i++) {
+  // 无限轮询：Replicate 视频生成耗时不定，不再设超时上限。
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
     await new Promise(r => setTimeout(r, VIDEO_POLL_INTERVAL));
     const pollResp = await corsFetch(pollUrl, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
@@ -2263,7 +2280,6 @@ async function generateVideoViaReplicate(
       throw new Error(pollData.error || 'Replicate 视频生成失败');
     }
   }
-  throw new Error('Replicate 视频生成超时');
 }
 
 // ==================== Helpers ====================

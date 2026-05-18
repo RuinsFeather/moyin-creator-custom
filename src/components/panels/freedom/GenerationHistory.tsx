@@ -3,7 +3,7 @@
 import { Clock, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { useFreedomStore, type HistoryEntry } from '@/stores/freedom-store';
+import { useFreedomHistoryStore, type HistoryEntry } from '@/stores/freedom-history-store';
 import { cn } from '@/lib/utils';
 
 interface GenerationHistoryProps {
@@ -14,7 +14,7 @@ interface GenerationHistoryProps {
 
 export function GenerationHistory({ type, onSelect, className }: GenerationHistoryProps) {
   const { imageHistory, videoHistory, cinemaHistory, removeHistoryEntry, clearHistory } =
-    useFreedomStore();
+    useFreedomHistoryStore();
 
   const history =
     type === 'image'

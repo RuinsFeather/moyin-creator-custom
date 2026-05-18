@@ -12,6 +12,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Progress } from '@/components/ui/progress';
 import { toast } from 'sonner';
 import { useFreedomStore, type VideoFeatureMode, type ImageToVideoSubMode } from '@/stores/freedom-store';
+import { useFreedomHistoryStore } from '@/stores/freedom-history-store';
 import { useAPIConfigStore } from '@/stores/api-config-store';
 import { ModelSelector } from './ModelSelector';
 import { GenerationHistory } from './GenerationHistory';
@@ -274,13 +275,13 @@ export function VideoStudio() {
     clearVideoUploads,
     uploadProgress,
     setUploadProgress,
-    addHistoryEntry,
     activeTasks,
     addActiveTask,
     updateActiveTask,
     removeActiveTask,
     cancelActiveTask,
   } = useFreedomStore();
+  const addHistoryEntry = useFreedomHistoryStore((s) => s.addHistoryEntry);
 
   const modelEndpointTypes = useAPIConfigStore((s) => s.modelEndpointTypes);
   const endpointTypes = useMemo(
@@ -908,13 +909,13 @@ export function VideoStudio() {
         });
 
         toast.success('视频生成成功！已保存到素材库');
-        setTimeout(() => removeActiveTask(taskId), 4000);
+        // 保留任务卡片在当前任务列表中，由用户手动关闭，避免列表中“跳过”记录
       } catch (err: any) {
         clearInterval(progressTimer);
 
         if (err instanceof FreedomCancelledError || err?.name === 'AbortError') {
           updateActiveTask(taskId, { status: 'cancelled', message: '已取消' });
-          setTimeout(() => removeActiveTask(taskId), 3000);
+          // 保留已取消的任务卡片，由用户手动关闭
         } else {
           const message = err instanceof Error ? err.message : '未知错误';
           updateActiveTask(taskId, {
@@ -927,7 +928,7 @@ export function VideoStudio() {
             duration: Infinity,
             closeButton: true,
           });
-          setTimeout(() => removeActiveTask(taskId), 6000);
+          // 保留失败的任务卡片，由用户手动关闭，便于事后查看错误信息
         }
       } finally {
         setVideoGenerating(false);
