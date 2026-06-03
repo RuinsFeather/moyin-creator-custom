@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useCallback, useEffect, useRef, useState } from 'react';
-import { VideoIcon, Loader2, Download, Sparkles, Upload, X, Type, ImageIcon, Layers, Film, Music, StopCircle, FolderOpen } from 'lucide-react';
+import { VideoIcon, Loader2, Sparkles, Upload, X, Type, ImageIcon, Layers, Film, Music, StopCircle, FolderOpen } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { PromptTextarea, type PromptTextareaRef } from './PromptTextarea';
@@ -1501,13 +1501,6 @@ export function VideoStudio() {
               loop
               className="max-w-full max-h-[calc(100vh-200px)] rounded-lg shadow-lg"
             />
-            <div className="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity flex gap-2">
-              <Button size="sm" variant="secondary" asChild>
-                <a href={viewingTask?.resultUrl || videoResult || ''} download target="_blank" rel="noopener">
-                  <Download className="h-4 w-4 mr-1" /> 下载
-                </a>
-              </Button>
-            </div>
           </div>
         ) : (
           <div className="flex flex-col items-center gap-3 text-muted-foreground">

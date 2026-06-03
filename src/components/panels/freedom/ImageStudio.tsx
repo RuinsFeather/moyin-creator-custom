@@ -12,6 +12,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { toast } from 'sonner';
+import { saveFreedomMedia } from '@/lib/freedom/download-utils';
 import { cn } from '@/lib/utils';
 import { useFreedomStore } from '@/stores/freedom-store';
 import { useFreedomHistoryStore } from '@/stores/freedom-history-store';
@@ -63,6 +64,18 @@ export function ImageStudio() {
     () => (selectedTaskId ? activeTasks.find((t) => t.id === selectedTaskId) : null) || null,
     [selectedTaskId, activeTasks],
   );
+
+  const handleDownloadImage = useCallback(async () => {
+    const targetUrl = viewingTask?.resultUrl || imageResult;
+    if (!targetUrl) return;
+
+    try {
+      await saveFreedomMedia(targetUrl, `freedom-image-${Date.now()}.png`);
+    } catch (error) {
+      console.error('Image download failed:', error);
+      toast.error('下载失败，请稍后重试');
+    }
+  }, [viewingTask?.resultUrl, imageResult]);
 
   // 用于实时显示"已等待 Xs"，仅当主预览区有运行中任务时每秒刷新
   const viewingRunning = !!viewingTask && (viewingTask.status === 'running' || viewingTask.status === 'cancelling');
@@ -560,10 +573,8 @@ export function ImageStudio() {
               <Button size="sm" variant="secondary" onClick={() => setSaveToPropsOpen(true)}>
                 <Archive className="h-4 w-4 mr-1" /> 保存到道具库
               </Button>
-              <Button size="sm" variant="secondary" asChild>
-                <a href={viewingTask?.resultUrl || imageResult || ''} download target="_blank" rel="noopener">
-                  <Download className="h-4 w-4 mr-1" /> 下载
-                </a>
+              <Button size="sm" variant="secondary" onClick={() => void handleDownloadImage()}>
+                <Download className="h-4 w-4 mr-1" /> 下载
               </Button>
             </div>
           </div>
