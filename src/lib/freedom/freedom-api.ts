@@ -21,6 +21,7 @@ import { type AIFeature, useAPIConfigStore } from '@/stores/api-config-store';
 import { useMediaStore } from '@/stores/media-store';
 import { useProjectStore } from '@/stores/project-store';
 import { corsFetch } from '@/lib/cors-fetch';
+import { saveVideoToLocal } from '@/lib/image-storage';
 import { toast } from 'sonner';
 
 // ==================== Types ====================
@@ -103,9 +104,11 @@ const RETRY_BASE_DELAY = 3000;
 function isRetryableError(error: unknown): boolean {
   if (!error) return false;
   const err = error as any;
+  if (err.retryable === false) return false;
   if (err.status === 429 || err.status === 500 || err.status === 502 || err.status === 503 || err.status === 529) return true;
   if (err.code === 429 || err.code === 500 || err.code === 502 || err.code === 503 || err.code === 529) return true;
   const message = (err.message || '').toLowerCase();
+  if (message.includes('requested operation is unsupported') || message.includes('operation is unsupported')) return false;
   return (
     message.includes('429') ||
     message.includes('500') ||
@@ -1009,13 +1012,16 @@ async function generateViaKlingImagesEndpoint(
   return { url: imageUrl, taskId: data.task_id, mediaId };
 }
 
-function toHttpError(prefix: string, status: number, body: string): Error & { status: number } {
-  const friendly = mapFriendlyErrorMessage(body);
+function toHttpError(prefix: string, status: number, body: string): Error & { status: number; retryable?: boolean } {
+  const friendly = mapFriendlyErrorMessage(body, status);
   const message = friendly
     ? `${prefix}: ${status} ${friendly}`
     : `${prefix}: ${status} ${body}`;
-  const err = new Error(message) as Error & { status: number };
+  const err = new Error(message) as Error & { status: number; retryable?: boolean };
   err.status = status;
+  if (isKnownNonRetryableApiError(body, status)) {
+    err.retryable = false;
+  }
   return err;
 }
 
@@ -1023,8 +1029,52 @@ function toHttpError(prefix: string, status: number, body: string): Error & { st
  * 将供应商返回的业务错误码翻译成中文友好提示。
  * 命中已知错误码返回中文文案；未命中返回 null（外层会保留原始 body）。
  */
-function mapFriendlyErrorMessage(body: string): string | null {
+function mapFriendlyErrorMessage(body: string, status?: number): string | null {
   if (!body) return null;
+  const parsed = parseApiErrorBody(body);
+  const code = parsed.code.toLowerCase();
+  const type = parsed.type.toLowerCase();
+  const message = parsed.message.toLowerCase();
+  const raw = body.toLowerCase();
+
+  // 中转 / 上游：当前模型或当前端点不支持本次操作。
+  // 典型原始错误：429 {"error":{"message":"The requested operation is unsupported.","type":"upstream_error"}}
+  // 这里虽然 HTTP 状态码是 429，但语义不是“限流”，而是“操作/端点不支持”，不应反复重试。
+  if (/requested operation is unsupported/i.test(body)
+      || message.includes('operation is unsupported')
+      || code === 'unsupported_operation'
+      || code === 'operation_not_supported') {
+    return '当前供应商或所选模型不支持这次图片生成操作。请检查“自由板块-图片”的模型绑定是否选择了图片生成模型，或在模型列表中同步/修正该模型的端点类型后重试';
+  }
+
+  // OpenAI / 中转常见错误码
+  if (code === 'model_not_found' || message.includes('model not found') || message.includes('does not exist')) {
+    return '未找到所选模型，可能是模型 ID 填写错误、供应商未开放该模型，或模型列表未同步。请重新选择可用模型后重试';
+  }
+  if (type === 'authentication_error' || code === 'invalid_api_key' || message.includes('invalid api key') || message.includes('incorrect api key')) {
+    return 'API Key 无效或已失效，请在“设置 → API 管理”中检查并更新 Key';
+  }
+  if (type === 'permission_error' || code === 'permission_denied' || message.includes('permission denied')) {
+    return '当前 API Key 没有调用该模型或该功能的权限，请检查供应商账号权限、模型权限或更换 Key';
+  }
+  if (code === 'insufficient_quota' || code === 'billing_hard_limit_reached' || message.includes('insufficient quota')) {
+    return '账户额度不足或余额已用尽，请充值或更换有额度的 API Key 后重试';
+  }
+  if (type === 'rate_limit_error' || code === 'rate_limit_exceeded' || message.includes('too many requests') || message.includes('rate limit')) {
+    return '请求过于频繁或上游限流，请稍后重试；如果配置了多个 Key，系统会尝试自动切换可用 Key';
+  }
+  if (code === 'content_policy_violation' || code === 'content_filter' || message.includes('content policy')) {
+    return '请求内容触发了内容安全策略，请调整提示词或参考图后重试';
+  }
+  if (code === 'context_length_exceeded' || message.includes('context length')) {
+    return '输入内容过长，请缩短描述文字或减少参考图后重试';
+  }
+  if (type === 'upstream_error' || code === 'upstream_error') {
+    return status === 429
+      ? '上游服务暂时拒绝请求，可能是模型繁忙、额度受限或供应商限流。请稍后重试，或切换模型/供应商'
+      : '上游服务返回错误，请稍后重试，或切换模型/供应商';
+  }
+
   // 火山方舟：输入图片疑似包含真实人物，隐私保护拦截
   if (/InputImageSensitiveContentDetected\.PrivacyInformation/i.test(body)
       || /input image may contain real person/i.test(body)) {
@@ -1040,7 +1090,54 @@ function mapFriendlyErrorMessage(body: string): string | null {
     const reqId = reqIdMatch ? reqIdMatch[1] : '未知';
     return `该请求未能成功，因为输出的视频可能受到版权限制的约束。该请求id如下：${reqId}`;
   }
+  if (status === 400) return '请求参数不正确，请检查模型、宽高比、分辨率、参考图等设置后重试';
+  if (status === 401) return '认证失败，请检查 API Key 是否正确或是否已过期';
+  if (status === 403) return '当前账号或 API Key 没有调用权限，请检查供应商权限配置';
+  if (status === 404) return '接口或模型不存在，请检查 Base URL、模型 ID 与端点类型配置';
+  if (status === 408) return '请求超时，请稍后重试或切换网络/供应商';
+  if (status === 429) return '请求过于频繁或上游限流，请稍后重试；也可以切换模型、供应商或增加备用 Key';
+  if (status === 500) return '供应商服务器内部错误，请稍后重试';
+  if (status === 502) return '供应商网关错误，请稍后重试或切换供应商';
+  if (status === 503) return '供应商服务暂时不可用，请稍后重试';
+  if (status === 504) return '供应商响应超时，请稍后重试或切换供应商';
+  if (raw.includes('overloaded') || raw.includes('temporarily unavailable')) {
+    return '上游模型负载较高或暂时不可用，请稍后重试';
+  }
   return null;
+}
+
+function parseApiErrorBody(body: string): { message: string; type: string; code: string } {
+  try {
+    const parsed = JSON.parse(body);
+    const err = parsed?.error ?? parsed;
+    return {
+      message: String(err?.message ?? parsed?.message ?? body),
+      type: String(err?.type ?? parsed?.type ?? ''),
+      code: String(err?.code ?? parsed?.code ?? ''),
+    };
+  } catch {
+    return { message: body, type: '', code: '' };
+  }
+}
+
+function isKnownNonRetryableApiError(body: string, status?: number): boolean {
+  const parsed = parseApiErrorBody(body);
+  const text = `${parsed.message}\n${parsed.type}\n${parsed.code}\n${body}`.toLowerCase();
+  return (
+    text.includes('requested operation is unsupported') ||
+    text.includes('operation is unsupported') ||
+    text.includes('unsupported_operation') ||
+    text.includes('operation_not_supported') ||
+    text.includes('model_not_found') ||
+    text.includes('invalid_api_key') ||
+    text.includes('authentication_error') ||
+    text.includes('permission_denied') ||
+    text.includes('content_policy_violation') ||
+    status === 400 ||
+    status === 401 ||
+    status === 403 ||
+    status === 404
+  );
 }
 
 function buildMidjourneyPrompt(params: FreedomImageParams): string {
@@ -1398,8 +1495,16 @@ async function _generateFreedomVideoInner(
       break;
   }
 
-  const mediaId = saveToMediaLibrary(result.url, params.prompt, 'ai-video');
-  return { ...result, mediaId };
+  const persistentUrl = await persistFreedomVideoResult(result.url, params.prompt);
+  const mediaId = saveToMediaLibrary(persistentUrl, params.prompt, 'ai-video');
+  return { ...result, url: persistentUrl, mediaId };
+}
+
+async function persistFreedomVideoResult(url: string, prompt: string): Promise<string> {
+  if (!url || url.startsWith('local-image://')) return url;
+  const safeName = prompt.slice(0, 30).replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '_') || 'freedom_video';
+  const filename = `${safeName}_${Date.now()}.mp4`;
+  return saveVideoToLocal(url, filename);
 }
 
 /**

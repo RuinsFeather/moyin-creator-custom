@@ -325,6 +325,27 @@ export function VideoStudio() {
     cancelActiveTask(taskId);
   }, [cancelActiveTask]);
 
+  const moveCompletedVideoTasksToHistory = useCallback(() => {
+    const completedTasks = useFreedomStore
+      .getState()
+      .activeTasks
+      .filter((task) => task.type === 'video' && task.status === 'done' && !!task.resultUrl);
+
+    completedTasks.forEach((task) => {
+      addHistoryEntry({
+        id: task.id,
+        prompt: task.prompt,
+        model: task.model,
+        resultUrl: task.resultUrl!,
+        thumbnailUrl: task.thumbnailUrl,
+        params: {},
+        createdAt: task.createdAt,
+        type: 'video',
+      });
+      removeActiveTask(task.id);
+    });
+  }, [addHistoryEntry, removeActiveTask]);
+
   const capabilityModelId = useMemo(
     () => resolveVideoCapabilityModelId(selectedVideoModel),
     [selectedVideoModel],
@@ -829,6 +850,10 @@ export function VideoStudio() {
     const controller = new AbortController();
     const startedAt = Date.now();
 
+    // 新建视频任务时，将此前已成功完成的任务从“当前任务”迁移到历史记录。
+    // 失败/取消的任务继续保留在当前任务中，便于用户手动查看和清除。
+    moveCompletedVideoTasksToHistory();
+
     addActiveTask({
       id: taskId,
       type: 'video',
@@ -957,6 +982,7 @@ export function VideoStudio() {
     addActiveTask,
     updateActiveTask,
     removeActiveTask,
+    moveCompletedVideoTasksToHistory,
     setSelectedTaskId,
   ]);
 

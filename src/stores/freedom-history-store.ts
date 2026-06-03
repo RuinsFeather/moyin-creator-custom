@@ -59,7 +59,9 @@ export const useFreedomHistoryStore = create<FreedomHistoryStore>()(
           entry.type === 'image' ? 'imageHistory' : 'videoHistory';
         set((state) => {
           const current = state[historyKey];
-          const updated = [entry, ...current].slice(0, MAX_HISTORY);
+          const existing = current.find((item) => item.id === entry.id);
+          const nextEntry = existing ? { ...entry, ...existing } : entry;
+          const updated = [nextEntry, ...current.filter((item) => item.id !== entry.id)].slice(0, MAX_HISTORY);
           return { [historyKey]: updated } as Partial<FreedomHistoryState>;
         });
       },

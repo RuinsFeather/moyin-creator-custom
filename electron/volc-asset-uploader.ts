@@ -22,6 +22,26 @@ const DEFAULT_PROJECT_NAME = 'youdianchuangyi'
 const POLL_INTERVAL_MS = 3000
 /** 轮询超时（毫秒），2 分钟 */
 const POLL_TIMEOUT_MS = 2 * 60 * 1000
+/** Ark Assets 接口最小请求间隔，避免多图上传/轮询时触发 429 */
+const ARK_REQUEST_MIN_INTERVAL_MS = 350
+
+let lastArkRequestAt = 0
+
+async function throttleArkRequest() {
+  const now = Date.now()
+  const waitMs = Math.max(0, lastArkRequestAt + ARK_REQUEST_MIN_INTERVAL_MS - now)
+  if (waitMs > 0) {
+    await new Promise(resolve => setTimeout(resolve, waitMs))
+  }
+  lastArkRequestAt = Date.now()
+}
+
+function toFriendlyArkError(action: string, status: number, message: string): Error {
+  if (status === 429 || /Too Many Requests|throttl|rate limit|RequestLimitExceeded/i.test(message)) {
+    return new Error(`火山素材接口请求过于频繁，请稍后重试（${action}，429 Too Many Requests）`)
+  }
+  return new Error(`Ark API ${action} 失败 (${status}): ${message}`)
+}
 
 // ==================== 类型 ====================
 
@@ -200,6 +220,7 @@ async function arkApiRequest<T>(params: {
   const timer = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
+    await throttleArkRequest()
     const resp = await net.fetch(url, {
       method: 'POST',
       headers: fetchHeaders,
@@ -220,7 +241,7 @@ async function arkApiRequest<T>(params: {
         || data?.ResponseMetadata?.Error?.Code
         || data?.message
         || text.slice(0, 300)
-      throw new Error(`Ark API ${action} 失败 (${resp.status}): ${errMsg}`)
+      throw toFriendlyArkError(action, resp.status, errMsg)
     }
 
     // 检查业务层错误

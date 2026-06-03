@@ -21,6 +21,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { saveImageToLocal } from "@/lib/image-storage";
 import {
   Dialog,
   DialogContent,
@@ -58,6 +59,35 @@ interface VolcAssetPanelProps {
   selectedAssetIds?: string[];
 }
 
+function AssetThumbnail({ asset }: { asset: VolcAssetItem }) {
+  const [loadFailed, setLoadFailed] = useState(false);
+
+  useEffect(() => {
+    setLoadFailed(false);
+  }, [asset.url]);
+
+  if (!asset.url || loadFailed) {
+    return (
+      <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-muted text-muted-foreground">
+        <FolderOpen className="h-6 w-6 opacity-40" />
+        <span className="px-1 text-center text-[10px] leading-tight line-clamp-2">
+          缩略图不可用
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={asset.url}
+      alt={asset.name}
+      className="h-full w-full object-cover"
+      loading="lazy"
+      onError={() => setLoadFailed(true)}
+    />
+  );
+}
+
 // ==================== 持久化存储（fileStorage） ====================
 const STORAGE_KEY = "volc-asset-library";
 const GROUP_STORAGE_KEY = "volc-asset-group";
@@ -70,6 +100,21 @@ function getGroupAssetsKey(groupId: string): string {
 interface StoredGroup {
   groupId: string;
   groupName: string;
+}
+
+function sanitizeAssetFileName(name: string): string {
+  const baseName = name.replace(/\.[^.]+$/, "").slice(0, 40);
+  return baseName.replace(/[^a-zA-Z0-9\u4e00-\u9fff_-]/g, "_") || "volc_asset";
+}
+
+function isPersistentThumbnail(url: string): boolean {
+  return !url || url.startsWith("local-image://") || url.startsWith("data:");
+}
+
+async function saveAssetThumbnailLocally(sourceUrl: string, fileName: string): Promise<string> {
+  const ext = fileName.match(/\.(png|jpe?g|webp|gif|bmp|tiff)$/i)?.[1]?.toLowerCase() || "png";
+  const safeName = `${sanitizeAssetFileName(fileName)}_${Date.now()}.${ext === "jpg" ? "jpg" : ext}`;
+  return saveImageToLocal(sourceUrl, "volc-assets", safeName);
 }
 
 /** 从 fileStorage 加载素材（按 groupId） */
@@ -196,6 +241,24 @@ export function VolcAssetPanel({
         setAssets(items);
       }
       setLoadingAssets(false);
+
+      const currentItems = items.length > 0 ? items : loadAssetLibraryFallback();
+      const remoteThumbs = currentItems.filter((item) => item.url && !isPersistentThumbnail(item.url));
+      if (remoteThumbs.length > 0) {
+        void Promise.all(
+          remoteThumbs.map(async (item) => {
+            const localUrl = await saveAssetThumbnailLocally(item.url, item.name);
+            return localUrl !== item.url ? { ...item, url: localUrl } : item;
+          }),
+        ).then((migrated) => {
+          setAssets((prev) => {
+            const migratedMap = new Map(migrated.map((item) => [item.assetId, item]));
+            const next = prev.map((item) => migratedMap.get(item.assetId) || item);
+            void saveAssetsByGroup(group.groupId, next);
+            return next;
+          });
+        });
+      }
     });
   }, [group]);
 
@@ -275,29 +338,32 @@ export function VolcAssetPanel({
               reader.readAsDataURL(file);
             });
 
-            // 2. 上传图床获取公网 URL
+            // 2. 缩略图先保存到本地。素材管理面板不再依赖火山返回的临时/远程 URL 展示。
+            const localThumbnailUrl = await saveAssetThumbnailLocally(dataUrl, file.name);
+
+            // 3. 上传图床获取公网 URL，供火山 CreateAsset 使用
             setUploadProgress(
               `(${i + 1}/${imageFiles.length}) ${file.name}：上传到图床...`,
             );
             const publicUrl = await uploadBase64Image(dataUrl);
 
-            // 3. 提交到火山引擎素材资产库
+            // 4. 提交到火山引擎素材资产库。
+            // 这里仅创建资产，不逐张轮询 GetAsset，避免多图上传时密集触发 GetAsset 导致 429。
             setUploadProgress(
               `(${i + 1}/${imageFiles.length}) ${file.name}：提交到素材库...`,
             );
-            const result = await window.volcAsset!.uploadFull({
+            const result = await window.volcAsset!.createAsset({
               imageUrl: publicUrl,
-              groupName: group.groupName,
-              assetName: file.name,
-              existingGroupId: group.groupId,
+              groupId: group.groupId,
+              name: file.name,
             });
 
             results.push({
               assetId: result.assetId,
-              assetUri: result.assetUri,
-              url: result.url || publicUrl,
+              assetUri: `Asset://${result.assetId}`,
+              url: localThumbnailUrl,
               name: file.name,
-              groupId: result.groupId,
+              groupId: group.groupId,
               groupName: group.groupName,
               uploadedAt: Date.now(),
             });
@@ -482,6 +548,7 @@ export function VolcAssetPanel({
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
                     disabled={uploading}
+                    title={`上传图片要求：\n宽高比:0.4-2.5\n单边像素限制:300-6000px\n图像大小:≤30MB\n按住Ctrl可多选图片进行上传(也可直接拖入图片上传)。`}
                     className="aspect-square rounded-lg border-2 border-dashed flex flex-col items-center justify-center gap-1.5 text-muted-foreground hover:text-foreground hover:border-primary/50 hover:bg-primary/5 transition-all disabled:opacity-50"
                     onDragOver={(e) => {
                       e.preventDefault();
@@ -520,12 +587,7 @@ export function VolcAssetPanel({
                       onClick={() => onSelectAsset(asset)}
                       title={`${asset.name}\nAsset: ${asset.assetUri}\n点击导入到参考素材`}
                     >
-                      <img
-                        src={asset.url}
-                        alt={asset.name}
-                        className="h-full w-full object-cover"
-                        loading="lazy"
-                      />
+                      <AssetThumbnail asset={asset} />
                       {/* 选中角标 */}
                       {isSelected && (
                         <div className="absolute top-1 left-1 bg-primary text-primary-foreground rounded-full p-0.5 shadow">

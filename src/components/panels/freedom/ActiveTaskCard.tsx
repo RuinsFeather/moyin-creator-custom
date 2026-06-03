@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from 'react';
-import { Loader2, StopCircle, X, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Loader2, StopCircle, X, CheckCircle2, AlertCircle, VideoIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
@@ -24,6 +24,7 @@ export function ActiveTaskCard({ task, selected, onSelect, onCancel, onDismiss }
   const isError = task.status === 'error';
   const isDone = task.status === 'done';
   const isCancelled = task.status === 'cancelled';
+  const [mediaLoadFailed, setMediaLoadFailed] = useState(false);
 
   // 已等待时长（运行中每秒刷新）
   const [elapsedMs, setElapsedMs] = useState(() => Date.now() - task.createdAt);
@@ -34,6 +35,10 @@ export function ActiveTaskCard({ task, selected, onSelect, onCancel, onDismiss }
     return () => clearInterval(id);
   }, [running, task.createdAt]);
   const elapsedText = formatElapsed(elapsedMs);
+
+  useEffect(() => {
+    setMediaLoadFailed(false);
+  }, [task.resultUrl, task.thumbnailUrl]);
 
   return (
     <div
@@ -47,16 +52,45 @@ export function ActiveTaskCard({ task, selected, onSelect, onCancel, onDismiss }
       <div className="flex gap-2 p-2">
         {/* 缩略：参考图或生成结果 */}
         <div className="flex-shrink-0 w-14 h-14 rounded-md bg-muted overflow-hidden flex items-center justify-center">
-          {task.resultUrl ? (
-            <img src={task.resultUrl} alt="" className="w-full h-full object-cover" />
+          {task.resultUrl && !mediaLoadFailed ? (
+            task.type === 'video' ? (
+              <video
+                src={task.resultUrl}
+                className="w-full h-full object-cover"
+                muted
+                playsInline
+                preload="metadata"
+                onLoadedData={(e) => {
+                  const video = e.currentTarget;
+                  if (Number.isFinite(video.duration) && video.duration > 0) {
+                    video.currentTime = Math.min(0.2, Math.max(0, video.duration * 0.05));
+                  }
+                }}
+                onError={() => setMediaLoadFailed(true)}
+              />
+            ) : (
+              <img
+                src={task.resultUrl}
+                alt=""
+                className="w-full h-full object-cover"
+                onError={() => setMediaLoadFailed(true)}
+              />
+            )
           ) : task.thumbnailUrl ? (
-            <img src={task.thumbnailUrl} alt="" className="w-full h-full object-cover opacity-70" />
+            <img
+              src={task.thumbnailUrl}
+              alt=""
+              className="w-full h-full object-cover opacity-70"
+              onError={() => setMediaLoadFailed(true)}
+            />
           ) : running ? (
             <Loader2 className="h-5 w-5 animate-spin text-primary" />
           ) : isError ? (
             <AlertCircle className="h-5 w-5 text-destructive" />
           ) : isCancelled ? (
             <X className="h-5 w-5 text-muted-foreground" />
+          ) : task.type === 'video' ? (
+            <VideoIcon className="h-5 w-5 text-emerald-500" />
           ) : (
             <CheckCircle2 className="h-5 w-5 text-emerald-500" />
           )}
