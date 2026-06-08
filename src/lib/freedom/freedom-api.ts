@@ -433,6 +433,48 @@ function normalizeGeminiImageSize(resolution?: string): string {
 }
 
 /**
+ * GPT-IMG / GPT Image 系列 size 白名单。
+ * gpt-image-2 这类接口不接受 '2k' / '4k' 档位，也不接受任意 WxH；
+ * 需要下发固定像素字符串：
+ * 1024x1024 / 1536x1024 / 1024x1536 / 2048x2048 / 2048x1152 / 3840x2160 / 2160x3840 / auto。
+ */
+function normalizeGptImageSize(aspectRatio?: string, resolution?: string): string {
+  const r = (resolution || '').trim().toLowerCase();
+  const ar = (aspectRatio || '').trim().toLowerCase();
+  if (r === 'auto' || ar === 'auto') return 'auto';
+
+  const match = aspectRatio?.match(/^(\d+)\s*[:xX]\s*(\d+)$/);
+  const arW = match ? parseInt(match[1], 10) : 1;
+  const arH = match ? parseInt(match[2], 10) : 1;
+  const orientation: 'square' | 'landscape' | 'portrait' = arW === arH
+    ? 'square'
+    : arW > arH
+      ? 'landscape'
+      : 'portrait';
+
+  if (r === '4k' || r === '2160p' || r === '4096' || r === '3840') {
+    if (orientation === 'portrait') return '2160x3840';
+    if (orientation === 'landscape') return '3840x2160';
+    // 接口未列出 4K 正方形，使用支持的最高正方形尺寸。
+    return '2048x2048';
+  }
+
+  if (r === '2k' || r === 'qhd' || r === '2048' || r === '2560') {
+    if (orientation === 'landscape') return '2048x1152';
+    if (orientation === 'portrait') return '1024x1536';
+    return '2048x2048';
+  }
+
+  if (orientation === 'landscape') return '1536x1024';
+  if (orientation === 'portrait') return '1024x1536';
+  return '1024x1024';
+}
+
+function isGptImageModelId(model: string): boolean {
+  return /^gpt[-_]?image/i.test(model) || /^gpt[-_]?img/i.test(model);
+}
+
+/**
  * 将"宽高比 + 分辨率档位"换算成像素尺寸。
  * resolution 支持: '1K' | '2K' | '4K' | 'HD' | 'FHD' | '720p' | '1080p' | '2160p' | '512' | '1024' | '2048'
  * 返回 { width, height, size: 'WxH' }。无法解析时返回 null。
@@ -510,7 +552,7 @@ async function _generateFreedomImageInner(
   // ── Smart Routing: choose endpoint based on model metadata ──
   const endpointTypes = useAPIConfigStore.getState().modelEndpointTypes[model];
   const route = detectFreedomImageRoute(model, endpointTypes);
-  const isGptImageModel = model.toLowerCase().startsWith('gpt-image');
+  const isGptImageModel = isGptImageModelId(model);
 
   console.log('[Freedom] Generating image:', {
     model,
@@ -707,16 +749,20 @@ async function generateViaChatCompletions(
   const sized = aspectRatioToSize(aspectRatio, params.resolution);
 
   const isGemini = isGeminiImageModel(model);
+  const isGptImage = isGptImageModelId(model);
   const geminiHasImageSize = isGemini && geminiSupportsImageSize(model);
   const geminiImageSize = geminiHasImageSize ? normalizeGeminiImageSize(params.resolution) : undefined;
+  const gptImageSize = isGptImage ? normalizeGptImageSize(aspectRatio, params.resolution) : undefined;
 
   // Prompt 文本里强调宽高比和精确像素，作为参数被丢弃时的兜底引导
-  const dimsHint = sized
+  const dimsHint = aspectRatio === 'auto'
+    ? ''
+    : sized
     ? ` The output image MUST have an aspect ratio of exactly ${aspectRatio} and resolution ${sized.width}x${sized.height} pixels (${sized.width} wide, ${sized.height} tall).`
     : ` The output image MUST have an aspect ratio of exactly ${aspectRatio}.`;
 
   const userContent: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
-    { type: 'text', text: `${params.prompt}\n\n${dimsHint}` },
+    { type: 'text', text: dimsHint ? `${params.prompt}\n\n${dimsHint}` : params.prompt },
   ];
 
   // 参考图作为多模态 image_url 注入（chat completions 通用格式）
@@ -742,6 +788,9 @@ async function generateViaChatCompletions(
     if (geminiImageSize) {
       requestBody.imageSize = geminiImageSize;
     }
+  } else if (isGptImage) {
+    // GPT-IMG 系列：size 必须是接口白名单里的像素字符串。
+    requestBody.size = gptImageSize;
   } else {
     // 非 Gemini：附带 size / aspect_ratio / 宽高，兼容各家代理
     if (sized) {
@@ -756,8 +805,9 @@ async function generateViaChatCompletions(
     model,
     endpoint,
     isGemini,
+    isGptImage,
     aspectRatio,
-    imageSize: geminiImageSize ?? '(n/a)',
+    imageSize: geminiImageSize ?? gptImageSize ?? '(n/a)',
     bodyKeys: Object.keys(requestBody),
   });
   params.onProgress?.({ phase: 'submitting', percent: 10, message: '提交请求…' });
@@ -842,19 +892,25 @@ async function generateViaImagesEndpoint(
     prompt: params.prompt,
     model,
   };
+  const isGptImage = isGptImageModelId(model);
 
   // 尺寸下发：同时附带 aspect_ratio / size / width / height，
   // 各供应商按各自识别字段自行匹配（未识别字段会被忽略）
   const sized = aspectRatioToSize(params.aspectRatio, params.resolution);
-  if (params.aspectRatio) body.aspect_ratio = params.aspectRatio;
-  if (params.resolution) body.resolution = params.resolution;
-  if (sized) {
-    body.size = sized.size;
-    if (!params.width) body.width = sized.width;
-    if (!params.height) body.height = sized.height;
+  if (params.aspectRatio && params.aspectRatio !== 'auto') body.aspect_ratio = params.aspectRatio;
+  if (isGptImage) {
+    // GPT-IMG 系列的 size 要传接口白名单里的像素字符串。
+    body.size = normalizeGptImageSize(params.aspectRatio, params.resolution);
+  } else {
+    if (params.resolution) body.resolution = params.resolution;
+    if (sized) {
+      body.size = sized.size;
+      if (!params.width) body.width = sized.width;
+      if (!params.height) body.height = sized.height;
+    }
   }
-  if (params.width) body.width = params.width;
-  if (params.height) body.height = params.height;
+  if (!isGptImage && params.width) body.width = params.width;
+  if (!isGptImage && params.height) body.height = params.height;
   if (params.negativePrompt) body.negative_prompt = params.negativePrompt;
   if (params.extraParams) {
     Object.assign(body, params.extraParams);
@@ -880,6 +936,17 @@ async function generateViaImagesEndpoint(
   const imagePaths = getImageEndpointPaths(endpointTypes || []);
   const rootBase = getRootBaseUrl(baseUrl);
   const submitUrl = `${rootBase}${imagePaths.submit}`;
+  console.log('[Freedom] Submitting via images endpoint:', {
+    model,
+    submitUrl,
+    isGptImage,
+    aspectRatio: body.aspect_ratio,
+    size: body.size,
+    resolution: body.resolution,
+    width: body.width,
+    height: body.height,
+    bodyKeys: Object.keys(body),
+  });
   params.onProgress?.({ phase: 'submitting', percent: 10, message: '提交请求…' });
   throwIfAborted(params.signal);
   const response = await corsFetch(submitUrl, {

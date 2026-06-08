@@ -351,7 +351,7 @@ const IMAGE_FAMILY_VARIANTS: Record<string, string[]> = {
 
 function expandBoundModel(type: 'image' | 'video', model: string): string[] {
   if (type === 'video') return VIDEO_FAMILY_VARIANTS[model] ?? [model];
-  return IMAGE_FAMILY_VARIANTS[model] ?? [model];
+  return [model];
 }
 
 function shouldHideModel(type: 'image' | 'video', model: string): boolean {

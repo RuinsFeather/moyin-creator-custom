@@ -26,7 +26,7 @@ import {
   getAspectRatiosForT2IModel,
 } from '@/lib/freedom/model-registry';
 
-const DEFAULT_ASPECT_RATIOS = ['1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16', '21:9'];
+const DEFAULT_ASPECT_RATIOS = ['auto', '1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16', '21:9'];
 const DEFAULT_RESOLUTIONS = ['1K', '2K', '4K'];
 const MAX_REFERENCE_IMAGES = 10;
 
@@ -98,13 +98,25 @@ export function ImageStudio() {
   // Dynamic capabilities based on selected model（无定义时回退到通用列表）
   const aspectRatios = useMemo(() => {
     const list = getAspectRatiosForT2IModel(selectedImageModel);
-    return list.length > 0 ? list : DEFAULT_ASPECT_RATIOS;
+    return list.length > 0 ? (list.includes('auto') ? list : ['auto', ...list]) : DEFAULT_ASPECT_RATIOS;
   }, [selectedImageModel]);
 
   const resolutions = useMemo(() => {
     const list = (model?.inputs?.resolution?.enum as string[]) || [];
     return list.length > 0 ? list : DEFAULT_RESOLUTIONS;
   }, [model]);
+
+  useEffect(() => {
+    if (resolutions.length === 0) return;
+    const current = imageResolution || '';
+    const exact = current && resolutions.includes(current);
+    if (exact) return;
+
+    const caseInsensitiveMatch = current
+      ? resolutions.find((r) => String(r).toLowerCase() === current.toLowerCase())
+      : undefined;
+    setImageResolution(caseInsensitiveMatch || resolutions[0]);
+  }, [imageResolution, resolutions, setImageResolution]);
 
   // Midjourney-specific params
   const hasMidjourneyParams = /midjourney|^mj_|^niji-/i.test(selectedImageModel);
@@ -323,7 +335,7 @@ export function ImageStudio() {
               />
               {model && (
                 <p className="text-xs text-muted-foreground">
-                  ID: {model.id}
+                  ID: {selectedImageModel}
                 </p>
               )}
             </div>
@@ -613,7 +625,6 @@ export function ImageStudio() {
         )}
         <div className="flex-1 min-h-0">
           <GenerationHistory type="image" onSelect={(entry) => {
-            setImagePrompt(entry.prompt);
             setSelectedImageModel(entry.model);
             setImageResult(entry.resultUrl);
             setSelectedTaskId(null);

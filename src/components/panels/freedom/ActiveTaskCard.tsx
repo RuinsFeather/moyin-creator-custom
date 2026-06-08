@@ -54,20 +54,9 @@ export function ActiveTaskCard({ task, selected, onSelect, onCancel, onDismiss }
         <div className="flex-shrink-0 w-14 h-14 rounded-md bg-muted overflow-hidden flex items-center justify-center">
           {task.resultUrl && !mediaLoadFailed ? (
             task.type === 'video' ? (
-              <video
-                src={task.resultUrl}
-                className="w-full h-full object-cover"
-                muted
-                playsInline
-                preload="metadata"
-                onLoadedData={(e) => {
-                  const video = e.currentTarget;
-                  if (Number.isFinite(video.duration) && video.duration > 0) {
-                    video.currentTime = Math.min(0.2, Math.max(0, video.duration * 0.05));
-                  }
-                }}
-                onError={() => setMediaLoadFailed(true)}
-              />
+              <div className="flex h-full w-full items-center justify-center bg-muted text-muted-foreground">
+                <VideoIcon className="h-5 w-5 text-emerald-500" />
+              </div>
             ) : (
               <img
                 src={task.resultUrl}

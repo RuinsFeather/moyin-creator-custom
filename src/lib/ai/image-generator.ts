@@ -127,6 +127,42 @@ function normalizeResolutionForGemini(resolution?: string): string {
   return '2K'; // 不识别的值回退到 2K
 }
 
+function isGptImageModelId(model: string): boolean {
+  return /^gpt[-_]?image/i.test(model) || /^gpt[-_]?img/i.test(model);
+}
+
+/**
+ * GPT-IMG / GPT Image 系列 size 白名单：
+ * 1024x1024 / 1536x1024 / 1024x1536 / 2048x2048 / 2048x1152 / 3840x2160 / 2160x3840 / auto。
+ */
+function normalizeGptImageSize(aspectRatio: string, resolution?: string): string {
+  const r = (resolution || '').trim().toLowerCase();
+  if (r === 'auto' || aspectRatio.trim().toLowerCase() === 'auto') return 'auto';
+
+  const dims = ASPECT_RATIO_DIMS[aspectRatio];
+  const orientation: 'square' | 'landscape' | 'portrait' = !dims || dims.width === dims.height
+    ? 'square'
+    : dims.width > dims.height
+      ? 'landscape'
+      : 'portrait';
+
+  if (r === '4k' || r === '2160p' || r === '4096' || r === '3840') {
+    if (orientation === 'portrait') return '2160x3840';
+    if (orientation === 'landscape') return '3840x2160';
+    return '2048x2048';
+  }
+
+  if (r === '2k' || r === 'qhd' || r === '2048' || r === '2560') {
+    if (orientation === 'landscape') return '2048x1152';
+    if (orientation === 'portrait') return '1024x1536';
+    return '2048x2048';
+  }
+
+  if (orientation === 'landscape') return '1536x1024';
+  if (orientation === 'portrait') return '1024x1536';
+  return '1024x1024';
+}
+
 /**
  * 判断模型是否需要像素尺寸格式 (如 "1024x1024") 而非比例格式 (如 "1:1")
  * doubao-seedream, cogview 等国产模型需要像素尺寸
@@ -540,7 +576,9 @@ async function submitImageTask(
   }
   // 根据模型决定 size 格式
   let sizeValue: string = aspectRatio;
-  if (model && needsPixelSize(model)) {
+  if (model && isGptImageModelId(model)) {
+    sizeValue = normalizeGptImageSize(aspectRatio, resolution);
+  } else if (model && needsPixelSize(model)) {
     const dims = ASPECT_RATIO_DIMS[aspectRatio];
     if (dims) {
       sizeValue = `${dims.width}x${dims.height}`;

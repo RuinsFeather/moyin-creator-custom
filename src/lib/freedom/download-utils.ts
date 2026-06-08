@@ -1,4 +1,40 @@
-import { readImageAsBase64 } from '@/lib/image-storage';
+import { readImageAsBase64, saveImageToLocal } from '@/lib/image-storage';
+
+function getFileExtension(filename: string): string {
+  const match = filename.match(/\.([a-z0-9]+)$/i);
+  return match?.[1]?.toLowerCase() || 'png';
+}
+
+function getImageFilters(filename: string) {
+  const ext = getFileExtension(filename);
+  const extensions = Array.from(new Set([ext, 'png', 'jpg', 'jpeg', 'webp', 'gif']));
+  return [{ name: 'Image', extensions }];
+}
+
+async function saveWithElectronDialog(url: string, filename: string): Promise<boolean> {
+  if (typeof window === 'undefined' || !window.electronAPI?.saveFileDialog) {
+    return false;
+  }
+
+  let localPath = url;
+  if (!url.startsWith('local-image://') && !url.startsWith('local-video://') && !url.startsWith('file://')) {
+    localPath = await saveImageToLocal(url, 'shots', filename);
+  }
+
+  if (!localPath || localPath === url || !localPath.startsWith('local-image://')) {
+    return false;
+  }
+
+  const result = await window.electronAPI.saveFileDialog({
+    localPath,
+    defaultPath: filename,
+    filters: getImageFilters(filename),
+  });
+
+  if (result.canceled) return true;
+  if (!result.success) throw new Error(result.error || 'Save dialog failed');
+  return true;
+}
 
 async function downloadFreedomFile(url: string): Promise<Blob> {
   if (!url) throw new Error('Empty URL');
@@ -34,6 +70,10 @@ function triggerFreedomDownload(blob: Blob, filename: string) {
 }
 
 export async function saveFreedomMedia(url: string, filename: string): Promise<void> {
+  if (await saveWithElectronDialog(url, filename)) {
+    return;
+  }
+
   const blob = await downloadFreedomFile(url);
   triggerFreedomDownload(blob, filename);
 }

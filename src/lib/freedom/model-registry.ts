@@ -568,7 +568,7 @@ export const T2I_MODELS: T2IModel[] = [
   // 36
   {
     id: 'nano-banana-2',
-    providerAliases: ["nano-banana-2","gemini-3.1-pro-image-preview"],
+    providerAliases: ["nano-banana-2","gemini-3.1-pro-image-preview","gemini-3.1-flash-image","gemini-3.1-flash-image-preview"],
     name: 'Nano Banana 2',
     inputs: {
       prompt: promptInput(),
@@ -581,7 +581,7 @@ export const T2I_MODELS: T2IModel[] = [
   // 37
   {
     id: 'nano-banana-pro',
-    providerAliases: ["nano-banana-pro","gemini-3-pro-image-preview"],
+    providerAliases: ["nano-banana-pro","gemini-3-pro-image-preview","gemini-3.0-pro-image","gemini-3.0-pro-image-preview"],
     name: 'Nano Banana Pro',
     inputs: {
       prompt: promptInput(),
@@ -687,12 +687,12 @@ export const T2I_MODELS: T2IModel[] = [
   // 44
   {
     id: 'gpt-image-1.5',
-    providerAliases: ["gpt-image-1.5","gpt-image-1","gpt-image-1.5-all","gpt-image-1-all","gpt-image-1-mini"],
+    providerAliases: ["gpt-image-1.5","gpt-image-2","gpt-image-1","gpt-image-1.5-all","gpt-image-1-all","gpt-image-1-mini"],
     name: 'GPT Image 1.5',
     category: 'premium',
     inputs: {
       prompt: promptInput(),
-      aspect_ratio: aspectRatioInput(['1:1', '2:3', '3:2']),
+      aspect_ratio: aspectRatioInput(['auto', '1:1', '2:3', '3:2', '16:9', '9:16']),
       quality: {
         type: 'string',
         enum: ['low', 'medium', 'high'],

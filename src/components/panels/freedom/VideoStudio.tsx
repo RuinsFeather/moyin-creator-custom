@@ -311,6 +311,8 @@ export function VideoStudio() {
     [selectedTaskId, activeTasks],
   );
 
+  const currentVideoSrc = viewingTask?.resultUrl || videoResult || '';
+
   // 用于实时显示"已等待 Xs"，仅当主预览区有运行中任务时每秒刷新
   const viewingRunning = !!viewingTask && (viewingTask.status === 'running' || viewingTask.status === 'cancelling');
   const [elapsedNow, setElapsedNow] = useState(() => Date.now());
@@ -1492,13 +1494,14 @@ export function VideoStudio() {
             <p className="text-sm font-medium">生成失败</p>
             <p className="text-xs text-muted-foreground">{viewingTask.error || viewingTask.message}</p>
           </div>
-        ) : (viewingTask?.resultUrl || videoResult) ? (
+        ) : currentVideoSrc ? (
           <div className="max-w-full max-h-full relative group">
             <video
-              src={viewingTask?.resultUrl || videoResult || ''}
+              key={currentVideoSrc}
+              src={currentVideoSrc}
               controls
-              autoPlay
-              loop
+              playsInline
+              preload="metadata"
               className="max-w-full max-h-[calc(100vh-200px)] rounded-lg shadow-lg"
             />
           </div>
@@ -1537,7 +1540,6 @@ export function VideoStudio() {
         )}
         <div className="flex-1 min-h-0">
           <GenerationHistory type="video" onSelect={(entry) => {
-            setVideoPrompt(entry.prompt);
             setSelectedVideoModel(entry.model);
             setVideoResult(entry.resultUrl);
             setSelectedTaskId(null);
