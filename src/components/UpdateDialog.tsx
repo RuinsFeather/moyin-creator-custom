@@ -4,7 +4,7 @@
 "use client";
 
 import { useMemo } from "react";
-import { ExternalLink, Download } from "lucide-react";
+import { ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -90,18 +90,12 @@ export function UpdateDialog({
               <div>
                 <p className="text-sm font-medium text-foreground">下载方式</p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  可任选 GitHub 或百度网盘下载最新安装包。
+                  可前往 GitHub 下载最新安装包。
                 </p>
               </div>
-              {updateInfo.baiduCode && (
-                <div className="text-xs text-muted-foreground">
-                  提取码：
-                  <span className="ml-1 font-mono text-foreground">{updateInfo.baiduCode}</span>
-                </div>
-              )}
             </div>
 
-            {(!updateInfo.githubUrl && !updateInfo.baiduUrl) && (
+            {!updateInfo.githubUrl && (
               <p className="text-xs text-destructive">当前版本清单未提供下载链接。</p>
             )}
 
@@ -113,16 +107,6 @@ export function UpdateDialog({
                 >
                   <ExternalLink className="h-4 w-4 mr-2" />
                   GitHub 下载
-                </Button>
-              )}
-              {updateInfo.baiduUrl && (
-                <Button
-                  variant="outline"
-                  className="flex-1"
-                  onClick={() => void handleOpenLink(updateInfo.baiduUrl!)}
-                >
-                  <Download className="h-4 w-4 mr-2" />
-                  百度网盘下载
                 </Button>
               )}
             </div>

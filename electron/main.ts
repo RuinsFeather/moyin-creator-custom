@@ -35,8 +35,6 @@ let win: BrowserWindow | null
 type PackageUpdateConfig = {
   manifestUrl?: string
   defaultGithubUrl?: string
-  defaultBaiduUrl?: string
-  defaultBaiduCode?: string
 }
 
 type PackageMetadata = {
@@ -115,16 +113,6 @@ function getGithubRepoSlug(): { owner: string; repo: string } | null {
   }
 }
 
-function getDefaultBaiduUrl() {
-  return sanitizeExternalUrl(packageUpdateConfig.defaultBaiduUrl)
-}
-
-function getDefaultBaiduCode() {
-  return isNonEmptyString(packageUpdateConfig.defaultBaiduCode)
-    ? packageUpdateConfig.defaultBaiduCode.trim()
-    : undefined
-}
-
 async function fetchUpdateManifest(): Promise<UpdateManifest> {
   const slug = getGithubRepoSlug()
   if (!slug) {
@@ -178,8 +166,6 @@ async function fetchUpdateManifest(): Promise<UpdateManifest> {
     publishedAt: isNonEmptyString(release.published_at) ? release.published_at.trim() : undefined,
     // 优先使用 release 的 html_url（直接指向该次发布页），否则回退到仓库默认地址
     githubUrl: sanitizeExternalUrl(release.html_url) ?? getDefaultGithubUrl(),
-    baiduUrl: getDefaultBaiduUrl(),
-    baiduCode: getDefaultBaiduCode(),
   }
 }
 
@@ -195,8 +181,6 @@ async function resolveAvailableUpdate(currentVersion: string): Promise<Available
     releaseNotes: manifest.releaseNotes,
     publishedAt: manifest.publishedAt,
     githubUrl: manifest.githubUrl,
-    baiduUrl: manifest.baiduUrl,
-    baiduCode: manifest.baiduCode,
   }
 }
 

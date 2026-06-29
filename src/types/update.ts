@@ -7,8 +7,6 @@ export interface UpdateManifest {
   notes?: string;
   publishedAt?: string;
   githubUrl?: string;
-  baiduUrl?: string;
-  baiduCode?: string;
 }
 
 export interface AvailableUpdateInfo {
@@ -17,8 +15,6 @@ export interface AvailableUpdateInfo {
   releaseNotes?: string;
   publishedAt?: string;
   githubUrl?: string;
-  baiduUrl?: string;
-  baiduCode?: string;
 }
 
 export type UpdateCheckResult =
