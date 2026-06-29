@@ -426,7 +426,7 @@ export async function callVideoGenerationApi(
   onProgress?: (progress: number) => void,
   keyManager?: { getCurrentKey?: () => string | null; handleError: (status: number, errorText?: string) => boolean; getAvailableKeyCount: () => number; getTotalKeyCount: () => number },
   platform?: string,
-  videoResolution?: '480p' | '720p' | '1080p',
+  videoResolution?: '480p' | '720p' | '1080p' | '4k',
   /** Seedance 2.0: 视频引用 URL 列表 (运镜/动作复刻) */
   videoRefs?: string[],
   /** Seedance 2.0: 音频引用 URL 列表 (节奏/BGM) */
@@ -474,7 +474,7 @@ export async function callVideoGenerationApi(
       case 'openai_official':
         return callOpenAIOfficialVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, duration, videoResolution, onProgress, keyManager, signal);
       case 'volc':
-        return callVolcVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, processedImages, videoResolution, duration, cameraFixed, onProgress, keyManager, videoRefs, audioRefs, signal);
+        return callVolcVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, processedImages, videoResolution, duration, enableAudio, cameraFixed, onProgress, keyManager, videoRefs, audioRefs, signal);
       case 'wan':
         return callWanVideoApi(currentApiKey, prompt, videoBaseUrl, model, processedImages, videoResolution, duration, enableAudio, onProgress, keyManager, signal);
       case 'kling':
@@ -550,6 +550,8 @@ async function callUnifiedVideoApi(
   const isLuma = endpointTypes.some(t => /luma/i.test(t));
   const isRunway = endpointTypes.some(t => /runway/i.test(t));
   const isGrok = endpointTypes.some(t => /grok/i.test(t)) || /grok/i.test(model);
+  const isSeedance = /seedance|doubao-seedance/i.test(model);
+  const isSeedanceV2 = /seedance[-_](v?2|2\.0|2[-_]0)/i.test(model);
   const endpointPaths = getUnifiedEndpointPaths(endpointTypes);
 
   // 构建请求体（对齐 freedom-api.ts generateVideoViaUnified）
@@ -572,6 +574,8 @@ async function callUnifiedVideoApi(
       body.aspect_ratio = aspectRatio;
     } else {
       metadata.aspect_ratio = aspectRatio;
+      if (isSeedance) metadata.ratio = aspectRatio;
+      if (isSeedanceV2 || aspectRatio === 'adaptive') body.ratio = aspectRatio;
     }
   }
 
@@ -583,7 +587,15 @@ async function callUnifiedVideoApi(
       body.resolution = videoResolution;
     } else {
       metadata.resolution = videoResolution;
+      if (isSeedanceV2 || videoResolution.toLowerCase() === '4k') {
+        body.resolution = videoResolution.toLowerCase();
+      }
     }
+  }
+
+  if (isSeedance && (isSeedanceV2 || aspectRatio === 'adaptive' || videoResolution?.toLowerCase() === '4k')) {
+    body.generate_audio = true;
+    body.watermark = false;
   }
 
   // Image inputs: single `image` field (not array)
@@ -696,6 +708,7 @@ async function callVolcVideoApi(
   imageWithRoles: Array<{ url: string; role: string }>,
   videoResolution?: string,
   duration?: number,
+  enableAudio?: boolean,
   cameraFixed?: boolean,
   onProgress?: (progress: number) => void,
   keyManager?: { handleError: (status: number, errorText?: string) => boolean },
@@ -708,12 +721,16 @@ async function callVolcVideoApi(
   // 构建 content 数组（Volcengine 格式: text + image_url）
   const content: Array<Record<string, unknown>> = [];
 
-  // 文本内容：prompt + 内联参数（--rs, --rt, --dur, --cf）
+  // 文本内容：旧模型使用内联参数；Seedance 2.0/4K 使用结构化字段。
   let textContent = prompt;
   const resolution = (videoResolution || '720p').toLowerCase();
-  textContent += ` --rs ${resolution}`;
-  textContent += ` --rt ${aspectRatio}`;
-  if (duration) textContent += ` --dur ${duration}`;
+  const isSeedanceV2 = /seedance[-_](v?2|2\.0|2[-_]0)/i.test(model);
+  const usesSeedanceV2Params = isSeedanceV2 || resolution === '4k' || aspectRatio === 'adaptive';
+  if (!usesSeedanceV2Params) {
+    textContent += ` --rs ${resolution}`;
+    textContent += ` --rt ${aspectRatio}`;
+    if (duration) textContent += ` --dur ${duration}`;
+  }
   if (cameraFixed !== undefined) textContent += ` --cf ${cameraFixed}`;
 
   content.push({ type: 'text', text: textContent });
@@ -753,7 +770,14 @@ async function callVolcVideoApi(
     }
   }
 
-  const requestBody = { model, content };
+  const requestBody: Record<string, unknown> = { model, content };
+  if (usesSeedanceV2Params) {
+    requestBody.generate_audio = enableAudio ?? true;
+    requestBody.resolution = resolution;
+    requestBody.ratio = aspectRatio;
+    if (duration) requestBody.duration = duration;
+    requestBody.watermark = false;
+  }
 
   // 路径分支：火山方舟原生域名（ark.cn-beijing.volces.com/api/v3）使用 /contents/generations/tasks
   // MemeFast 等中转使用 /volc/v1/contents/generations/tasks

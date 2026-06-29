@@ -776,7 +776,7 @@ export const T2I_MODELS: T2IModel[] = [
 // ---------------------------------------------------------------------------
 
 export const T2V_MODELS: T2VModel[] = [
-  // 1
+  // 0
   {
     id: 'seedance-lite-t2v',
     providerAliases: ["seedance-lite-t2v","doubao-seedance-lite","doubao-seedance-1-0-lite-t2v-250428","doubao-seedance-1-0-lite-i2v-250428"],
@@ -793,7 +793,7 @@ export const T2V_MODELS: T2VModel[] = [
   // 2
   {
     id: 'seedance-pro-t2v',
-    providerAliases: ["seedance-pro-t2v","doubao-seedance-1-5-pro","doubao-seedance-1-0-pro-250528"],
+    providerAliases: ["seedance-pro-t2v","doubao-seedance-1-5-pro","doubao-seedance-1-0-pro-250528","doubao-seedance-2-0-260128"],
     name: 'Seedance Pro T2V',
     category: 'premium',
     inputs: {
@@ -801,8 +801,8 @@ export const T2V_MODELS: T2VModel[] = [
       aspect_ratio: aspectRatioInput([
         '16:9', '9:16', '1:1', '4:3', '3:4', '21:9', '9:21',
       ]),
-      duration: durationInput({ default: 5 }),
-      resolution: resolutionInput(['480p', '720p', '1080p'], '480p'),
+      duration: durationInput({ default: 5, enum: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] }),
+      resolution: resolutionInput(['480p', '720p', '1080p', '4k'], '480p'),
     },
   },
   // 3

@@ -43,6 +43,7 @@ const RESOLUTION_OPTIONS = [
   { value: '480p', label: '480p', desc: 'SD 标清' },
   { value: '720p', label: '720p', desc: 'HD 高清' },
   { value: '1080p', label: '1080p', desc: 'FHD 全高清' },
+  { value: '4k', label: '4K', desc: 'H.265 超高清' },
 ] as const;
 
 const FEATURE_MODE_OPTIONS: { value: VideoFeatureMode; label: string; icon: React.ReactNode; desc: string }[] = [
@@ -128,6 +129,11 @@ interface MultiRefAsset {
 function isSeedanceGroupModel(modelId: string): boolean {
   const lower = modelId.toLowerCase();
   return lower.includes('seedance');
+}
+
+/** 判断模型是否属于 Seedance 2.0 组别 */
+function isSeedanceV2GroupModel(modelId: string): boolean {
+  return /seedance[-_](v?2|2\.0|2[-_]0)/i.test(modelId);
 }
 
 /** 判断模型是否属于 HappyHorse 系列 */
@@ -372,6 +378,8 @@ export function VideoStudio() {
 
   /** 是否属于 seedance 组 */
   const isSeedance = useMemo(() => isSeedanceGroupModel(selectedVideoModel), [selectedVideoModel]);
+  /** 是否属于 Seedance 2.0 组 */
+  const isSeedanceV2 = useMemo(() => isSeedanceV2GroupModel(selectedVideoModel), [selectedVideoModel]);
   /** 是否属于 HappyHorse 系列 */
   const isHappyHorse = useMemo(() => isHappyHorseModel(selectedVideoModel), [selectedVideoModel]);
   /** 是否支持多功能参考模式（Seedance 或 HappyHorse） */
@@ -395,6 +403,14 @@ export function VideoStudio() {
       setVideoFeatureMode('text-to-video');
     }
   }, [supportsMultiRef, videoFeatureMode, setVideoFeatureMode]);
+
+  /** Seedance 2.0 默认使用横屏高清，4K 作为手动可选分辨率。 */
+  useEffect(() => {
+    if (!isSeedanceV2) return;
+    setVideoAspectRatio('16:9');
+    setVideoResolution('720p');
+    setVideoDuration(15);
+  }, [isSeedanceV2, selectedVideoModel, setVideoAspectRatio, setVideoResolution, setVideoDuration]);
 
   /** 仅在用户**主动切换模型**时清空已上传素材；mount 时不清空，避免切 Tab 后丢失。 */
   const prevVideoModelRef = useRef<string | null>(null);

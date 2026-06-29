@@ -2,7 +2,7 @@
 // Licensed under AGPL-3.0-or-later. See LICENSE for details.
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 import { useEffect, useState, useRef, useImperativeHandle, forwardRef, useCallback } from 'react';
-import { Maximize2, X } from 'lucide-react';
+import { Maximize2 } from 'lucide-react';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import {
@@ -135,6 +135,19 @@ export const PromptTextarea = forwardRef<PromptTextareaRef, PromptTextareaProps>
 
     const charCount = inputValue.length;
 
+    const discardExpandedDraft = useCallback(() => {
+      setDraft(pendingValueRef.current);
+      setOpen(false);
+    }, []);
+
+    const saveExpandedDraft = useCallback(() => {
+      pendingValueRef.current = draft;
+      dirtyRef.current = false;
+      setInputValue(draft);
+      onChangeRef.current(draft);
+      setOpen(false);
+    }, [draft]);
+
     useImperativeHandle(ref, () => ({
       insertAtCursor: (text: string) => {
         // 先 flush 待写的本地值，保证基于"最新文本"插入
@@ -201,14 +214,27 @@ export const PromptTextarea = forwardRef<PromptTextareaRef, PromptTextareaProps>
           </div>
         )}
 
-        <Dialog open={open} onOpenChange={setOpen}>
+        <Dialog
+          open={open}
+          onOpenChange={(nextOpen) => {
+            if (nextOpen) {
+              setOpen(true);
+              return;
+            }
+            discardExpandedDraft();
+          }}
+        >
           <DialogContent
             className="!max-w-[min(900px,90vw)] w-[min(900px,90vw)] h-[min(80vh,720px)] flex flex-col gap-4 p-6"
+            onInteractOutside={(event) => {
+              event.preventDefault();
+              saveExpandedDraft();
+            }}
           >
             <DialogHeader>
               <DialogTitle>{expandTitle}</DialogTitle>
               <DialogDescription className="text-xs">
-                支持多行编辑，关闭或点击"应用"后回写到原输入框。
+                支持多行编辑。
               </DialogDescription>
             </DialogHeader>
 
@@ -223,26 +249,8 @@ export const PromptTextarea = forwardRef<PromptTextareaRef, PromptTextareaProps>
             <div className="flex items-center justify-between">
               <span className="text-xs text-muted-foreground">{draft.length} 字</span>
               <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    setDraft(pendingValueRef.current);
-                    setOpen(false);
-                  }}
-                >
-                  <X className="mr-1.5 h-4 w-4" /> 取消
-                </Button>
-                <Button
-                  onClick={() => {
-                    // 应用：更新本地镜像并立即 flush 到外部
-                    pendingValueRef.current = draft;
-                    dirtyRef.current = false;
-                    setInputValue(draft);
-                    onChangeRef.current(draft);
-                    setOpen(false);
-                  }}
-                >
-                  应用
+                <Button onClick={saveExpandedDraft}>
+                  保存
                 </Button>
               </div>
             </div>

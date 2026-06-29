@@ -75,6 +75,8 @@ export interface FreedomVideoParams {
   aspectRatio?: string;
   duration?: number;
   resolution?: string;
+  generateAudio?: boolean;
+  watermark?: boolean;
   uploadFiles?: FreedomVideoUploadFile[];
   tools?: Array<{ type: 'web_search' }>;
   /** 用于取消任务的 AbortSignal */
@@ -1850,7 +1852,6 @@ async function generateVideoViaOpenAIOfficial(
 
   const pollUrl = buildEndpoint(baseUrl, `videos/${taskId}`);
   // 无限轮询：视频生成耗时不定，由用户手动取消或服务端返回失败状态
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     await new Promise((r) => setTimeout(r, VIDEO_POLL_INTERVAL));
     const pollResp = await corsFetch(pollUrl, {
@@ -1885,6 +1886,7 @@ async function generateVideoViaUnified(
     const isRunway = (endpointTypes || []).some(t => /runway/i.test(t));
     const isGrok = (endpointTypes || []).some(t => /grok/i.test(t)) || /grok/i.test(model);
     const isSeedance = /seedance|doubao-seedance/i.test(model);
+    const isSeedanceV2 = /seedance[-_](v?2|2\.0|2[-_]0)/i.test(model);
 
     body = { model, prompt: params.prompt };
     const metadata: Record<string, any> = {};
@@ -1904,6 +1906,9 @@ async function generateVideoViaUnified(
         metadata.ratio = toRunwayRatio(params.aspectRatio);
       } else if (isSeedance) {
         metadata.ratio = params.aspectRatio;
+        if (isSeedanceV2 || params.aspectRatio === 'adaptive') {
+          body.ratio = params.aspectRatio;
+        }
       } else if (isGrok) {
         body.aspect_ratio = params.aspectRatio;
       } else {
@@ -1919,7 +1924,15 @@ async function generateVideoViaUnified(
         body.resolution = params.resolution;
       } else {
         metadata.resolution = params.resolution;
+        if (isSeedanceV2 || params.resolution.toLowerCase() === '4k') {
+          body.resolution = params.resolution.toLowerCase();
+        }
       }
+    }
+
+    if (isSeedance && (isSeedanceV2 || params.resolution?.toLowerCase() === '4k' || params.aspectRatio === 'adaptive')) {
+      body.generate_audio = params.generateAudio ?? true;
+      body.watermark = params.watermark ?? false;
     }
 
     // Image inputs (wan2.6, doubao, luma, vidu, minimax, runway, etc.)
@@ -2019,7 +2032,6 @@ async function generateVideoViaUnified(
   // 轮询：直接使用端点类型对应的 URL（无限轮询，由用户手动取消或服务端返回失败）
   const pollUrl = `${rootBase}${endpointPaths.poll(String(taskId))}`;
 
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     await abortableSleep(VIDEO_POLL_INTERVAL, params.signal);
     const pollResp = await corsFetch(pollUrl, {
@@ -2066,10 +2078,16 @@ async function generateVideoViaVolc(
   const submitPath = isVolcNative
     ? `${baseUrl.replace(/\/+$/, '')}/contents/generations/tasks`
     : `${getRootBaseUrl(baseUrl)}/volc/v1/contents/generations/tasks`;
+  const resolution = params.resolution?.toLowerCase();
+  const ratio = params.aspectRatio;
+  const isSeedanceV2 = /seedance[-_](v?2|2\.0|2[-_]0)/i.test(model);
+  const usesSeedanceV2Params = isSeedanceV2 || resolution === '4k' || ratio === 'adaptive';
   const promptParts = [params.prompt];
-  if (params.resolution) promptParts.push(`--rs ${params.resolution.toLowerCase()}`);
-  if (params.aspectRatio) promptParts.push(`--rt ${params.aspectRatio}`);
-  if (params.duration) promptParts.push(`--dur ${params.duration}`);
+  if (!usesSeedanceV2Params) {
+    if (resolution) promptParts.push(`--rs ${resolution}`);
+    if (ratio) promptParts.push(`--rt ${ratio}`);
+    if (params.duration) promptParts.push(`--dur ${params.duration}`);
+  }
 
   const content: Array<Record<string, unknown>> = [
     { type: 'text', text: promptParts.join(' ') },
@@ -2104,6 +2122,13 @@ async function generateVideoViaVolc(
   }
 
   const body: Record<string, any> = { model, content };
+  if (usesSeedanceV2Params) {
+    body.generate_audio = params.generateAudio ?? true;
+    if (resolution) body.resolution = resolution;
+    if (ratio) body.ratio = ratio;
+    if (params.duration) body.duration = params.duration;
+    body.watermark = params.watermark ?? false;
+  }
   if (params.tools?.length) {
     body.tools = params.tools;
   }
@@ -2130,7 +2155,6 @@ async function generateVideoViaVolc(
   // 无限轮询：Seedance/Doubao 多模态参考耗时不定，不再设超时上限，
   // 间隔保持 5s 减少无效请求，由用户手动取消或服务端返回失败状态。
   const VOLC_POLL_INTERVAL = 5000;
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     await abortableSleep(VOLC_POLL_INTERVAL, params.signal);
     const pollResp = await corsFetch(pollUrl, {
@@ -2198,7 +2222,6 @@ async function generateVideoViaWan(
 
   const pollUrl = `${rootBase}/alibailian/api/v1/tasks/${taskId}`;
   // 无限轮询：Wan 视频生成不再设超时上限，由服务端返回完成/失败状态。
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     await new Promise((r) => setTimeout(r, VIDEO_POLL_INTERVAL));
     const pollResp = await corsFetch(pollUrl, {
@@ -2287,7 +2310,6 @@ async function generateVideoViaHappyHorseR2V(
   const POLL_INTERVAL = 5000;
   const pollUrl = `${rootBase}/alibailian/api/v1/tasks/${taskId}`;
 
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     await abortableSleep(POLL_INTERVAL, params.signal);
     const pollResp = await corsFetch(pollUrl, {
@@ -2378,7 +2400,6 @@ async function generateVideoViaKling(
   // Poll URL mirrors the submit path: GET /kling/v1/videos/{path}/{task_id}
   const pollUrl = `${rootBase}/kling/v1/videos/${endpointPath}/${taskId}`;
   // 无限轮询：Kling 视频生成耗时不定，不再设超时上限。
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     await new Promise((r) => setTimeout(r, VIDEO_POLL_INTERVAL));
     const pollResp = await corsFetch(pollUrl, {
@@ -2444,7 +2465,6 @@ async function generateVideoViaReplicate(
 
   const pollUrl = `${rootBase}/replicate/v1/predictions/${predictionId}`;
   // 无限轮询：Replicate 视频生成耗时不定，不再设超时上限。
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     await new Promise(r => setTimeout(r, VIDEO_POLL_INTERVAL));
     const pollResp = await corsFetch(pollUrl, {

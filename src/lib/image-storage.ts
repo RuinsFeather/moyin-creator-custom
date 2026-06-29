@@ -19,7 +19,7 @@ declare global {
   }
 }
 
-export type ImageCategory = 'characters' | 'scenes' | 'shots' | 'wardrobe' | 'videos' | 'styles' | 'props';
+export type ImageCategory = 'characters' | 'scenes' | 'shots' | 'wardrobe' | 'videos' | 'styles' | 'props' | 'volc-assets';
 
 /**
  * Check if running in Electron environment
