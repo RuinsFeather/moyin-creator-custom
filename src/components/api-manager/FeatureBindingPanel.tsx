@@ -124,6 +124,8 @@ const DEFAULT_PLATFORM_CAPABILITIES: Record<string, ModelCapability[]> = {
   runninghub: ["image_generation"],
 };
 
+const SELECTED_MODELS_FILTER = '__selected_models__';
+
 /**
  * 模型级别能力映射
  * 精确控制每个模型在服务映射中的可选范围
@@ -148,6 +150,8 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
   // ---- 图片生成模型 ----
   'cogview-3-plus': ['image_generation'],
   'gemini-imagen': ['image_generation'],
+  'gemini-3.1-flash-image': ['image_generation'],
+  'gemini-3-pro-image': ['image_generation'],
   'gemini-3-pro-image-preview': ['image_generation'],
   'gpt-image-1.5': ['image_generation'],
 
@@ -440,6 +444,19 @@ export function FeatureBindingPanel() {
             }
           }
           const configured = validBindings.length > 0;
+          const selectedModelSummaries = currentBindings.map((binding) => {
+            const parsed = parseOptionKey(binding);
+            const option = options.find((o) => getOptionKey(o) === binding || `${o.platform}:${o.model}` === binding);
+            const model = option?.model || parsed?.model || binding;
+            const providerName = option?.name || parsed?.providerIdOrPlatform || '未知服务';
+            return {
+              binding,
+              model,
+              providerName,
+              displayName: getModelDisplayName(model),
+              valid: validBindings.includes(binding),
+            };
+          });
 
           return (
             <div
@@ -604,10 +621,14 @@ export function FeatureBindingPanel() {
                         const brands = brandGroupsByFeature[feature.key] || [];
                         const activeBrand = selectedBrand[feature.key] || null;
                         const query = (searchQuery[feature.key] || '').toLowerCase();
+                        const selectedBindingSet = new Set(currentBindings);
 
                         // 过滤后的模型列表
                         const filteredOptions = options.filter(o => {
                           if (query && !o.model.toLowerCase().includes(query) && !getModelDisplayName(o.model).toLowerCase().includes(query)) return false;
+                          if (activeBrand === SELECTED_MODELS_FILTER) {
+                            return selectedBindingSet.has(getOptionKey(o)) || selectedBindingSet.has(`${o.platform}:${o.model}`);
+                          }
                           if (activeBrand && extractBrandFromModel(o.model) !== activeBrand) return false;
                           return true;
                         });
@@ -634,6 +655,33 @@ export function FeatureBindingPanel() {
                                   {options.length}
                                 </span>
                               </button>
+
+                              {selectedModelSummaries.length > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedBrand(prev => ({
+                                    ...prev,
+                                    [feature.key]: activeBrand === SELECTED_MODELS_FILTER ? null : SELECTED_MODELS_FILTER,
+                                  }))}
+                                  className={cn(
+                                    "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors",
+                                    activeBrand === SELECTED_MODELS_FILTER
+                                      ? "bg-primary/10 border-primary/40 text-primary"
+                                      : "bg-muted/30 border-border hover:bg-accent/50 text-muted-foreground"
+                                  )}
+                                  title={selectedModelSummaries
+                                    .map((item) => `${item.displayName} (${item.providerName})`)
+                                    .join('\n')}
+                                >
+                                  已选择模型
+                                  <span className={cn(
+                                    "text-[10px] px-1 py-0.5 rounded-full min-w-[18px] text-center",
+                                    activeBrand === SELECTED_MODELS_FILTER ? "bg-primary/20" : "bg-muted"
+                                  )}>
+                                    {selectedModelSummaries.length}
+                                  </span>
+                                </button>
+                              )}
 
                               {brands.map(({ brandId, options: brandOpts }) => {
                                 const info = getBrandInfo(brandId);

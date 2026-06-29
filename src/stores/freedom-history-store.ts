@@ -19,6 +19,8 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { createProjectScopedStorage } from '@/lib/project-storage';
+import { fileStorage } from '@/lib/indexed-db-storage';
+import { useProjectStore } from '@/stores/project-store';
 import type { HistoryEntry } from './freedom-store';
 
 export type { HistoryEntry } from './freedom-store';
@@ -31,7 +33,7 @@ export interface FreedomHistoryState {
 }
 
 export interface FreedomHistoryActions {
-  addHistoryEntry: (entry: HistoryEntry) => void;
+  addHistoryEntry: (entry: HistoryEntry, projectId?: string | null) => void;
   removeHistoryEntry: (id: string) => void;
   clearHistory: (type: 'image' | 'video') => void;
 }
@@ -47,6 +49,33 @@ const initialState: FreedomHistoryState = {
   videoHistory: [],
 };
 
+function mergeHistoryEntry(state: FreedomHistoryState, entry: HistoryEntry): Partial<FreedomHistoryState> {
+  const historyKey: keyof FreedomHistoryState =
+    entry.type === 'image' ? 'imageHistory' : 'videoHistory';
+  const current = state[historyKey];
+  const existing = current.find((item) => item.id === entry.id);
+  const nextEntry = existing ? { ...existing, ...entry } : entry;
+  const updated = [nextEntry, ...current.filter((item) => item.id !== entry.id)].slice(0, MAX_HISTORY);
+  return { [historyKey]: updated } as Partial<FreedomHistoryState>;
+}
+
+async function addHistoryEntryToProjectFile(entry: HistoryEntry, projectId: string) {
+  const key = `_p/${projectId}/freedom-history`;
+  try {
+    const raw = await fileStorage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : null;
+    const state = (parsed?.state ?? parsed ?? initialState) as FreedomHistoryState;
+    const nextState = {
+      ...initialState,
+      ...state,
+      ...mergeHistoryEntry({ ...initialState, ...state }, entry),
+    };
+    await fileStorage.setItem(key, JSON.stringify({ state: nextState, version: parsed?.version ?? 1 }));
+  } catch (error) {
+    console.warn('[FreedomHistory] Failed to save history entry to project file:', error);
+  }
+}
+
 // ==================== Store ====================
 
 export const useFreedomHistoryStore = create<FreedomHistoryStore>()(
@@ -54,16 +83,13 @@ export const useFreedomHistoryStore = create<FreedomHistoryStore>()(
     (set) => ({
       ...initialState,
 
-      addHistoryEntry: (entry) => {
-        const historyKey: keyof FreedomHistoryState =
-          entry.type === 'image' ? 'imageHistory' : 'videoHistory';
-        set((state) => {
-          const current = state[historyKey];
-          const existing = current.find((item) => item.id === entry.id);
-          const nextEntry = existing ? { ...entry, ...existing } : entry;
-          const updated = [nextEntry, ...current.filter((item) => item.id !== entry.id)].slice(0, MAX_HISTORY);
-          return { [historyKey]: updated } as Partial<FreedomHistoryState>;
-        });
+      addHistoryEntry: (entry, projectId) => {
+        const activeProjectId = useProjectStore.getState().activeProjectId;
+        if (projectId && activeProjectId && projectId !== activeProjectId) {
+          void addHistoryEntryToProjectFile(entry, projectId);
+          return;
+        }
+        set((state) => mergeHistoryEntry(state, entry));
       },
 
       removeHistoryEntry: (id) => {

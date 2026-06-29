@@ -1792,10 +1792,8 @@ app.whenReady().then(() => {
       const category = url.hostname
       const filename = decodeURIComponent(url.pathname.slice(1)) // Remove leading / and decode
       const filePath = path.join(getMediaRoot(), category, filename)
-      
-      // Read file directly
-      const data = fs.readFileSync(filePath)
-      
+
+      const stat = fs.statSync(filePath)
       // Determine MIME type based on extension
       const ext = path.extname(filename).toLowerCase()
       const mimeTypes: Record<string, string> = {
@@ -1814,9 +1812,38 @@ app.whenReady().then(() => {
         '.mkv': 'video/x-matroska',
       }
       const mimeType = mimeTypes[ext] || 'application/octet-stream'
-      
+
+      // 视频播放/拖动依赖 Range 请求；不支持会导致刚生成的视频首屏和 seek 明显卡顿。
+      const rangeHeader = request.headers.get('range')
+      if (rangeHeader && mimeType.startsWith('video/')) {
+        const match = rangeHeader.match(/bytes=(\d+)-(\d*)/)
+        if (match) {
+          const start = Number.parseInt(match[1], 10)
+          const end = match[2] ? Number.parseInt(match[2], 10) : stat.size - 1
+          const safeStart = Number.isFinite(start) ? Math.max(0, start) : 0
+          const safeEnd = Number.isFinite(end) ? Math.min(stat.size - 1, end) : stat.size - 1
+          if (safeStart <= safeEnd) {
+            const chunk = fs.readFileSync(filePath).subarray(safeStart, safeEnd + 1)
+            return new Response(chunk, {
+              status: 206,
+              headers: {
+                'Content-Type': mimeType,
+                'Accept-Ranges': 'bytes',
+                'Content-Length': String(chunk.length),
+                'Content-Range': `bytes ${safeStart}-${safeEnd}/${stat.size}`,
+              },
+            })
+          }
+        }
+      }
+
+      const data = fs.readFileSync(filePath)
       return new Response(data, {
-        headers: { 'Content-Type': mimeType }
+        headers: {
+          'Content-Type': mimeType,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': String(data.length),
+        }
       })
     } catch (error) {
       console.error('Failed to load local image:', error)

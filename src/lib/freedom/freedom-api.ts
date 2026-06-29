@@ -28,6 +28,7 @@ import { toast } from 'sonner';
 
 export interface FreedomImageParams {
   prompt: string;
+  projectId?: string;
   model?: string;
   aspectRatio?: string;
   resolution?: string;
@@ -69,11 +70,13 @@ export interface FreedomVideoUploadFile {
 
 export interface FreedomVideoParams {
   prompt: string;
+  projectId?: string;
   model?: string;
   aspectRatio?: string;
   duration?: number;
   resolution?: string;
   uploadFiles?: FreedomVideoUploadFile[];
+  tools?: Array<{ type: 'web_search' }>;
   /** 用于取消任务的 AbortSignal */
   signal?: AbortSignal;
 }
@@ -730,7 +733,7 @@ async function generateViaGeminiNative(
     throw new Error('未能从 Gemini 响应中提取图片');
   }
 
-  const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image');
+  const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image', params.projectId);
   params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
   return { url: imageUrl, mediaId };
 }
@@ -838,7 +841,7 @@ async function generateViaChatCompletions(
     throw new Error('未能从聊天响应中提取图片 URL');
   }
 
-  const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image');
+  const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image', params.projectId);
   params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
   return { url: imageUrl, mediaId };
 }
@@ -988,7 +991,7 @@ async function generateViaImagesEndpoint(
   }
 
   params.onProgress?.({ phase: 'finalizing', percent: 95, message: '保存到素材库…' });
-  const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image');
+  const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image', params.projectId);
   params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
   return { url: imageUrl, taskId: data.task_id, mediaId };
 }
@@ -1074,7 +1077,7 @@ async function generateViaKlingImagesEndpoint(
   }
 
   params.onProgress?.({ phase: 'finalizing', percent: 95, message: '保存到素材库…' });
-  const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image');
+  const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image', params.projectId);
   params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
   return { url: imageUrl, taskId: data.task_id, mediaId };
 }
@@ -1310,7 +1313,7 @@ async function generateViaMidjourneyEndpoint(
         pollData.data?.image_url;
       if (!imageUrl) throw new Error('Midjourney 成功但未返回图片 URL');
       params.onProgress?.({ phase: 'finalizing', percent: 95, message: '保存到素材库…' });
-      const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image');
+      const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image', params.projectId);
       params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
       return { url: imageUrl, taskId: String(taskId), mediaId };
     }
@@ -1404,7 +1407,7 @@ async function generateViaIdeogramEndpoint(
   const data = await response.json();
   const imageUrl = extractImageUrl(data);
   if (!imageUrl) throw new Error('Ideogram 响应未包含图片 URL');
-  const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image');
+  const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image', params.projectId);
   params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
   return { url: imageUrl, mediaId };
 }
@@ -1459,7 +1462,7 @@ async function generateViaReplicateImageEndpoint(
   const directUrl = extractImageUrl(submitData);
   if (directUrl) {
     params.onProgress?.({ phase: 'finalizing', percent: 95, message: '保存到素材库…' });
-    const mediaId = saveToMediaLibrary(directUrl, params.prompt, 'ai-image');
+    const mediaId = saveToMediaLibrary(directUrl, params.prompt, 'ai-image', params.projectId);
     params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
     return { url: directUrl, mediaId };
   }
@@ -1482,7 +1485,7 @@ async function generateViaReplicateImageEndpoint(
       const imageUrl = extractImageUrl(pollData);
       if (!imageUrl) throw new Error('Replicate 成功但未返回图片 URL');
       params.onProgress?.({ phase: 'finalizing', percent: 95, message: '保存到素材库…' });
-      const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image');
+      const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image', params.projectId);
       params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
       return { url: imageUrl, taskId: String(predictionId), mediaId };
     }
@@ -1563,7 +1566,7 @@ async function _generateFreedomVideoInner(
   }
 
   const persistentUrl = await persistFreedomVideoResult(result.url, params.prompt);
-  const mediaId = saveToMediaLibrary(persistentUrl, params.prompt, 'ai-video');
+  const mediaId = saveToMediaLibrary(persistentUrl, params.prompt, 'ai-video', params.projectId);
   return { ...result, url: persistentUrl, mediaId };
 }
 
@@ -1971,6 +1974,10 @@ async function generateVideoViaUnified(
     }
 
     if (Object.keys(metadata).length > 0) body.metadata = metadata;
+
+    if (isSeedance && params.tools?.length) {
+      body.tools = params.tools;
+    }
   }
 
   // 直接使用端点类型对应的 URL（绝对路径，从域名根拼接）
@@ -2096,7 +2103,10 @@ async function generateVideoViaVolc(
     }
   }
 
-  const body = { model, content };
+  const body: Record<string, any> = { model, content };
+  if (params.tools?.length) {
+    body.tools = params.tools;
+  }
 
   console.log('[Freedom] Volc submit →', submitPath, { isVolcNative, model });
   const submitResp = await corsFetch(submitPath, {
@@ -2549,11 +2559,12 @@ async function pollForResult(
 function saveToMediaLibrary(
   url: string,
   prompt: string,
-  source: 'ai-image' | 'ai-video'
+  source: 'ai-image' | 'ai-video',
+  projectId?: string | null,
 ): string | undefined {
   try {
     const mediaStore = useMediaStore.getState();
-    const projectId = useProjectStore.getState().activeProjectId;
+    const targetProjectId = projectId ?? useProjectStore.getState().activeProjectId;
     const name = prompt.slice(0, 30).replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '_') || 'freedom';
     const type = source === 'ai-image' ? 'image' : 'video';
     
@@ -2562,7 +2573,7 @@ function saveToMediaLibrary(
       name: `${name}_${Date.now()}`,
       type: type as any,
       source,
-      projectId: projectId || undefined,
+      projectId: targetProjectId || undefined,
     });
 
     return mediaId;

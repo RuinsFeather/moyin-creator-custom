@@ -10,9 +10,11 @@ import { Slider } from '@/components/ui/slider';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Progress } from '@/components/ui/progress';
+import { Switch } from '@/components/ui/switch';
 import { toast } from 'sonner';
 import { useFreedomStore, type VideoFeatureMode, type ImageToVideoSubMode } from '@/stores/freedom-store';
 import { useFreedomHistoryStore } from '@/stores/freedom-history-store';
+import { useProjectStore } from '@/stores/project-store';
 import { useAPIConfigStore } from '@/stores/api-config-store';
 import { ModelSelector } from './ModelSelector';
 import { GenerationHistory } from './GenerationHistory';
@@ -261,6 +263,7 @@ export function VideoStudio() {
     videoResult, setVideoResult,
     videoGenerating, setVideoGenerating,
     videoFeatureMode, setVideoFeatureMode,
+    videoEnableWebSearch, setVideoEnableWebSearch,
     videoI2VSubMode, setVideoI2VSubMode,
     videoSingleUpload: singleUpload,
     setVideoSingleUpload: setSingleUpload,
@@ -336,6 +339,7 @@ export function VideoStudio() {
     completedTasks.forEach((task) => {
       addHistoryEntry({
         id: task.id,
+        projectId: task.projectId,
         prompt: task.prompt,
         model: task.model,
         resultUrl: task.resultUrl!,
@@ -343,7 +347,7 @@ export function VideoStudio() {
         params: {},
         createdAt: task.createdAt,
         type: 'video',
-      });
+      }, task.projectId);
       removeActiveTask(task.id);
     });
   }, [addHistoryEntry, removeActiveTask]);
@@ -372,6 +376,7 @@ export function VideoStudio() {
   const isHappyHorse = useMemo(() => isHappyHorseModel(selectedVideoModel), [selectedVideoModel]);
   /** 是否支持多功能参考模式（Seedance 或 HappyHorse） */
   const supportsMultiRef = isSeedance || isHappyHorse;
+  const showSeedanceWebSearch = isSeedance && videoFeatureMode === 'text-to-video';
   /** 多功能参考模式的最大素材数量（HappyHorse 仅支持 9 张图片） */
   const multiRefMaxAssets = isHappyHorse ? HAPPYHORSE_MULTI_REF_MAX_IMAGES : MULTI_REF_MAX_ASSETS;
 
@@ -786,6 +791,8 @@ export function VideoStudio() {
       }
     }
 
+    const webSearchEnabled = showSeedanceWebSearch && videoEnableWebSearch;
+
     // Veo 验证（仅文生视频模式或 veo 模型时使用旧逻辑）
     if (videoFeatureMode === 'text-to-video') {
       const uploadError = getVeoUploadValidationError(
@@ -803,12 +810,14 @@ export function VideoStudio() {
 
     // 快照当前参数
     const snapshot = {
+      projectId: useProjectStore.getState().activeProjectId || undefined,
       prompt: videoPrompt,
       model: selectedVideoModel,
       aspectRatio: videoAspectRatio,
       duration: videoDuration,
       resolution: videoResolution || undefined,
       featureMode: videoFeatureMode,
+      webSearchEnabled,
     };
 
     // 构建上传文件列表
@@ -858,6 +867,7 @@ export function VideoStudio() {
 
     addActiveTask({
       id: taskId,
+      projectId: snapshot.projectId,
       type: 'video',
       prompt: snapshot.prompt,
       model: snapshot.model,
@@ -894,11 +904,13 @@ export function VideoStudio() {
       try {
         const result = await generateFreedomVideo({
           prompt: snapshot.prompt,
+          projectId: snapshot.projectId,
           model: snapshot.model,
           aspectRatio: snapshot.aspectRatio,
           duration: snapshot.duration,
           resolution: snapshot.resolution,
           uploadFiles,
+          tools: snapshot.webSearchEnabled ? [{ type: 'web_search' as const }] : undefined,
           signal: controller.signal,
         });
 
@@ -913,6 +925,7 @@ export function VideoStudio() {
 
         addHistoryEntry({
           id: taskId,
+          projectId: snapshot.projectId,
           prompt: snapshot.prompt,
           model: snapshot.model,
           resultUrl: result.url,
@@ -927,7 +940,7 @@ export function VideoStudio() {
           durationMs: Date.now() - startedAt,
           mediaId: result.mediaId,
           type: 'video',
-        });
+        }, snapshot.projectId);
 
         // 同步预览结果（仅当用户当前查看此任务时）
         useFreedomStore.setState((s) => {
@@ -1384,6 +1397,18 @@ export function VideoStudio() {
                     )}
                   </div>
                 )}
+              </div>
+            )}
+
+            {showSeedanceWebSearch && (
+              <div className="flex items-center justify-between rounded-md border px-3 py-2">
+                <div className="space-y-0.5">
+                  <Label className="text-sm font-medium">联网搜索</Label>
+                  <p className="text-xs text-muted-foreground">
+                    仅 Seedance 文生视频可用，开启后将使用 web_search 工具。
+                  </p>
+                </div>
+                <Switch checked={videoEnableWebSearch} onCheckedChange={setVideoEnableWebSearch} />
               </div>
             )}
 

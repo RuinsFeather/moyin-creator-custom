@@ -92,6 +92,10 @@ export function classifyModelByName(modelName: string): ModelCapability[] {
     'playground', 'recraft', 'kolors', 'seedream',
   ];
   if (imageGenPatterns.some(p => name.includes(p))) return ['image_generation'];
+  // Gemini 图像生成模型（如 gemini-3.1-flash-image、gemini-3-pro-image）
+  if ((name.includes('gemini') || name.includes('imagen')) && /(^|[-_.])image($|[-_.])/.test(name)) {
+    return ['image_generation'];
+  }
   // "xxx-image-preview" 类（如 gemini-3-pro-image-preview）
   if (/image[- ]?preview/.test(name)) return ['image_generation'];
 

@@ -16,6 +16,7 @@ import { saveFreedomMedia } from '@/lib/freedom/download-utils';
 import { cn } from '@/lib/utils';
 import { useFreedomStore } from '@/stores/freedom-store';
 import { useFreedomHistoryStore } from '@/stores/freedom-history-store';
+import { useProjectStore } from '@/stores/project-store';
 import { ModelSelector } from './ModelSelector';
 import { GenerationHistory } from './GenerationHistory';
 import { ActiveTaskCard, formatElapsed } from './ActiveTaskCard';
@@ -187,6 +188,7 @@ export function ImageStudio() {
 
     // 快照当前参数（避免后台运行期间用户改了 store 状态影响任务）
     const snapshot = {
+      projectId: useProjectStore.getState().activeProjectId || undefined,
       prompt: imagePrompt,
       model: selectedImageModel,
       aspectRatio: imageAspectRatio,
@@ -199,6 +201,7 @@ export function ImageStudio() {
     // 写入 store activeTasks，组件卸载/页面跳转后任务仍继续运行
     addActiveTask({
       id: taskId,
+      projectId: snapshot.projectId,
       type: 'image',
       prompt: snapshot.prompt,
       model: snapshot.model,
@@ -219,6 +222,7 @@ export function ImageStudio() {
       try {
         const result = await generateFreedomImage({
           prompt: snapshot.prompt,
+          projectId: snapshot.projectId,
           model: snapshot.model,
           aspectRatio: snapshot.aspectRatio,
           resolution: snapshot.resolution,
@@ -252,7 +256,7 @@ export function ImageStudio() {
           durationMs: Date.now() - startedAt,
           mediaId: result.mediaId,
           type: 'image',
-        });
+        }, snapshot.projectId);
 
         // 同步预览主图（仅当用户当前查看的就是此任务）
         useFreedomStore.setState((s) => {

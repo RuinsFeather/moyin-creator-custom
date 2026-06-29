@@ -18,6 +18,7 @@ export type ImageToVideoSubMode = 'first-frame' | 'first-last-frame';
 
 export interface HistoryEntry {
   id: string;
+  projectId?: string;
   prompt: string;
   model: string;
   resultUrl: string;
@@ -79,6 +80,7 @@ export interface UploadProgressEntry {
  */
 export interface ActiveTask {
   id: string;
+  projectId?: string;
   type: 'image' | 'video';
   prompt: string;
   model: string;
@@ -116,6 +118,7 @@ interface FreedomState {
   videoResult: string | null;
   videoGenerating: boolean;
   videoFeatureMode: VideoFeatureMode;
+  videoEnableWebSearch: boolean;
   videoI2VSubMode: ImageToVideoSubMode;
   /** 视频工作室上传素材（跨 Tab 保留，不持久化到 localStorage 以避免 dataUrl 撑爆） */
   videoSingleUpload: VideoUploadAsset | null;
@@ -152,6 +155,7 @@ interface FreedomActions {
   setVideoResult: (url: string | null) => void;
   setVideoGenerating: (generating: boolean) => void;
   setVideoFeatureMode: (mode: VideoFeatureMode) => void;
+  setVideoEnableWebSearch: (enabled: boolean) => void;
   setVideoI2VSubMode: (mode: ImageToVideoSubMode) => void;
   setVideoSingleUpload: (asset: VideoUploadAsset | null) => void;
   setVideoFirstFrameUpload: (asset: VideoUploadAsset | null) => void;
@@ -193,6 +197,7 @@ const initialState: FreedomState = {
   videoResult: null,
   videoGenerating: false,
   videoFeatureMode: 'text-to-video',
+  videoEnableWebSearch: false,
   videoI2VSubMode: 'first-frame',
   videoSingleUpload: null,
   videoFirstFrameUpload: null,
@@ -232,6 +237,7 @@ export const useFreedomStore = create<FreedomStore>()(
       setVideoResult: (url) => set({ videoResult: url }),
       setVideoGenerating: (generating) => set({ videoGenerating: generating }),
       setVideoFeatureMode: (mode) => set({ videoFeatureMode: mode }),
+      setVideoEnableWebSearch: (enabled) => set({ videoEnableWebSearch: enabled }),
       setVideoI2VSubMode: (mode) => set({ videoI2VSubMode: mode }),
       setVideoSingleUpload: (asset) => set({ videoSingleUpload: asset }),
       setVideoFirstFrameUpload: (asset) => set({ videoFirstFrameUpload: asset }),
@@ -316,6 +322,7 @@ export const useFreedomStore = create<FreedomStore>()(
         videoDuration: state.videoDuration,
         videoResolution: state.videoResolution,
         videoFeatureMode: state.videoFeatureMode,
+        videoEnableWebSearch: state.videoEnableWebSearch,
         videoI2VSubMode: state.videoI2VSubMode,
         // 注意：imageHistory / videoHistory 已迁移到独立的
         // `useFreedomHistoryStore`（按项目隔离的 per-project storage）。

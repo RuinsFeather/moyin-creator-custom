@@ -28,11 +28,12 @@ export const BRAND_REGISTRY: Record<string, BrandInfo> = {
   flux:         { displayName: 'Flux',                 color: '#333333' },
   grok:         { displayName: 'Grok (xAI)',           color: '#000000' },
   alibaba:      { displayName: 'Bailian (阿里云百炼)',   color: '#FF6A00' },
-  moonshot:     { displayName: 'Moonshot',             color: '#5B5BD6' },
+  moonshot:     { displayName: 'Moonshot（月之暗面）',   color: '#5B5BD6' },
   minimax:      { displayName: 'Minimax',              color: '#E2167E' },
+  xiaomi_mimo:  { displayName: 'Xiaomi Mimo',          color: '#FF6900' },
   ollama:       { displayName: 'Ollama',               color: '#333333' },
   mistral:      { displayName: 'Mistral',              color: '#FA500F' },
-  hunyuan:      { displayName: '腾讯',                  color: '#0055E9' },
+  hunyuan:      { displayName: '腾讯混元',              color: '#0055E9' },
   vidu:         { displayName: 'Vidu',                 color: '#333333' },
   replicate:    { displayName: 'Replicate',            color: '#333333' },
   wenxin:       { displayName: 'Wenxin (文心)',         color: '#0A51C3' },
@@ -92,8 +93,11 @@ const BRAND_PATTERNS: Array<{ pattern: RegExp; brand: string }> = [
   // Moonshot / Kimi
   { pattern: /^(moonshot|kimi)/i,                                         brand: 'moonshot' },
 
-  // MiniMax / 海螺 / speech / audio / mimo
-  { pattern: /^(minimax|MiniMax|hailuo|speech-|audio[0-9]|mimo)/i,       brand: 'minimax' },
+  // Xiaomi Mimo
+  { pattern: /^(xiaomi[-_ ]?mimo|mimo)([-_/.:]|$)/i,                    brand: 'xiaomi_mimo' },
+
+  // MiniMax / 海螺 / speech / audio
+  { pattern: /^(minimax|MiniMax|hailuo|speech-|audio[0-9])/i,            brand: 'minimax' },
 
   // Ollama / Llama / Meta
   { pattern: /^(ollama|llama|meta-llama)/i,                                brand: 'ollama' },
