@@ -79,7 +79,22 @@ export interface FreedomVideoParams {
   watermark?: boolean;
   uploadFiles?: FreedomVideoUploadFile[];
   tools?: Array<{ type: 'web_search' }>;
+  /** 服务端任务创建成功时立即回调，用于持久化 taskId，避免应用退出后丢失查询入口。 */
+  onTaskCreated?: (task: FreedomServerTaskInfo) => void;
   /** 用于取消任务的 AbortSignal */
+  signal?: AbortSignal;
+}
+
+export interface FreedomServerTaskInfo {
+  taskId: string;
+  route: 'unified' | 'volc' | 'openai_official';
+  pollUrl: string;
+  model: string;
+}
+
+export interface ResumeFreedomVideoTaskParams extends FreedomServerTaskInfo {
+  prompt: string;
+  projectId?: string;
   signal?: AbortSignal;
 }
 
@@ -1715,9 +1730,31 @@ async function _generateFreedomVideoInner(
       break;
   }
 
-  const persistentUrl = await persistFreedomVideoResult(result.url, params.prompt);
-  const mediaId = saveToMediaLibrary(persistentUrl, params.prompt, 'ai-video', params.projectId);
+  return finalizeFreedomVideoResult(result, params.prompt, params.projectId);
+}
+
+async function finalizeFreedomVideoResult(
+  result: GenerationResult,
+  prompt: string,
+  projectId?: string | null,
+): Promise<GenerationResult> {
+  const persistentUrl = await persistFreedomVideoResult(result.url, prompt);
+  const mediaId = saveToMediaLibrary(persistentUrl, prompt, 'ai-video', projectId);
   return { ...result, url: persistentUrl, mediaId };
+}
+
+export async function resumeFreedomVideoTask(
+  params: ResumeFreedomVideoTaskParams,
+): Promise<GenerationResult> {
+  let result: GenerationResult;
+  if (params.route === 'volc') {
+    result = await pollVolcVideoTask(params.pollUrl, params.signal, params.model);
+  } else if (params.route === 'openai_official') {
+    result = await pollOpenAIOfficialVideoTask(params.pollUrl, params.taskId, params.model, params.signal);
+  } else {
+    result = await pollUnifiedVideoTask(params.pollUrl, params.taskId, params.model, params.signal);
+  }
+  return finalizeFreedomVideoResult(result, params.prompt, params.projectId);
 }
 
 async function persistFreedomVideoResult(url: string, prompt: string): Promise<string> {
@@ -1838,6 +1875,12 @@ function validateVeoVideoUploads(
   }
 
   return grouped;
+}
+
+function buildResumeAuthHeaders(model?: string): Record<string, string> {
+  const { config } = resolveFreedomFeatureConfig('freedom_video', 'video_generation', model);
+  const apiKey = config?.keyManager?.getCurrentKey?.() || config?.apiKey;
+  return apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {};
 }
 
 async function toUploadHttpUrl(file: FreedomVideoUploadFile): Promise<string> {
@@ -1999,17 +2042,29 @@ async function generateVideoViaOpenAIOfficial(
   if (!taskId) throw new Error('Sora 返回空任务 ID');
 
   const pollUrl = buildEndpoint(baseUrl, `videos/${taskId}`);
+  params.onTaskCreated?.({ taskId: String(taskId), route: 'openai_official', pollUrl, model });
+  return pollOpenAIOfficialVideoTask(pollUrl, String(taskId), model, params.signal);
+}
+
+async function pollOpenAIOfficialVideoTask(
+  pollUrl: string,
+  taskId: string,
+  model?: string,
+  signal?: AbortSignal,
+): Promise<GenerationResult> {
+  const authHeaders = buildResumeAuthHeaders(model);
   // 无限轮询：视频生成耗时不定，由用户手动取消或服务端返回失败状态
   while (true) {
-    await new Promise((r) => setTimeout(r, VIDEO_POLL_INTERVAL));
+    await abortableSleep(VIDEO_POLL_INTERVAL, signal);
     const pollResp = await corsFetch(pollUrl, {
-      headers: { 'Authorization': `Bearer ${apiKey}` },
+      headers: authHeaders,
+      signal,
     });
     if (!pollResp.ok) continue;
     const pollData = await pollResp.json();
     const status = String(pollData.status || '').toLowerCase();
     if (status === 'completed' || status === 'succeeded' || status === 'success') {
-      const videoUrl = extractVideoUrl(pollData) || buildEndpoint(baseUrl, `videos/${taskId}/content`);
+      const videoUrl = extractVideoUrl(pollData) || `${pollUrl.replace(/\/+$/, '')}/content`;
       return { url: videoUrl, taskId: String(taskId) };
     }
     if (status === 'failed' || status === 'error') {
@@ -2179,12 +2234,22 @@ async function generateVideoViaUnified(
 
   // 轮询：直接使用端点类型对应的 URL（无限轮询，由用户手动取消或服务端返回失败）
   const pollUrl = `${rootBase}${endpointPaths.poll(String(taskId))}`;
+  params.onTaskCreated?.({ taskId: String(taskId), route: 'unified', pollUrl, model });
+  return pollUnifiedVideoTask(pollUrl, String(taskId), model, params.signal);
+}
 
+async function pollUnifiedVideoTask(
+  pollUrl: string,
+  taskId: string,
+  model?: string,
+  signal?: AbortSignal,
+): Promise<GenerationResult> {
+  const authHeaders = buildResumeAuthHeaders(model);
   while (true) {
-    await abortableSleep(VIDEO_POLL_INTERVAL, params.signal);
+    await abortableSleep(VIDEO_POLL_INTERVAL, signal);
     const pollResp = await corsFetch(pollUrl, {
-      headers: { 'Authorization': `Bearer ${apiKey}` },
-      signal: params.signal,
+      headers: authHeaders,
+      signal,
     });
     if (!pollResp.ok) continue;
     const pollData = await pollResp.json();
@@ -2300,14 +2365,24 @@ async function generateVideoViaVolc(
   if (!taskId) throw new Error('Volc 返回空任务 ID');
 
   const pollUrl = `${submitPath}/${taskId}`;
+  params.onTaskCreated?.({ taskId: String(taskId), route: 'volc', pollUrl, model });
+  return pollVolcVideoTask(pollUrl, params.signal, model);
+}
+
+async function pollVolcVideoTask(
+  pollUrl: string,
+  signal?: AbortSignal,
+  model?: string,
+): Promise<GenerationResult> {
+  const authHeaders = buildResumeAuthHeaders(model);
   // 无限轮询：Seedance/Doubao 多模态参考耗时不定，不再设超时上限，
   // 间隔保持 5s 减少无效请求，由用户手动取消或服务端返回失败状态。
   const VOLC_POLL_INTERVAL = 5000;
   while (true) {
-    await abortableSleep(VOLC_POLL_INTERVAL, params.signal);
+    await abortableSleep(VOLC_POLL_INTERVAL, signal);
     const pollResp = await corsFetch(pollUrl, {
-      headers: { 'Authorization': `Bearer ${apiKey}` },
-      signal: params.signal,
+      headers: authHeaders,
+      signal,
     });
     if (!pollResp.ok) continue;
     const pollData = await pollResp.json();
@@ -2315,7 +2390,8 @@ async function generateVideoViaVolc(
     if (status === 'succeeded' || status === 'completed' || status === 'success') {
       const videoUrl = pollData.content?.video_url || extractVideoUrl(pollData);
       if (!videoUrl) throw new Error('Volc 成功但无视频 URL');
-      return { url: videoUrl, taskId: String(taskId) };
+      const taskId = pollUrl.split('/').filter(Boolean).pop();
+      return { url: videoUrl, taskId: taskId ? String(taskId) : undefined };
     }
     if (status === 'failed' || status === 'expired' || status === 'cancelled' || status === 'error') {
       throw new Error(pollData.error?.message || pollData.error || 'Volc 视频生成失败');

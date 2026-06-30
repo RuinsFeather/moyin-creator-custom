@@ -82,6 +82,8 @@ export interface UploadProgressEntry {
 export interface ActiveTask {
   id: string;
   projectId?: string;
+  serverTaskId?: string;
+  pollUrl?: string;
   type: 'image' | 'video';
   prompt: string;
   model: string;

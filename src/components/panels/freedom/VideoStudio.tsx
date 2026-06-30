@@ -19,7 +19,8 @@ import { useAPIConfigStore } from '@/stores/api-config-store';
 import { ModelSelector } from './ModelSelector';
 import { GenerationHistory } from './GenerationHistory';
 import { ActiveTaskCard, formatElapsed } from './ActiveTaskCard';
-import { generateFreedomVideo, FreedomCancelledError, type FreedomVideoUploadFile, type FreedomVideoUploadRole } from '@/lib/freedom/freedom-api';
+import { generateFreedomVideo, resumeFreedomVideoTask, FreedomCancelledError, type FreedomVideoUploadFile, type FreedomVideoUploadRole } from '@/lib/freedom/freedom-api';
+import { useFreedomTaskStore, type PersistedFreedomTask } from '@/stores/freedom-task-store';
 import { VolcAssetPanel, type VolcAssetItem } from './VolcAssetPanel';
 import {
   getAspectRatiosForT2VModel,
@@ -305,6 +306,7 @@ export function VideoStudio() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const selectedTaskIdRef = useRef<string | null>(null);
   selectedTaskIdRef.current = selectedTaskId;
+  const restoredVideoTaskIdsRef = useRef<Set<string>>(new Set());
 
   const promptTextareaRef = useRef<PromptTextareaRef>(null);
 
@@ -334,7 +336,93 @@ export function VideoStudio() {
 
   const handleCancelTask = useCallback((taskId: string) => {
     cancelActiveTask(taskId);
+    useFreedomTaskStore.getState().updateTask(taskId, { status: 'cancelled' });
   }, [cancelActiveTask]);
+
+  const runRecoveredVideoTask = useCallback((task: PersistedFreedomTask) => {
+    if (!task.serverTaskId || !task.pollUrl) return;
+    if (restoredVideoTaskIdsRef.current.has(task.id)) return;
+    restoredVideoTaskIdsRef.current.add(task.id);
+
+    const existing = useFreedomStore.getState().activeTasks.find((item) => item.id === task.id);
+    if (!existing) {
+      addActiveTask({
+        id: task.id,
+        projectId: task.projectId,
+        serverTaskId: task.serverTaskId,
+        pollUrl: task.pollUrl,
+        type: 'video',
+        prompt: task.prompt,
+        model: task.model,
+        status: 'running',
+        percent: 35,
+        message: '已恢复任务，正在查询结果…',
+        createdAt: task.createdAt,
+      });
+    }
+
+    setSelectedTaskId((current) => current || task.id);
+    useFreedomTaskStore.getState().updateTask(task.id, { status: 'polling' });
+
+    void (async () => {
+      try {
+        const result = await resumeFreedomVideoTask({
+          taskId: task.serverTaskId!,
+          route: (task.params?.resumeRoute || 'unified') as any,
+          pollUrl: task.pollUrl!,
+          model: task.model,
+          prompt: task.prompt,
+          projectId: task.projectId,
+        });
+
+        updateActiveTask(task.id, {
+          status: 'done',
+          percent: 100,
+          message: '完成',
+          resultUrl: result.url,
+        });
+
+        const durationMs = Date.now() - task.startedAt;
+        addHistoryEntry({
+          id: task.id,
+          projectId: task.projectId,
+          prompt: task.prompt,
+          model: task.model,
+          resultUrl: result.url,
+          params: task.params || {},
+          createdAt: Date.now(),
+          durationMs,
+          mediaId: result.mediaId,
+          type: 'video',
+        }, task.projectId);
+
+        useFreedomTaskStore.getState().updateTask(task.id, {
+          status: 'done',
+          resultUrl: result.url,
+          mediaId: result.mediaId,
+          durationMs,
+        });
+
+        useFreedomStore.setState((s) => {
+          if (selectedTaskIdRef.current === task.id || !s.videoResult) {
+            return { videoResult: result.url };
+          }
+          return {};
+        });
+        toast.success('已恢复并完成上次视频生成任务');
+      } catch (err: any) {
+        restoredVideoTaskIdsRef.current.delete(task.id);
+        if (err instanceof FreedomCancelledError || err?.name === 'AbortError') {
+          updateActiveTask(task.id, { status: 'cancelled', message: '已取消' });
+          useFreedomTaskStore.getState().updateTask(task.id, { status: 'cancelled' });
+          return;
+        }
+        const message = err instanceof Error ? err.message : '恢复查询失败';
+        updateActiveTask(task.id, { status: 'error', message, error: message });
+        useFreedomTaskStore.getState().updateTask(task.id, { status: 'error', error: message });
+      }
+    })();
+  }, [addActiveTask, addHistoryEntry, setSelectedTaskId, updateActiveTask]);
 
   const moveCompletedVideoTasksToHistory = useCallback(() => {
     const completedTasks = useFreedomStore
@@ -357,6 +445,13 @@ export function VideoStudio() {
       removeActiveTask(task.id);
     });
   }, [addHistoryEntry, removeActiveTask]);
+
+  useEffect(() => {
+    const pendingTasks = useFreedomTaskStore.getState().getPendingTasks('video');
+    pendingTasks
+      .filter((task) => !!task.serverTaskId && !!task.pollUrl)
+      .forEach((task) => runRecoveredVideoTask(task));
+  }, [runRecoveredVideoTask]);
 
   const capabilityModelId = useMemo(
     () => resolveVideoCapabilityModelId(selectedVideoModel),
@@ -894,6 +989,25 @@ export function VideoStudio() {
       controller,
     });
 
+    useFreedomTaskStore.getState().upsertTask({
+      id: taskId,
+      projectId: snapshot.projectId,
+      type: 'video',
+      status: 'submitting',
+      prompt: snapshot.prompt,
+      model: snapshot.model,
+      params: {
+        aspectRatio: snapshot.aspectRatio,
+        duration: snapshot.duration,
+        resolution: snapshot.resolution,
+        featureMode: snapshot.featureMode,
+        uploadCount: uploadFiles?.length ?? 0,
+      },
+      createdAt: startedAt,
+      updatedAt: startedAt,
+      startedAt,
+    });
+
     setSelectedTaskId(taskId);
     setVideoGenerating(true);
     setVideoResult(null);
@@ -927,6 +1041,26 @@ export function VideoStudio() {
           resolution: snapshot.resolution,
           uploadFiles,
           tools: snapshot.webSearchEnabled ? [{ type: 'web_search' as const }] : undefined,
+          onTaskCreated: ({ taskId: serverTaskId, pollUrl, route }) => {
+            updateActiveTask(taskId, {
+              serverTaskId,
+              pollUrl,
+              message: `任务已提交，正在查询结果… ID: ${serverTaskId}`,
+            });
+            useFreedomTaskStore.getState().updateTask(taskId, {
+              status: 'polling',
+              serverTaskId,
+              pollUrl,
+              params: {
+                aspectRatio: snapshot.aspectRatio,
+                duration: snapshot.duration,
+                resolution: snapshot.resolution,
+                featureMode: snapshot.featureMode,
+                uploadCount: uploadFiles?.length ?? 0,
+                resumeRoute: route,
+              },
+            });
+          },
           signal: controller.signal,
         });
 
@@ -958,6 +1092,13 @@ export function VideoStudio() {
           type: 'video',
         }, snapshot.projectId);
 
+        useFreedomTaskStore.getState().updateTask(taskId, {
+          status: 'done',
+          resultUrl: result.url,
+          mediaId: result.mediaId,
+          durationMs: Date.now() - startedAt,
+        });
+
         // 同步预览结果（仅当用户当前查看此任务时）
         useFreedomStore.setState((s) => {
           if (selectedTaskIdRef.current === taskId || !s.videoResult) {
@@ -973,6 +1114,7 @@ export function VideoStudio() {
 
         if (err instanceof FreedomCancelledError || err?.name === 'AbortError') {
           updateActiveTask(taskId, { status: 'cancelled', message: '已取消' });
+          useFreedomTaskStore.getState().updateTask(taskId, { status: 'cancelled' });
           // 保留已取消的任务卡片，由用户手动关闭
         } else {
           const message = err instanceof Error ? err.message : '未知错误';
@@ -986,6 +1128,7 @@ export function VideoStudio() {
             duration: Infinity,
             closeButton: true,
           });
+          useFreedomTaskStore.getState().updateTask(taskId, { status: 'error', error: message });
           // 保留失败的任务卡片，由用户手动关闭，便于事后查看错误信息
         }
       } finally {
