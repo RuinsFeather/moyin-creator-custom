@@ -87,6 +87,7 @@ export interface GenerationResult {
   url: string;
   taskId?: string;
   mediaId?: string;
+  metadata?: Record<string, unknown>;
 }
 
 // ==================== Constants ====================
@@ -1219,7 +1220,7 @@ function buildMidjourneyPrompt(params: FreedomImageParams): string {
   const stylization = typeof extra.stylization === 'number' ? extra.stylization : undefined;
   const weirdness = typeof extra.weirdness === 'number' ? extra.weirdness : undefined;
 
-  if (aspect && !/\s--ar\s+\S+/i.test(prompt)) {
+  if (aspect && aspect !== 'auto' && !/\s--ar\s+\S+/i.test(prompt)) {
     prompt += ` --ar ${aspect}`;
   }
   if (stylization !== undefined && !/\s--s(tylize)?\s+\S+/i.test(prompt)) {
@@ -1240,33 +1241,126 @@ function mapMidjourneyMode(speed: unknown): string[] | undefined {
   return undefined;
 }
 
-async function generateViaMidjourneyEndpoint(
-  params: FreedomImageParams,
-  model: string,
-  apiKey: string,
-  baseUrl: string,
-): Promise<GenerationResult> {
-  const rootBase = getRootBaseUrl(baseUrl);
-  const submitUrl = `${rootBase}/mj/submit/imagine`;
-  const extra = params.extraParams || {};
-  const requestBody: Record<string, any> = {
-    prompt: buildMidjourneyPrompt(params),
-  };
-  const modes = mapMidjourneyMode(extra.speed);
-  if (modes) requestBody.accountFilter = { modes };
-  if (/niji/i.test(model)) requestBody.botType = 'NIJI_JOURNEY';
-  // 垫图：base64Array（图片引导，格式 data:image/png;base64,xxx）
-  const mjRefs: string[] = [];
-  if (Array.isArray(extra.base64Array)) mjRefs.push(...extra.base64Array);
-  if (params.referenceImages && params.referenceImages.length > 0) {
-    mjRefs.push(...params.referenceImages.filter((s) => typeof s === 'string' && s.startsWith('data:')));
-  }
-  if (mjRefs.length > 0) {
-    requestBody.base64Array = mjRefs.slice(0, 10);
-  }
+function getMidjourneyBotType(extra: Record<string, unknown>, model: string): 'MID_JOURNEY' | 'NIJI_JOURNEY' {
+  if (extra.botType === 'NIJI_JOURNEY' || extra.botType === 'niji') return 'NIJI_JOURNEY';
+  if (extra.botType === 'MID_JOURNEY' || extra.botType === 'mj') return 'MID_JOURNEY';
+  return /niji/i.test(model) ? 'NIJI_JOURNEY' : 'MID_JOURNEY';
+}
 
-  params.onProgress?.({ phase: 'submitting', percent: 10, message: '提交 Midjourney 任务…' });
-  throwIfAborted(params.signal);
+type MidjourneyExtraParams = Record<string, unknown>;
+
+function isMidjourneyActionRequest(extra: MidjourneyExtraParams): boolean {
+  return !!(
+    (extra.taskId || extra.mjTaskId) &&
+    (extra.customId || extra.mjCustomId || extra.actionCustomId)
+  );
+}
+
+function getMidjourneyActionBody(extra: MidjourneyExtraParams): Record<string, unknown> {
+  return {
+    chooseSameChannel: extra.chooseSameChannel ?? true,
+    customId: extra.customId || extra.mjCustomId || extra.actionCustomId,
+    taskId: String(extra.taskId || extra.mjTaskId),
+    notifyHook: extra.notifyHook || '',
+    state: extra.state || '',
+  };
+}
+
+function normalizeMidjourneyBase64Image(src: unknown): string | null {
+  if (typeof src !== 'string') return null;
+  const trimmed = src.trim();
+  if (!trimmed) return null;
+  if (/^data:image\//i.test(trimmed)) return trimmed;
+  if (/^[A-Za-z0-9+/]+={0,2}$/.test(trimmed) && trimmed.length > 100) {
+    return `data:image/png;base64,${trimmed}`;
+  }
+  return null;
+}
+
+async function urlToDataUrl(src: string, signal?: AbortSignal): Promise<string | null> {
+  try {
+    if (src.startsWith('data:')) return src;
+    if (!/^https?:\/\//i.test(src)) return null;
+    const resp = await corsFetch(src, { signal });
+    if (!resp.ok) return null;
+    const blob = await resp.blob();
+    const buf = await blob.arrayBuffer();
+    let binary = '';
+    const bytes = new Uint8Array(buf);
+    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+    return `data:${blob.type || 'image/png'};base64,${btoa(binary)}`;
+  } catch (e) {
+    console.warn('[Freedom] Failed to convert MJ reference image:', e);
+    return null;
+  }
+}
+
+async function collectMidjourneyReferenceImages(
+  params: FreedomImageParams,
+  extra: MidjourneyExtraParams,
+): Promise<string[]> {
+  const refs: string[] = [];
+  const push = (value: unknown) => {
+    const normalized = normalizeMidjourneyBase64Image(value);
+    if (normalized) refs.push(normalized);
+  };
+
+  if (Array.isArray(extra.base64Array)) {
+    extra.base64Array.forEach(push);
+  }
+  if (params.referenceImages && params.referenceImages.length > 0) {
+    params.onProgress?.({ phase: 'submitting', percent: 6, message: '处理 Midjourney 参考图…' });
+    for (const ref of params.referenceImages.slice(0, 10)) {
+      throwIfAborted(params.signal);
+      const dataUrl = await urlToDataUrl(ref, params.signal);
+      push(dataUrl);
+    }
+  }
+  return refs.slice(0, 10);
+}
+
+function getRecordValue(data: unknown, key: string): unknown {
+  return data && typeof data === 'object' ? (data as Record<string, unknown>)[key] : undefined;
+}
+
+function getStringValue(data: unknown, key: string): string | null {
+  const value = getRecordValue(data, key);
+  return typeof value === 'string' && value ? value : null;
+}
+
+function isImageUrlLike(value: string | null): value is string {
+  return !!value && (/^https?:\/\//i.test(value) || /^data:image\//i.test(value));
+}
+
+function extractMidjourneyImageUrl(data: unknown): string | null {
+  const nestedData = getRecordValue(data, 'data');
+  const nestedOutput = getRecordValue(data, 'output');
+  const firstDataItem = Array.isArray(nestedData) ? nestedData[0] : null;
+  const firstOutputItem = Array.isArray(nestedOutput) ? nestedOutput[0] : null;
+  const candidate = (
+    getStringValue(data, 'imageUrl') ||
+    getStringValue(data, 'image_url') ||
+    getStringValue(data, 'url') ||
+    getStringValue(data, 'resultUrl') ||
+    getStringValue(nestedData, 'imageUrl') ||
+    getStringValue(nestedData, 'image_url') ||
+    getStringValue(nestedData, 'url') ||
+    getStringValue(firstDataItem, 'url') ||
+    getStringValue(nestedOutput, 'imageUrl') ||
+    getStringValue(nestedOutput, 'image_url') ||
+    getStringValue(nestedOutput, 'url') ||
+    getStringValue(firstOutputItem, 'url') ||
+    null
+  );
+  return isImageUrlLike(candidate) ? candidate : null;
+}
+
+async function submitMidjourneyRequest(
+  submitUrl: string,
+  apiKey: string,
+  requestBody: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
   const submitResp = await corsFetch(submitUrl, {
     method: 'POST',
     headers: {
@@ -1274,18 +1368,67 @@ async function generateViaMidjourneyEndpoint(
       'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify(requestBody),
-    signal: params.signal,
+    signal,
   });
   if (!submitResp.ok) {
     throw toHttpError('Midjourney submit failed', submitResp.status, await submitResp.text());
   }
 
-  const submitData = await submitResp.json();
-  // MJ API 成功时 code === 1；其他值表示 API 层错误（即使 HTTP 200）
+  const submitData = await submitResp.json() as Record<string, unknown>;
   if (submitData.code !== undefined && submitData.code !== 1) {
-    throw new Error(submitData.description || submitData.error || `Midjourney 提交失败 (code=${submitData.code})`);
+    throw new Error(
+      getStringValue(submitData, 'description') ||
+      getStringValue(submitData, 'error') ||
+      `Midjourney 提交失败 (code=${String(submitData.code)})`,
+    );
   }
-  const taskId = submitData.result || submitData.task_id || submitData.id;
+  return submitData;
+}
+
+async function generateViaMidjourneyEndpoint(
+  params: FreedomImageParams,
+  model: string,
+  apiKey: string,
+  baseUrl: string,
+): Promise<GenerationResult> {
+  const rootBase = getRootBaseUrl(baseUrl);
+  const extra = params.extraParams || {};
+  const isAction = isMidjourneyActionRequest(extra);
+  const submitUrl = isAction ? `${rootBase}/mj/submit/action` : `${rootBase}/mj/submit/imagine`;
+  const requestBody: Record<string, unknown> = {
+    ...(isAction ? getMidjourneyActionBody(extra) : {
+      botType: getMidjourneyBotType(extra, model),
+      prompt: buildMidjourneyPrompt(params),
+      notifyHook: extra.notifyHook || '',
+      state: extra.state || '',
+    }),
+  };
+  const modes = mapMidjourneyMode(extra.speed);
+  if (!isAction && modes) requestBody.accountFilter = { modes };
+  if (!isAction) {
+    const mjRefs = await collectMidjourneyReferenceImages(params, extra);
+    if (mjRefs.length > 0) {
+      requestBody.base64Array = mjRefs;
+    }
+  }
+
+  params.onProgress?.({ phase: 'submitting', percent: 10, message: isAction ? '提交 Midjourney 动作…' : '提交 Midjourney 任务…' });
+  throwIfAborted(params.signal);
+  const submitData = await submitMidjourneyRequest(submitUrl, apiKey, requestBody, params.signal);
+  const directUrl = extractMidjourneyImageUrl(submitData);
+  if (directUrl) {
+    const mediaId = saveToMediaLibrary(directUrl, params.prompt, 'ai-image', params.projectId);
+    params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
+    return {
+      url: directUrl,
+      mediaId,
+      metadata: {
+        mjGrid: !isAction,
+        mjBotType: requestBody.botType,
+      },
+    };
+  }
+  const taskId = getStringValue(submitData, 'result') || getStringValue(submitData, 'task_id') || getStringValue(submitData, 'id');
   if (!taskId) throw new Error('Midjourney 返回空任务 ID');
 
   const pollUrl = `${rootBase}/mj/task/${taskId}/fetch`;
@@ -1307,17 +1450,22 @@ async function generateViaMidjourneyEndpoint(
       serverPct = pollData.progress > 1 ? pollData.progress : pollData.progress * 100;
     }
     if (status === 'success' || status === 'succeeded' || status === 'completed') {
-      const imageUrl =
-        pollData.imageUrl ||
-        pollData.image_url ||
-        pollData.url ||
-        pollData.data?.imageUrl ||
-        pollData.data?.image_url;
+      const imageUrl = extractMidjourneyImageUrl(pollData);
       if (!imageUrl) throw new Error('Midjourney 成功但未返回图片 URL');
       params.onProgress?.({ phase: 'finalizing', percent: 95, message: '保存到素材库…' });
       const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image', params.projectId);
       params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
-      return { url: imageUrl, taskId: String(taskId), mediaId };
+      return {
+        url: imageUrl,
+        taskId: String(taskId),
+        mediaId,
+        metadata: {
+          mjGrid: !isAction,
+          mjTaskId: String(taskId),
+          mjButtons: Array.isArray(pollData.buttons) ? pollData.buttons : undefined,
+          mjBotType: requestBody.botType,
+        },
+      };
     }
     if (status === 'failure' || status === 'failed' || status === 'error') {
       throw new Error(pollData.failReason || pollData.message || 'Midjourney 生成失败');

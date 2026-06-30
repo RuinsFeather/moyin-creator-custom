@@ -12,10 +12,11 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { toast } from 'sonner';
+import { corsFetch } from '@/lib/cors-fetch';
 import { saveFreedomMedia } from '@/lib/freedom/download-utils';
 import { cn } from '@/lib/utils';
 import { useFreedomStore } from '@/stores/freedom-store';
-import { useFreedomHistoryStore } from '@/stores/freedom-history-store';
+import { useFreedomHistoryStore, type HistoryEntry } from '@/stores/freedom-history-store';
 import { useProjectStore } from '@/stores/project-store';
 import { ModelSelector } from './ModelSelector';
 import { GenerationHistory } from './GenerationHistory';
@@ -30,6 +31,12 @@ import {
 const DEFAULT_ASPECT_RATIOS = ['auto', '1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16', '21:9'];
 const DEFAULT_RESOLUTIONS = ['1K', '2K', '4K'];
 const MAX_REFERENCE_IMAGES = 10;
+const DEFAULT_MIDJOURNEY_SPEED = 'relaxed';
+const DEFAULT_MIDJOURNEY_STYLIZATION = 100;
+const MIDJOURNEY_BOT_TYPES = [
+  { value: 'MID_JOURNEY', label: 'MID_JOURNEY' },
+  { value: 'NIJI_JOURNEY', label: 'NIJI_JOURNEY' },
+] as const;
 
 function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -40,10 +47,67 @@ function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
+function isMidjourneyGridEntry(entry: HistoryEntry | null): boolean {
+  return !!entry && entry.type === 'image' && Boolean(entry.metadata?.mjGrid || entry.params?.mjGrid);
+}
+
+function loadImageElement(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new window.Image();
+    image.crossOrigin = 'anonymous';
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('图片加载失败，无法拆分'));
+    image.src = src;
+  });
+}
+
+async function splitImageGridToDataUrls(src: string): Promise<string[]> {
+  let objectUrl: string | null = null;
+  try {
+    let imageSrc = src;
+    if (/^https?:\/\//i.test(src)) {
+      const response = await corsFetch(src);
+      if (!response.ok) throw new Error('图片下载失败，无法拆分');
+      objectUrl = URL.createObjectURL(await response.blob());
+      imageSrc = objectUrl;
+    }
+
+    const image = await loadImageElement(imageSrc);
+    const width = Math.floor(image.naturalWidth / 2);
+    const height = Math.floor(image.naturalHeight / 2);
+    if (width <= 0 || height <= 0) throw new Error('图片尺寸异常，无法拆分');
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('当前环境不支持图片拆分');
+
+    const positions = [
+      [0, 0],
+      [width, 0],
+      [0, height],
+      [width, height],
+    ] as const;
+
+    return positions.map(([sx, sy]) => {
+      ctx.clearRect(0, 0, width, height);
+      ctx.drawImage(image, sx, sy, width, height, 0, 0, width, height);
+      return canvas.toDataURL('image/png');
+    });
+  } finally {
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+  }
+}
+
 export function ImageStudio() {
   const [saveToPropsOpen, setSaveToPropsOpen] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedHistoryEntry, setSelectedHistoryEntry] = useState<HistoryEntry | null>(null);
+  const [mjSplitImages, setMjSplitImages] = useState<string[]>([]);
+  const [mjSplitLoading, setMjSplitLoading] = useState(false);
+  const [mjSplitError, setMjSplitError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const {
@@ -77,6 +141,43 @@ export function ImageStudio() {
       toast.error('下载失败，请稍后重试');
     }
   }, [viewingTask?.resultUrl, imageResult]);
+
+  const selectedHistoryIsMjGrid = isMidjourneyGridEntry(selectedHistoryEntry);
+
+  const handleDownloadSplitImage = useCallback(async (url: string, index: number) => {
+    try {
+      await saveFreedomMedia(url, `midjourney-grid-${index + 1}-${Date.now()}.png`);
+    } catch (error) {
+      console.error('MJ split image download failed:', error);
+      toast.error('下载失败，请稍后重试');
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const sourceUrl = selectedHistoryEntry?.resultUrl;
+
+    setMjSplitImages([]);
+    setMjSplitError(null);
+    if (!selectedHistoryIsMjGrid || !sourceUrl) {
+      setMjSplitLoading(false);
+      return;
+    }
+
+    setMjSplitLoading(true);
+    splitImageGridToDataUrls(sourceUrl)
+      .then((images) => {
+        if (!cancelled) setMjSplitImages(images);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setMjSplitError(error instanceof Error ? error.message : '拆分失败');
+      })
+      .finally(() => {
+        if (!cancelled) setMjSplitLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [selectedHistoryEntry?.resultUrl, selectedHistoryIsMjGrid]);
 
   // 用于实时显示"已等待 Xs"，仅当主预览区有运行中任务时每秒刷新
   const viewingRunning = !!viewingTask && (viewingTask.status === 'running' || viewingTask.status === 'cancelling');
@@ -121,6 +222,9 @@ export function ImageStudio() {
 
   // Midjourney-specific params
   const hasMidjourneyParams = /midjourney|^mj_|^niji-/i.test(selectedImageModel);
+  const selectedMidjourneyBotType = String(
+    imageExtraParams.botType || (/^niji-/i.test(selectedImageModel) ? 'NIJI_JOURNEY' : 'MID_JOURNEY'),
+  );
   const hasIdeogramParams = selectedImageModel.includes('ideogram');
 
   const addReferenceFiles = useCallback(async (files: File[]) => {
@@ -193,7 +297,13 @@ export function ImageStudio() {
       model: selectedImageModel,
       aspectRatio: imageAspectRatio,
       resolution: imageResolution || undefined,
-      extraParams: { ...imageExtraParams },
+      extraParams: {
+        ...(hasMidjourneyParams ? {
+          speed: DEFAULT_MIDJOURNEY_SPEED,
+          stylization: DEFAULT_MIDJOURNEY_STYLIZATION,
+        } : {}),
+        ...imageExtraParams,
+      },
       referenceImages: [...imageReferenceImages],
       thumbnail: imageReferenceImages[0],
     };
@@ -214,6 +324,7 @@ export function ImageStudio() {
     });
 
     setSelectedTaskId(taskId);
+    setSelectedHistoryEntry(null);
     setImageGenerating(true);
     setImageResult(null);
 
@@ -250,8 +361,14 @@ export function ImageStudio() {
             aspectRatio: snapshot.aspectRatio,
             resolution: snapshot.resolution,
             referenceCount: snapshot.referenceImages.length,
+            ...(result.metadata?.mjGrid ? {
+              mjGrid: true,
+              mjTaskId: result.metadata.mjTaskId,
+              mjBotType: result.metadata.mjBotType,
+            } : {}),
             ...snapshot.extraParams,
           },
+          metadata: result.metadata,
           createdAt: Date.now(),
           durationMs: Date.now() - startedAt,
           mediaId: result.mediaId,
@@ -294,7 +411,7 @@ export function ImageStudio() {
       }
     })();
   }, [
-    imagePrompt, selectedImageModel, imageAspectRatio, imageResolution,
+    imagePrompt, selectedImageModel, imageAspectRatio, imageResolution, hasMidjourneyParams,
     imageExtraParams, imageReferenceImages,
     addActiveTask, updateActiveTask, removeActiveTask, addHistoryEntry,
     setImageGenerating, setImageResult,
@@ -381,9 +498,26 @@ export function ImageStudio() {
             {hasMidjourneyParams && (
               <>
                 <div className="space-y-2">
+                  <Label className="text-sm font-medium">Bot 类型</Label>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {MIDJOURNEY_BOT_TYPES.map((bot) => (
+                      <Button
+                        key={bot.value}
+                        type="button"
+                        variant={selectedMidjourneyBotType === bot.value ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-8 text-xs px-2"
+                        onClick={() => updateExtraParam('botType', bot.value)}
+                      >
+                        {bot.label}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+                <div className="space-y-2">
                   <Label className="text-sm font-medium">速度</Label>
                   <Select
-                    value={imageExtraParams.speed || 'fast'}
+                    value={imageExtraParams.speed || DEFAULT_MIDJOURNEY_SPEED}
                     onValueChange={(v) => updateExtraParam('speed', v)}
                   >
                     <SelectTrigger className="h-9">
@@ -399,11 +533,11 @@ export function ImageStudio() {
                 <div className="space-y-2">
                   <div className="flex justify-between">
                     <Label className="text-sm">Stylization</Label>
-                    <span className="text-xs text-muted-foreground">{imageExtraParams.stylization || 1}</span>
+                    <span className="text-xs text-muted-foreground">{imageExtraParams.stylization || DEFAULT_MIDJOURNEY_STYLIZATION}</span>
                   </div>
                   <Slider
                     min={0} max={1000} step={1}
-                    value={[imageExtraParams.stylization || 1]}
+                    value={[imageExtraParams.stylization || DEFAULT_MIDJOURNEY_STYLIZATION]}
                     onValueChange={([v]) => updateExtraParam('stylization', v)}
                   />
                 </div>
@@ -579,20 +713,59 @@ export function ImageStudio() {
             <p className="text-xs text-muted-foreground">{viewingTask.error || viewingTask.message}</p>
           </div>
         ) : (viewingTask?.resultUrl || imageResult) ? (
-          <div className="max-w-full max-h-full relative group">
-            <img
-              src={viewingTask?.resultUrl || imageResult || ''}
-              alt="Generated"
-              className="max-w-full max-h-[calc(100vh-200px)] rounded-lg shadow-lg object-contain"
-            />
-            <div className="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity flex gap-2">
-              <Button size="sm" variant="secondary" onClick={() => setSaveToPropsOpen(true)}>
-                <Archive className="h-4 w-4 mr-1" /> 保存到道具库
-              </Button>
-              <Button size="sm" variant="secondary" onClick={() => void handleDownloadImage()}>
-                <Download className="h-4 w-4 mr-1" /> 下载
-              </Button>
+          <div className="flex max-h-full max-w-full flex-col items-center gap-3">
+            <div className="relative group max-w-full">
+              <img
+                src={viewingTask?.resultUrl || imageResult || ''}
+                alt="Generated"
+                className="max-w-full max-h-[calc(100vh-260px)] rounded-lg shadow-lg object-contain"
+              />
+              <div className="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity flex gap-2">
+                <Button size="sm" variant="secondary" onClick={() => setSaveToPropsOpen(true)}>
+                  <Archive className="h-4 w-4 mr-1" /> 保存到道具库
+                </Button>
+                <Button size="sm" variant="secondary" onClick={() => void handleDownloadImage()}>
+                  <Download className="h-4 w-4 mr-1" /> 下载
+                </Button>
+              </div>
             </div>
+            {selectedHistoryIsMjGrid && (
+              <div className="w-full max-w-3xl rounded-lg border bg-background p-3 shadow-sm">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div>
+                    <p className="text-xs font-medium">Midjourney 四宫格拆分</p>
+                    <p className="text-[11px] text-muted-foreground">历史记录保留为一组，下方子图可分别下载</p>
+                  </div>
+                  {selectedHistoryEntry?.metadata?.mjTaskId && (
+                    <span className="text-[10px] text-muted-foreground">任务 {String(selectedHistoryEntry.metadata.mjTaskId)}</span>
+                  )}
+                </div>
+                {mjSplitLoading ? (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> 正在拆分图片…
+                  </div>
+                ) : mjSplitError ? (
+                  <p className="text-xs text-destructive">{mjSplitError}</p>
+                ) : (
+                  <div className="grid grid-cols-4 gap-2">
+                    {mjSplitImages.map((url, index) => (
+                      <div key={index} className="overflow-hidden rounded-md border bg-muted">
+                        <img src={url} alt={`MJ 子图 ${index + 1}`} className="aspect-square w-full object-cover" />
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          className="h-7 w-full rounded-none text-[11px]"
+                          onClick={() => void handleDownloadSplitImage(url, index)}
+                        >
+                          下载图 {index + 1}
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         ) : (
           <div className="flex flex-col items-center gap-3 text-muted-foreground">
@@ -632,6 +805,7 @@ export function ImageStudio() {
             setSelectedImageModel(entry.model);
             setImageResult(entry.resultUrl);
             setSelectedTaskId(null);
+            setSelectedHistoryEntry(entry);
           }} />
         </div>
       </div>

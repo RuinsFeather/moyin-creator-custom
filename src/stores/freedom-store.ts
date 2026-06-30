@@ -24,6 +24,7 @@ export interface HistoryEntry {
   resultUrl: string;
   thumbnailUrl?: string;
   params: Record<string, any>;
+  metadata?: Record<string, any>;
   createdAt: number;
   /** 生成耗时（毫秒）。从用户点击"生成"到拿到最终结果的时长。 */
   durationMs?: number;

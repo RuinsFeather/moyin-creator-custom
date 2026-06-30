@@ -154,6 +154,22 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
   'gemini-3-pro-image': ['image_generation'],
   'gemini-3-pro-image-preview': ['image_generation'],
   'gpt-image-1.5': ['image_generation'],
+  'midjourney': ['image_generation'],
+  'mj_blend': ['image_generation'],
+  'mj_custom_zoom': ['image_generation'],
+  'mj_imagine': ['image_generation'],
+  'mj_describe': ['image_generation'],
+  'mj_high_variation': ['image_generation'],
+  'mj_inpaint': ['image_generation'],
+  'mj_low_variation': ['image_generation'],
+  'mj_modal': ['image_generation'],
+  'mj_pan': ['image_generation'],
+  'mj_reroll': ['image_generation'],
+  'mj_upload': ['image_generation'],
+  'mj_upscale': ['image_generation'],
+  'mj_variation': ['image_generation'],
+  'mj_zoom': ['image_generation'],
+  'mj_edits': ['image_generation'],
 
   // ---- 视频生成模型 ----
   'cogvideox': ['video_generation'],
@@ -169,6 +185,7 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
   'grok-video-3': ['video_generation'],
   'grok-video-3-10s': ['video_generation'],
   'grok-video-3-15s': ['video_generation'],
+  'mj_video': ['video_generation'],
 
   // ---- 图片理解/视觉模型 ----
   'doubao-vision': ['vision'],
@@ -197,7 +214,7 @@ function providerSupportsCapability(
 
 /**
  * 检查特定模型是否支持所需能力
- * 优先级：硬编码映射 → 平台元数据(model_type/tags) → 模型名称推断 → 平台级别 fallback
+ * 优先级：硬编码映射 → 图片/视频生成名称强特征 → 平台元数据(model_type/tags) → 模型名称推断 → 平台级别 fallback
  */
 function modelSupportsCapability(
   modelName: string,
@@ -214,7 +231,16 @@ function modelSupportsCapability(
     return modelCaps.includes(required);
   }
 
-  // 2. 平台元数据（来自 /api/pricing_new 的 model_type + tags）
+  // 2. 模型名称中的强特征优先于平台元数据。
+  // 某些中转平台会把 Midjourney/Niji 这类 Discord 任务模型标成“文本/对话”，
+  // 但在服务映射中应作为图片生成模型暴露，不能进入「剧本分析 / 对话」。
+  const inferred = classifyModelByName(modelName);
+  const hasStrongGenerativeSignal = inferred.includes('image_generation') || inferred.includes('video_generation');
+  if (hasStrongGenerativeSignal) {
+    return inferred.includes(required);
+  }
+
+  // 3. 平台元数据（来自 /api/pricing_new 的 model_type + tags）
   if (modelType) {
     switch (required) {
       case 'text':
@@ -234,13 +260,12 @@ function modelSupportsCapability(
     }
   }
 
-  // 3. 模型名称模式推断（非 MemeFast 的其他供应商）
-  const inferred = classifyModelByName(modelName);
+  // 4. 模型名称模式推断（非 MemeFast 的其他供应商）
   if (inferred.length > 0) {
     return inferred.includes(required);
   }
 
-  // 4. 平台级别 fallback
+  // 5. 平台级别 fallback
   return providerSupportsCapability(provider, required);
 }
 
