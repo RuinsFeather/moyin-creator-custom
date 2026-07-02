@@ -573,6 +573,14 @@ function normalizeProviderBindings(bindings: FeatureBindings, providers: IProvid
   return next;
 }
 
+function sanitizeModelEndpointTypes(modelId: string, endpointTypes: string[]): string[] {
+  const lower = modelId.toLowerCase();
+  if ((lower.includes('seedance') || lower.includes('doubao')) && !endpointTypes.includes('豆包视频异步')) {
+    return ['豆包视频异步'];
+  }
+  return endpointTypes;
+}
+
 const initialState: APIConfigState = {
   providers: memefastTemplate
     ? [{ id: generateId(), ...memefastTemplate, apiKey: '' }]
@@ -711,7 +719,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
                   : m.tags;
               }
               if (Array.isArray(m.supported_endpoint_types)) {
-                memefastEndpoints[name] = m.supported_endpoint_types;
+                memefastEndpoints[name] = sanitizeModelEndpointTypes(name, m.supported_endpoint_types);
               }
               if (Array.isArray(m.enable_groups) && m.enable_groups.length > 0) {
                 memefastEnableGroups[name] = m.enable_groups;
@@ -747,7 +755,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
                   if (typeof id === 'string' && id.length > 0) allModelIds.add(id);
                   // 补充 endpoint_types
                   if (typeof m !== 'string' && m.id && Array.isArray(m.supported_endpoint_types)) {
-                    memefastEndpoints[m.id] = m.supported_endpoint_types as string[];
+                    memefastEndpoints[m.id] = sanitizeModelEndpointTypes(m.id, m.supported_endpoint_types as string[]);
                   }
                 }
                 console.log(`[APIConfig] MemeFast key#${ki + 1} contributed models, total so far: ${allModelIds.size}`);
@@ -790,7 +798,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
                   if (typeof id === 'string' && id.length > 0) allModelIds.add(id);
                   // Capture endpoint_types
                   if (typeof m !== 'string' && m.id && Array.isArray(m.supported_endpoint_types)) {
-                    endpointUpdates[m.id] = m.supported_endpoint_types as string[];
+                    endpointUpdates[m.id] = sanitizeModelEndpointTypes(m.id, m.supported_endpoint_types as string[]);
                   }
                 }
                 console.log(`[APIConfig] key#${ki + 1} contributed models, total so far: ${allModelIds.size}`);
@@ -1217,12 +1225,12 @@ export const useAPIConfigStore = create<APIConfigStore>()(
     }),
     {
       name: 'opencut-api-config',  // localStorage key
-      version: 13,  // v13: clear stale metadata caches on upgrade + fix chained migration
+      version: 14,  // v14: clear global model metadata caches polluted by invalid key sync
       migrate: (persistedState: unknown, version: number) => {
         // Use mutable result object for chained migration
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const result = { ...(persistedState as any) } as Partial<APIConfigState> & { imageHostConfig?: LegacyImageHostConfig };
-        console.log(`[APIConfig] Chained migration: v${version} → v13`);
+        console.log(`[APIConfig] Chained migration: v${version} → v14`);
         
         // Default feature bindings for migration
         const defaultBindings: FeatureBindings = {
@@ -1504,6 +1512,21 @@ export const useAPIConfigStore = create<APIConfigStore>()(
           }
           
           version = 13;
+        }
+
+        // v13 → v14: Clear global model metadata caches again.
+        // These caches are keyed only by model id, not provider id. If an unverified/test key
+        // once returned wrong endpoint metadata for Seedance/Doubao, later valid keys with the
+        // same model id can be routed to the wrong endpoint (Unified 404). Clearing here gives
+        // existing users the same recovery as manually deleting cache files, without losing keys.
+        if (version <= 13) {
+          console.log('[APIConfig] v13→v14: Clearing provider-agnostic model metadata caches');
+          result.modelEndpointTypes = {};
+          result.modelTypes = {};
+          result.modelTags = {};
+          result.modelEnableGroups = {};
+          result.discoveredModelLimits = {};
+          version = 14;
         }
 
         // ========== Final normalization (always runs) ==========

@@ -390,6 +390,14 @@ function getUnifiedEndpointPaths(endpointTypes: string[]): { submit: string; pol
 }
 
 function detectFreedomVideoRoute(model: string, endpointTypes?: string[]): FreedomVideoRoute {
+  const m = model.toLowerCase();
+
+  // Seedance/Doubao 必须优先按模型名走火山/方舟任务接口。
+  // 这类模型如果被未验证 key 同步出的 endpointTypes 污染成“视频统一格式”，
+  // 会误走 /v1/video/generations 并返回 404。缓存文件清理后恢复正常，
+  // 说明这里不能让全局 endpointTypes 覆盖 Seedance 的确定路由。
+  if (m.includes('seedance') || m.includes('doubao')) return 'volc';
+
   if (endpointTypes && endpointTypes.length > 0) {
     // 优先级：官方 Sora -> Kling -> Volc -> Wan -> Replicate -> Unified
     for (const t of endpointTypes) {
@@ -411,13 +419,8 @@ function detectFreedomVideoRoute(model: string, endpointTypes?: string[]): Freed
     }
   }
 
-  const m = model.toLowerCase();
   if (m.includes('sora-2')) return 'openai_official';
   if (m.includes('kling')) return 'kling';
-  // Seedance/Doubao: 默认走 volc 路由（火山方舟原生 /contents/generations/tasks 或
-  // MemeFast 中转的 /volc/v1/contents/generations/tasks）。统一格式 /v1/video/generations
-  // 不支持这两个模型，会直接 404。
-  if (m.includes('seedance') || m.includes('doubao')) return 'volc';
   if (m.includes('wan') || m.includes('happyhorse')) return 'wan';
   return 'unified';
 }
