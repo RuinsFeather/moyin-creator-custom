@@ -518,6 +518,61 @@ function omitRecordKeys<T>(record: Record<string, T>, keys: Iterable<string>): R
   return next;
 }
 
+function filterBindingsForProvider(
+  bindings: FeatureBindings,
+  providerId: string,
+  providerPlatform?: string,
+  allowedModels?: Set<string>,
+): FeatureBindings {
+  const next: FeatureBindings = { ...bindings };
+  for (const [feature, value] of Object.entries(bindings)) {
+    if (!Array.isArray(value)) continue;
+    const filtered = value.filter((binding) => {
+      const idx = binding.indexOf(':');
+      if (idx <= 0) return true;
+      const bindingProvider = binding.slice(0, idx);
+      const bindingModel = binding.slice(idx + 1);
+      const sameProvider = bindingProvider === providerId || (!!providerPlatform && bindingProvider === providerPlatform);
+      if (!sameProvider) return true;
+      return allowedModels ? allowedModels.has(bindingModel) : false;
+    });
+    next[feature as AIFeature] = filtered.length > 0 ? filtered : null;
+  }
+  return next;
+}
+
+function normalizeProviderBindings(bindings: FeatureBindings, providers: IProvider[]): FeatureBindings {
+  const providerIds = new Set(providers.map((p) => p.id));
+  const platformCounts = providers.reduce<Record<string, number>>((acc, provider) => {
+    acc[provider.platform] = (acc[provider.platform] || 0) + 1;
+    return acc;
+  }, {});
+  const providerById = new Map(providers.map((provider) => [provider.id, provider]));
+  const singleProviderByPlatform = new Map(
+    providers
+      .filter((provider) => platformCounts[provider.platform] === 1)
+      .map((provider) => [provider.platform, provider]),
+  );
+
+  const next: FeatureBindings = { ...bindings };
+  for (const [feature, value] of Object.entries(bindings)) {
+    if (!Array.isArray(value)) continue;
+    const filtered = value.filter((binding) => {
+      const idx = binding.indexOf(':');
+      if (idx <= 0) return false;
+      const providerToken = binding.slice(0, idx);
+      const model = binding.slice(idx + 1);
+      const provider = providerById.get(providerToken) || singleProviderByPlatform.get(providerToken);
+      if (!provider) return false;
+      if (parseApiKeys(provider.apiKey).length === 0) return false;
+      if (provider.model.length > 0 && !provider.model.includes(model)) return false;
+      return providerIds.has(provider.id) || platformCounts[provider.platform] === 1;
+    });
+    next[feature as AIFeature] = filtered.length > 0 ? filtered : null;
+  }
+  return next;
+}
+
 const initialState: APIConfigState = {
   providers: memefastTemplate
     ? [{ id: generateId(), ...memefastTemplate, apiKey: '' }]
@@ -562,6 +617,16 @@ export const useAPIConfigStore = create<APIConfigStore>()(
       updateProvider: (provider) => {
         set((state) => ({
           providers: state.providers.map(p => p.id === provider.id ? provider : p),
+          featureBindings: parseApiKeys(provider.apiKey).length === 0
+            ? filterBindingsForProvider(state.featureBindings, provider.id, provider.platform)
+            : state.featureBindings,
+          ...(parseApiKeys(provider.apiKey).length === 0 ? {
+            modelEndpointTypes: omitRecordKeys(state.modelEndpointTypes, provider.model || []),
+            modelTypes: omitRecordKeys(state.modelTypes, provider.model || []),
+            modelTags: omitRecordKeys(state.modelTags, provider.model || []),
+            modelEnableGroups: omitRecordKeys(state.modelEnableGroups, provider.model || []),
+            discoveredModelLimits: omitRecordKeys(state.discoveredModelLimits, provider.model || []),
+          } : {}),
         }));
         // Update key manager
         updateProviderKeys(provider.id, provider.apiKey);
@@ -572,6 +637,14 @@ export const useAPIConfigStore = create<APIConfigStore>()(
         const provider = get().providers.find(p => p.id === id);
         set((state) => ({
           providers: state.providers.filter(p => p.id !== id),
+          featureBindings: provider
+            ? filterBindingsForProvider(state.featureBindings, provider.id, provider.platform)
+            : state.featureBindings,
+          modelEndpointTypes: provider ? omitRecordKeys(state.modelEndpointTypes, provider.model) : state.modelEndpointTypes,
+          modelTypes: provider ? omitRecordKeys(state.modelTypes, provider.model) : state.modelTypes,
+          modelTags: provider ? omitRecordKeys(state.modelTags, provider.model) : state.modelTags,
+          modelEnableGroups: provider ? omitRecordKeys(state.modelEnableGroups, provider.model) : state.modelEnableGroups,
+          discoveredModelLimits: provider ? omitRecordKeys(state.discoveredModelLimits, provider.model) : state.discoveredModelLimits,
         }));
         // 同步清除该 provider 的所有 ApiKeyManager 缓存（包括 scoped managers）
         clearProviderManagers(id);
@@ -927,6 +1000,7 @@ export const useAPIConfigStore = create<APIConfigStore>()(
       },
 
       clearApiKey: (provider) => {
+        const existingProvider = get().getProviderByPlatform(provider);
         // Clear from legacy
         set((state) => {
           const newKeys = { ...state.apiKeys };
@@ -935,10 +1009,20 @@ export const useAPIConfigStore = create<APIConfigStore>()(
         });
         
         // Also clear from provider if exists
-        const existingProvider = get().getProviderByPlatform(provider);
         if (existingProvider) {
           get().updateProvider({ ...existingProvider, apiKey: '' });
         }
+
+        // 清理该平台残留的可用性元数据，避免已失效 key 继续污染模型列表
+        const modelsToClear = existingProvider?.model || [];
+        set((state) => ({
+          featureBindings: normalizeProviderBindings(state.featureBindings, state.providers),
+          modelEndpointTypes: omitRecordKeys(state.modelEndpointTypes, modelsToClear),
+          modelTypes: omitRecordKeys(state.modelTypes, modelsToClear),
+          modelTags: omitRecordKeys(state.modelTags, modelsToClear),
+          modelEnableGroups: omitRecordKeys(state.modelEnableGroups, modelsToClear),
+          discoveredModelLimits: omitRecordKeys(state.discoveredModelLimits, modelsToClear),
+        }));
         
         console.log(`[APIConfig] Cleared ${provider} API key`);
       },

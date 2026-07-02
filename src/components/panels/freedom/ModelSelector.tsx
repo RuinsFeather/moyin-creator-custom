@@ -380,7 +380,6 @@ function isModelAllowedByPanelType(
   modelTypes: Record<string, string>,
   modelEndpointTypes: Record<string, string[]>
 ): boolean {
-  const endpointTypes = modelEndpointTypes[modelId] || [];
   const modelType = modelTypes[modelId];
   if (type === 'image') {
     // 未同步到 model_type 时先放行，避免误伤可用模型
@@ -388,16 +387,9 @@ function isModelAllowedByPanelType(
     return modelType === '图像';
   }
 
-  // 视频面板：先按 model_type 粗过滤
-  if (modelType && modelType !== '音视频') return false;
-
-  // 再按 endpoint type 细过滤，排除纯音频类模型
-  if (endpointTypes.length > 0) {
-    return endpointTypes.some((t) => /视频|video|文生视频|图生视频|首尾帧|参考生视频|延长|动作控制|数字人|omni-video/i.test(t));
-  }
-
-  // endpoint 缺失时用模型名兜底判定（避免自定义展开型号被误过滤）
-  return /kling|veo|sora|runway|vidu|hailuo|minimax\/video|wan|luma|grok-video|seedance|aigc-video|happyhorse/i.test(modelId);
+  // 视频面板以“显式绑定”为准，避免某个 key 同步回来的 model_type / endpoint_types
+  // 污染其它 key 的可用模型列表。真正不可用的模型会在发起生成时由接口返回错误。
+  return true;
 }
 
 export function ModelSelector({ type, value, onChange, className }: ModelSelectorProps) {
