@@ -172,6 +172,8 @@ async function freedomRetry<T>(
       lastError = error as Error;
       if (error instanceof FreedomCancelledError) throw error;
       if ((error as any)?.name === 'AbortError') throw new FreedomCancelledError();
+      // 已触达上游 / 已扣费的错误：绝不重试整个操作（重试会重新 submit → 二次扣费）
+      if (error instanceof FreedomBilledError) throw error;
       if (!isRetryableError(error)) throw error;
 
       // 触发 key 轮换（如果有 keyManager）
@@ -203,6 +205,21 @@ export class FreedomCancelledError extends Error {
   constructor(message = '任务已取消') {
     super(message);
     this.name = 'FreedomCancelledError';
+  }
+}
+
+/**
+ * 「已触达上游 / 已扣费」错误。
+ * 用于 Gemini 原生接口：当上游返回 2xx（已计费）但后续解析失败时抛出，
+ * 外层 **不得** 回退到 chat/completions（否则会造成第二次扣费）。
+ */
+export class FreedomBilledError extends Error {
+  /** 上游返回的 HTTP 状态码（若有） */
+  status?: number;
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = 'FreedomBilledError';
+    this.status = status;
   }
 }
 
@@ -246,6 +263,32 @@ function buildEndpoint(baseUrl: string, path: string): string {
 function getRootBaseUrl(baseUrl: string): string {
   const normalized = baseUrl.replace(/\/+$/, '');
   return normalized.replace(/\/v\d+$/, '');
+}
+
+function buildVolcVideoSubmitPath(baseUrl: string): string {
+  const normalized = baseUrl.replace(/\/+$/, '');
+  if (/\/contents\/generations\/tasks$/i.test(normalized)) {
+    return normalized;
+  }
+  if (/\/api\/v3$/i.test(normalized)) {
+    return `${normalized}/contents/generations/tasks`;
+  }
+  // 火山方舟原生域名，或本地/自建的方舟兼容服务，应使用 /api/v3/contents/generations/tasks。
+  if (/\.volces\.com|ark\.cn-beijing|localhost|127\.0\.0\.1|^https?:\/\/(?:10|172\.(?:1[6-9]|2\d|3[0-1])|192\.168)\./i.test(normalized)) {
+    return `${normalized}/api/v3/contents/generations/tasks`;
+  }
+  // MemeFast 等中转使用 /volc/v1/contents/generations/tasks。
+  return `${getRootBaseUrl(normalized)}/volc/v1/contents/generations/tasks`;
+}
+
+async function readJsonResponse<T = any>(response: Response, label: string): Promise<T> {
+  const text = await response.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const preview = text.slice(0, 160).replace(/\s+/g, ' ').trim();
+    throw new Error(`${label} 返回的不是 JSON，可能请求到了错误地址或被网页服务接管：${preview || '空响应'}`);
+  }
 }
 
 function pickFeatureConfig(feature: AIFeature, requestedModel?: string): FeatureConfig | null {
@@ -605,9 +648,21 @@ async function _generateFreedomImageInner(
     try {
       return await generateViaGeminiNative(params, model, apiKey, normalizedBase);
     } catch (err: any) {
-      // Gemini 原生失败（如中转站不支持 /v1beta），回退到 chat completions
       if (err instanceof FreedomCancelledError) throw err;
-      console.warn('[Freedom] Gemini native route failed, falling back to chat completions:', err?.message);
+      // 已触达上游 / 已扣费：绝不回退到 chat/completions（否则二次扣费）
+      if (err instanceof FreedomBilledError) throw err;
+      // 仅当原生 /v1beta 端点「不存在 / 不支持」或「根本没触达上游」时才回退：
+      //   - status 缺失：网络/CORS 层错误，请求未被上游受理（未扣费）
+      //   - 404 / 405 / 501：中转站不提供 /v1beta 路径（未扣费）
+      const status: number | undefined = typeof err?.status === 'number' ? err.status : undefined;
+      const canFallback = status === undefined || status === 404 || status === 405 || status === 501;
+      if (!canFallback) {
+        // 4xx/5xx 等业务错误（如 400/401/402/429/500）：上游已受理请求，可能已扣费，
+        // 不回退，直接抛出，避免对同一次生成产生两次计费。
+        console.warn('[Freedom] Gemini native failed with billable status, NOT falling back:', status, err?.message);
+        throw err;
+      }
+      console.warn('[Freedom] Gemini native endpoint unavailable, falling back to chat completions:', status ?? '(no status)', err?.message);
       return await generateViaChatCompletions(params, model, apiKey, normalizedBase);
     }
   }
@@ -751,7 +806,9 @@ async function generateViaGeminiNative(
   const imageUrl = extractGeminiImage(data);
   if (!imageUrl) {
     console.warn('[Freedom] Gemini response without image:', JSON.stringify(data).slice(0, 500));
-    throw new Error('未能从 Gemini 响应中提取图片');
+    // 上游已返回 2xx（已扣费），仅是解析未拿到图片；标记为「已扣费」错误，
+    // 外层禁止回退到 chat/completions，避免二次扣费。
+    throw new FreedomBilledError('未能从 Gemini 响应中提取图片（上游已返回结果，请检查该模型是否为图片生成模型或稍后重试）', response.status);
   }
 
   const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image', params.projectId);
@@ -1071,11 +1128,19 @@ async function generateViaKlingImagesEndpoint(
     });
   } catch (err: any) {
     if (params.signal?.aborted || err?.name === 'AbortError') throw new FreedomCancelledError();
+    // 网络/CORS 层错误：请求未被上游受理（未扣费），可安全回退到标准 images 端点
     return generateViaImagesEndpoint(params, model, apiKey, baseUrl);
   }
 
   if (!response.ok) {
-    return generateViaImagesEndpoint(params, model, apiKey, baseUrl);
+    // 仅当 Kling 原生端点「不存在 / 不支持」（404/405/501）时才回退（未扣费）；
+    // 其它状态码（400/401/402/429/500 等）上游可能已受理请求、可能已扣费，
+    // 不回退，直接抛错，避免二次扣费。
+    if (response.status === 404 || response.status === 405 || response.status === 501) {
+      return generateViaImagesEndpoint(params, model, apiKey, baseUrl);
+    }
+    const errText = await response.text();
+    throw toHttpError('Kling image failed', response.status, errText);
   }
 
   const data = await response.json();
@@ -1094,7 +1159,9 @@ async function generateViaKlingImagesEndpoint(
   }
 
   if (!imageUrl) {
-    return generateViaImagesEndpoint(params, model, apiKey, baseUrl);
+    // Kling 原生端点已返回 2xx（已扣费）。此时若拿不到图片（轮询超时/失败），
+    // 绝不回退到标准 images 端点重新提交（否则会造成第二次扣费）。
+    throw new FreedomBilledError('Kling 已受理请求但未返回图片（上游已计费，请稍后在历史记录中查看或重试）', response.status);
   }
 
   params.onProgress?.({ phase: 'finalizing', percent: 95, message: '保存到素材库…' });
@@ -1181,7 +1248,7 @@ function mapFriendlyErrorMessage(body: string, status?: number): string | null {
     const reqId = reqIdMatch ? reqIdMatch[1] : '未知';
     return `该请求未能成功，因为输出的视频可能受到版权限制的约束。该请求id如下：${reqId}`;
   }
-  if (status === 400) return '请求参数不正确，请检查模型、宽高比、分辨率、参考图等设置后重试';
+  if (status === 400) return '请求参数被退回，请检查提示词、参考图、分辨率等参数是否符合要求，或是判定有真人或版权限制';
   if (status === 401) return '认证失败，请检查 API Key 是否正确或是否已过期';
   if (status === 403) return '当前账号或 API Key 没有调用权限，请检查供应商权限配置';
   if (status === 404) return '接口或模型不存在，请检查 Base URL、模型 ID 与端点类型配置';
@@ -1760,6 +1827,142 @@ export async function resumeFreedomVideoTask(
   return finalizeFreedomVideoResult(result, params.prompt, params.projectId);
 }
 
+// ==================== Task Query (Debug) ====================
+
+export type FreedomTaskQueryRoute = 'auto' | 'volc' | 'unified' | 'openai_official';
+
+export interface FreedomTaskQueryResult {
+  /** 规范化后的任务状态 */
+  status: 'succeeded' | 'processing' | 'failed' | 'unknown';
+  /** 实际用于查询的地址 */
+  pollUrl: string;
+  /** 命中的路由 */
+  route: FreedomVideoRoute;
+  /** 提取到的结果链接（视频优先，其次图片） */
+  resultUrl?: string;
+  /** 结果媒体类型 */
+  mediaType?: 'video' | 'image';
+  /** 服务端返回的原始响应（已解析或原始文本） */
+  raw: unknown;
+  /** HTTP 状态码 */
+  httpStatus: number;
+  /** 失败/异常时的说明 */
+  error?: string;
+}
+
+/**
+ * 用任务 ID 查询一次生成任务的状态与结果（单次查询，不做无限轮询）。
+ *
+ * 供「调试」面板使用：根据当前「自由板块-视频」绑定的 API 配置（baseUrl + key）
+ * 自动拼出查询地址；也可以直接传入完整 pollUrl 覆盖自动拼装。
+ */
+export async function queryFreedomTaskById(options: {
+  taskId: string;
+  /** 路由类型，默认 auto（按模型/端点类型自动判断） */
+  route?: FreedomTaskQueryRoute;
+  /** 模型 ID，用于解析对应的 API 配置与端点类型 */
+  model?: string;
+  /** 显式的完整查询地址；提供后忽略自动拼装 */
+  pollUrl?: string;
+  signal?: AbortSignal;
+}): Promise<FreedomTaskQueryResult> {
+  const taskId = (options.taskId || '').trim();
+  const explicitPollUrl = (options.pollUrl || '').trim();
+  if (!taskId && !explicitPollUrl) {
+    throw new Error('请填写任务 ID（或完整查询地址）');
+  }
+
+  const { config } = resolveFreedomFeatureConfig('freedom_video', 'video_generation', options.model);
+  if (!config && !explicitPollUrl) {
+    throw new Error('未找到「自由板块-视频」的 API 配置。请先在设置中配置视频服务映射，或直接填写完整查询地址');
+  }
+
+  const model = options.model || config?.model || '';
+  const baseUrl = config?.baseUrl || '';
+  const apiKey = config?.keyManager?.getCurrentKey?.() || config?.apiKey || '';
+  const endpointTypes = model
+    ? useAPIConfigStore.getState().modelEndpointTypes[model]
+    : undefined;
+
+  // 决定路由
+  const route: FreedomVideoRoute = options.route && options.route !== 'auto'
+    ? options.route
+    : detectFreedomVideoRoute(model, endpointTypes);
+
+  // 拼查询地址
+  let pollUrl = explicitPollUrl;
+  if (!pollUrl) {
+    if (route === 'volc') {
+      pollUrl = `${buildVolcVideoSubmitPath(baseUrl)}/${taskId}`;
+    } else if (route === 'openai_official') {
+      pollUrl = buildEndpoint(baseUrl, `videos/${taskId}`);
+    } else {
+      // unified 及其它：使用端点类型对应的查询路径
+      const rootBase = getRootBaseUrl(baseUrl);
+      const paths = getUnifiedEndpointPaths(endpointTypes || []);
+      pollUrl = `${rootBase}${paths.poll(taskId)}`;
+    }
+  }
+
+  const authHeaders: Record<string, string> = apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {};
+  const resp = await corsFetch(pollUrl, { headers: authHeaders, signal: options.signal });
+  const httpStatus = resp.status;
+
+  // 读取响应（尽量解析 JSON，失败则保留原始文本）
+  const text = await resp.text();
+  let raw: unknown = text;
+  try { raw = JSON.parse(text); } catch { /* 保留原始文本 */ }
+
+  if (!resp.ok) {
+    return {
+      status: 'failed',
+      pollUrl,
+      route,
+      raw,
+      httpStatus,
+      error: `查询失败：HTTP ${httpStatus}`,
+    };
+  }
+
+  const data = raw as any;
+  const rawStatus = String(data?.status || data?.state || data?.data?.status || '').toLowerCase();
+  const videoUrl = data?.content?.video_url || extractVideoUrl(data);
+  const imageUrl = !videoUrl ? extractImageUrl(data) : undefined;
+  const resultUrl = videoUrl || imageUrl || undefined;
+  const mediaType: 'video' | 'image' | undefined = videoUrl ? 'video' : imageUrl ? 'image' : undefined;
+
+  let status: FreedomTaskQueryResult['status'];
+  if (rawStatus === 'succeeded' || rawStatus === 'completed' || rawStatus === 'success') {
+    status = 'succeeded';
+  } else if (rawStatus === 'failed' || rawStatus === 'error' || rawStatus === 'cancelled') {
+    status = 'failed';
+  } else if (rawStatus) {
+    status = 'processing';
+  } else {
+    status = resultUrl ? 'succeeded' : 'unknown';
+  }
+
+  return { status, pollUrl, route, resultUrl, mediaType, raw, httpStatus };
+}
+
+/**
+ * 把查询到的结果链接保存到素材库（供调试面板一键入库）。
+ * 视频会先下载到本地再入库，图片直接入库。返回 mediaId。
+ */
+export async function saveFreedomTaskResultToMedia(options: {
+  url: string;
+  prompt?: string;
+  mediaType: 'video' | 'image';
+  projectId?: string | null;
+}): Promise<string | undefined> {
+  const prompt = options.prompt || '调试任务查询';
+  if (options.mediaType === 'video') {
+    const persistentUrl = await persistFreedomVideoResult(options.url, prompt);
+    return saveToMediaLibrary(persistentUrl, prompt, 'ai-video', options.projectId);
+  }
+  return saveToMediaLibrary(options.url, prompt, 'ai-image', options.projectId);
+}
+
 async function persistFreedomVideoResult(url: string, prompt: string): Promise<string> {
   if (!url || url.startsWith('local-image://')) return url;
   const safeName = prompt.slice(0, 30).replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '_') || 'freedom_video';
@@ -2288,12 +2491,7 @@ async function generateVideoViaVolc(
   apiKey: string,
   baseUrl: string,
 ): Promise<GenerationResult> {
-  // 火山方舟原生域名（ark.cn-beijing.volces.com）使用 /api/v3/contents/generations/tasks
-  // MemeFast 等中转使用 /volc/v1/contents/generations/tasks
-  const isVolcNative = /\.volces\.com|ark\.cn-beijing/i.test(baseUrl);
-  const submitPath = isVolcNative
-    ? `${baseUrl.replace(/\/+$/, '')}/contents/generations/tasks`
-    : `${getRootBaseUrl(baseUrl)}/volc/v1/contents/generations/tasks`;
+  const submitPath = buildVolcVideoSubmitPath(baseUrl);
   const resolution = params.resolution?.toLowerCase();
   const ratio = params.aspectRatio;
   const isSeedanceV2 = /seedance[-_](v?2|2\.0|2[-_]0)/i.test(model);
@@ -2349,7 +2547,7 @@ async function generateVideoViaVolc(
     body.tools = params.tools;
   }
 
-  console.log('[Freedom] Volc submit →', submitPath, { isVolcNative, model });
+  console.log('[Freedom] Volc submit →', submitPath, { model });
   const submitResp = await corsFetch(submitPath, {
     method: 'POST',
     headers: {
@@ -2363,7 +2561,7 @@ async function generateVideoViaVolc(
     throw toHttpError('Volc submit failed', submitResp.status, await submitResp.text());
   }
 
-  const submitData = await submitResp.json();
+  const submitData = await readJsonResponse<{ id?: string }>(submitResp, 'Volc submit');
   const taskId = submitData.id;
   if (!taskId) throw new Error('Volc 返回空任务 ID');
 

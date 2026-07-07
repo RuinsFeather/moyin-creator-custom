@@ -1,13 +1,22 @@
 "use client";
 
 import { useState, useCallback, useRef } from "react";
-import { Play, Copy, Trash2, Loader2 } from "lucide-react";
+import { Play, Copy, Trash2, Loader2, Search, Download, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "sonner";
 import { corsFetch } from "@/lib/cors-fetch";
+import {
+  queryFreedomTaskById,
+  saveFreedomTaskResultToMedia,
+  type FreedomTaskQueryRoute,
+  type FreedomTaskQueryResult,
+} from "@/lib/freedom/freedom-api";
+import { useFreedomTaskStore } from "@/stores/freedom-task-store";
+import type { PersistedFreedomTask } from "@/stores/freedom-task-store";
+import { useProjectStore } from "@/stores/project-store";
 
 /**
  * Debug 面板：直接使用 JSON 请求体调用模型 API 进行测试。
@@ -115,16 +124,148 @@ export function DebugPanel() {
     setElapsed(null);
   }, []);
 
+  // ==================== 任务查询模式 ====================
+  const [mode, setMode] = useState<"request" | "task">("request");
+  const [taskId, setTaskId] = useState("");
+  const [taskModel, setTaskModel] = useState("");
+  const [taskRoute, setTaskRoute] = useState<FreedomTaskQueryRoute>("auto");
+  const [taskPollUrl, setTaskPollUrl] = useState("");
+  const [taskLoading, setTaskLoading] = useState(false);
+  const [taskSaving, setTaskSaving] = useState(false);
+  const [taskResult, setTaskResult] = useState<FreedomTaskQueryResult | null>(null);
+  const [taskError, setTaskError] = useState<string | null>(null);
+  const taskAbortRef = useRef<AbortController | null>(null);
+
+  // 历史待查询任务（从持久化任务队列读取，便于一键回填 ID）
+  const pendingTasks = useFreedomTaskStore((s) => s.tasks);
+
+  const handleQueryTask = useCallback(async () => {
+    if (!taskId.trim() && !taskPollUrl.trim()) {
+      toast.error("请填写任务 ID 或完整查询地址");
+      return;
+    }
+    setTaskLoading(true);
+    setTaskResult(null);
+    setTaskError(null);
+    const controller = new AbortController();
+    taskAbortRef.current = controller;
+    try {
+      const result = await queryFreedomTaskById({
+        taskId: taskId.trim(),
+        route: taskRoute,
+        model: taskModel.trim() || undefined,
+        pollUrl: taskPollUrl.trim() || undefined,
+        signal: controller.signal,
+      });
+      setTaskResult(result);
+      if (result.status === "succeeded" && result.resultUrl) {
+        toast.success("任务已完成，已提取到结果链接");
+      } else if (result.status === "processing") {
+        toast.info("任务仍在生成中，请稍后再查询");
+      } else if (result.status === "failed") {
+        toast.error(result.error || "任务查询失败或任务本身失败");
+      } else {
+        toast.info("已返回响应，但未识别到明确状态");
+      }
+    } catch (err: any) {
+      if (err?.name === "AbortError") {
+        setTaskError("查询已取消");
+      } else {
+        setTaskError(err?.message || String(err));
+        toast.error(err?.message || "查询失败");
+      }
+    } finally {
+      setTaskLoading(false);
+      taskAbortRef.current = null;
+    }
+  }, [taskId, taskRoute, taskModel, taskPollUrl]);
+
+  const handleCancelTask = useCallback(() => {
+    taskAbortRef.current?.abort();
+  }, []);
+
+  const handleSaveTaskResult = useCallback(async () => {
+    if (!taskResult?.resultUrl || !taskResult.mediaType) return;
+    setTaskSaving(true);
+    try {
+      const mediaId = await saveFreedomTaskResultToMedia({
+        url: taskResult.resultUrl,
+        mediaType: taskResult.mediaType,
+        prompt: taskModel.trim() ? `调试查询 ${taskModel.trim()}` : "调试任务查询",
+        projectId: useProjectStore.getState().activeProjectId,
+      });
+      if (mediaId) {
+        toast.success("已保存到素材库");
+      } else {
+        toast.error("保存失败：未返回媒体 ID");
+      }
+    } catch (err: any) {
+      toast.error(`保存失败：${err?.message || err}`);
+    } finally {
+      setTaskSaving(false);
+    }
+  }, [taskResult, taskModel]);
+
+  const handleUseTask = useCallback((t: { serverTaskId?: string; model?: string; pollUrl?: string }) => {
+    if (t.serverTaskId) setTaskId(t.serverTaskId);
+    if (t.model) setTaskModel(t.model);
+    if (t.pollUrl) setTaskPollUrl(t.pollUrl);
+    setTaskRoute("auto");
+  }, []);
+
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
       <div className="border-b px-4 py-3 flex items-center justify-between shrink-0">
         <div>
           <h2 className="text-base font-semibold">API Debug 调试面板</h2>
-          <p className="text-xs text-muted-foreground">直接发送 JSON 请求调用模型接口进行测试</p>
+          <p className="text-xs text-muted-foreground">
+            {mode === "request" ? "直接发送 JSON 请求调用模型接口进行测试" : "用任务 ID 查询生成结果并可一键保存到素材库"}
+          </p>
+        </div>
+        <div className="flex items-center rounded-md border p-0.5 text-xs">
+          <button
+            type="button"
+            onClick={() => setMode("request")}
+            className={`px-3 py-1 rounded transition-colors ${
+              mode === "request" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            原始请求
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode("task")}
+            className={`px-3 py-1 rounded transition-colors ${
+              mode === "task" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            任务查询
+          </button>
         </div>
       </div>
 
+      {mode === "task" ? (
+        <TaskQuerySection
+          taskId={taskId}
+          setTaskId={setTaskId}
+          taskModel={taskModel}
+          setTaskModel={setTaskModel}
+          taskRoute={taskRoute}
+          setTaskRoute={setTaskRoute}
+          taskPollUrl={taskPollUrl}
+          setTaskPollUrl={setTaskPollUrl}
+          taskLoading={taskLoading}
+          taskSaving={taskSaving}
+          taskResult={taskResult}
+          taskError={taskError}
+          pendingTasks={pendingTasks}
+          onQuery={handleQueryTask}
+          onCancel={handleCancelTask}
+          onSave={handleSaveTaskResult}
+          onUseTask={handleUseTask}
+        />
+      ) : (
       <div className="flex-1 flex min-h-0">
         {/* Left: Request */}
         <div className="w-1/2 border-r flex flex-col min-h-0">
@@ -236,6 +377,239 @@ export function DebugPanel() {
             </pre>
           </ScrollArea>
         </div>
+      </div>
+      )}
+    </div>
+  );
+}
+
+// ==================== 任务查询子面板 ====================
+
+interface TaskQuerySectionProps {
+  taskId: string;
+  setTaskId: (v: string) => void;
+  taskModel: string;
+  setTaskModel: (v: string) => void;
+  taskRoute: FreedomTaskQueryRoute;
+  setTaskRoute: (v: FreedomTaskQueryRoute) => void;
+  taskPollUrl: string;
+  setTaskPollUrl: (v: string) => void;
+  taskLoading: boolean;
+  taskSaving: boolean;
+  taskResult: FreedomTaskQueryResult | null;
+  taskError: string | null;
+  pendingTasks: PersistedFreedomTask[];
+  onQuery: () => void;
+  onCancel: () => void;
+  onSave: () => void;
+  onUseTask: (t: { serverTaskId?: string; model?: string; pollUrl?: string }) => void;
+}
+
+const STATUS_BADGE: Record<FreedomTaskQueryResult["status"], { label: string; cls: string }> = {
+  succeeded: { label: "已完成", cls: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" },
+  processing: { label: "生成中", cls: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400" },
+  failed: { label: "失败", cls: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400" },
+  unknown: { label: "未知", cls: "bg-muted text-muted-foreground" },
+};
+
+function TaskQuerySection(props: TaskQuerySectionProps) {
+  const {
+    taskId, setTaskId, taskModel, setTaskModel, taskRoute, setTaskRoute,
+    taskPollUrl, setTaskPollUrl, taskLoading, taskSaving, taskResult, taskError,
+    pendingTasks, onQuery, onCancel, onSave, onUseTask,
+  } = props;
+
+  const rawText = taskResult
+    ? typeof taskResult.raw === "string"
+      ? taskResult.raw
+      : JSON.stringify(taskResult.raw, null, 2)
+    : "";
+
+  // 仅展示带有服务端任务 ID / pollUrl 的历史任务，便于一键回填
+  const queryableTasks = pendingTasks
+    .filter((t) => t.serverTaskId || t.pollUrl)
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+    .slice(0, 20);
+
+  return (
+    <div className="flex-1 flex min-h-0">
+      {/* Left: 查询表单 */}
+      <div className="w-1/2 border-r flex flex-col min-h-0">
+        <ScrollArea className="flex-1">
+          <div className="p-4 space-y-4">
+            {/* Task ID */}
+            <div className="space-y-2">
+              <Label className="text-xs font-medium">任务 ID</Label>
+              <Input
+                value={taskId}
+                onChange={(e) => setTaskId(e.target.value)}
+                placeholder="上游返回的 task id / job id"
+                className="font-mono text-xs h-9"
+              />
+            </div>
+
+            {/* Route + Model */}
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-2">
+                <Label className="text-xs font-medium">路由类型</Label>
+                <select
+                  value={taskRoute}
+                  onChange={(e) => setTaskRoute(e.target.value as FreedomTaskQueryRoute)}
+                  className="h-9 w-full rounded-md border border-input bg-background px-2 text-xs"
+                >
+                  <option value="auto">自动（按模型判断）</option>
+                  <option value="volc">volc（火山方舟）</option>
+                  <option value="unified">unified（统一端点）</option>
+                  <option value="openai_official">openai_official</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <Label className="text-xs font-medium">模型 ID（可选）</Label>
+                <Input
+                  value={taskModel}
+                  onChange={(e) => setTaskModel(e.target.value)}
+                  placeholder="用于解析配置/路由"
+                  className="font-mono text-xs h-9"
+                />
+              </div>
+            </div>
+
+            {/* 显式 pollUrl */}
+            <div className="space-y-2">
+              <Label className="text-xs font-medium">完整查询地址（可选，优先级最高）</Label>
+              <Input
+                value={taskPollUrl}
+                onChange={(e) => setTaskPollUrl(e.target.value)}
+                placeholder="https://... 直接指定则忽略上面的自动拼装"
+                className="font-mono text-xs h-9"
+              />
+              <p className="text-[11px] text-muted-foreground leading-relaxed">
+                默认使用「自由板块-视频」绑定的 API 配置（baseUrl + Key）自动拼装查询地址。
+                若自动拼装不对，可在此填入完整地址。
+              </p>
+            </div>
+
+            {/* Actions */}
+            <div className="flex gap-2">
+              <Button
+                onClick={onQuery}
+                disabled={taskLoading || (!taskId.trim() && !taskPollUrl.trim())}
+                className="flex-1 h-9"
+              >
+                {taskLoading ? (
+                  <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                ) : (
+                  <Search className="h-4 w-4 mr-1.5" />
+                )}
+                {taskLoading ? "查询中…" : "查询任务"}
+              </Button>
+              {taskLoading && (
+                <Button variant="outline" onClick={onCancel} className="h-9">
+                  取消
+                </Button>
+              )}
+            </div>
+
+            {/* 历史任务快速回填 */}
+            {queryableTasks.length > 0 && (
+              <div className="space-y-2 pt-2 border-t">
+                <Label className="text-xs font-medium flex items-center gap-1">
+                  <Clock className="h-3.5 w-3.5" />
+                  最近任务（点击回填）
+                </Label>
+                <div className="space-y-1">
+                  {queryableTasks.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => onUseTask({ serverTaskId: t.serverTaskId, model: t.model, pollUrl: t.pollUrl })}
+                      className="w-full text-left rounded-md border px-2 py-1.5 text-[11px] hover:bg-accent transition-colors"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono truncate">{t.serverTaskId || t.pollUrl}</span>
+                        <span className="shrink-0 text-muted-foreground">{t.type} · {t.status}</span>
+                      </div>
+                      <div className="truncate text-muted-foreground">{t.model || "—"}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </ScrollArea>
+      </div>
+
+      {/* Right: 查询结果 */}
+      <div className="w-1/2 flex flex-col min-h-0">
+        <div className="border-b px-4 py-2 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-3">
+            <span className="text-xs font-medium">查询结果</span>
+            {taskResult && (
+              <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${STATUS_BADGE[taskResult.status].cls}`}>
+                {STATUS_BADGE[taskResult.status].label}
+              </span>
+            )}
+            {taskResult && (
+              <span className="text-[11px] text-muted-foreground">HTTP {taskResult.httpStatus} · {taskResult.route}</span>
+            )}
+          </div>
+          {taskResult?.resultUrl && taskResult.mediaType && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7"
+              onClick={onSave}
+              disabled={taskSaving}
+            >
+              {taskSaving ? (
+                <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+              ) : (
+                <Download className="h-3.5 w-3.5 mr-1" />
+              )}
+              保存到素材库
+            </Button>
+          )}
+        </div>
+        <ScrollArea className="flex-1">
+          <div className="p-4 space-y-3">
+            {taskError && (
+              <div className="rounded-md border border-red-300 bg-red-50 dark:bg-red-900/20 dark:border-red-900/50 px-3 py-2 text-xs text-red-700 dark:text-red-400">
+                {taskError}
+              </div>
+            )}
+
+            {taskResult?.resultUrl && (
+              <div className="space-y-2">
+                <Label className="text-xs font-medium">
+                  结果链接（{taskResult.mediaType === "video" ? "视频" : "图片"}）
+                </Label>
+                <div className="rounded-md border bg-muted/40 px-2 py-1.5 text-[11px] font-mono break-all">
+                  {taskResult.resultUrl}
+                </div>
+                {taskResult.mediaType === "image" ? (
+                  <img
+                    src={taskResult.resultUrl}
+                    alt="result"
+                    className="max-h-48 rounded-md border object-contain"
+                  />
+                ) : (
+                  <video
+                    src={taskResult.resultUrl}
+                    controls
+                    className="max-h-48 w-full rounded-md border bg-black"
+                  />
+                )}
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <Label className="text-xs font-medium">原始响应</Label>
+              <pre className="text-xs font-mono whitespace-pre-wrap break-all text-foreground/90 rounded-md border bg-muted/30 p-3">
+                {rawText || (taskLoading ? "查询中…" : "点击「查询任务」查看结果")}
+              </pre>
+            </div>
+          </div>
+        </ScrollArea>
       </div>
     </div>
   );
