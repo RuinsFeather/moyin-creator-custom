@@ -1,7 +1,7 @@
 // Copyright (c) 2025 hotflow2024
 // Licensed under AGPL-3.0-or-later. See LICENSE for details.
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
-import { app, BrowserWindow, ipcMain, protocol, net, dialog, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, protocol, net, dialog, shell, Notification } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
 import https from 'node:https'
@@ -182,6 +182,46 @@ async function resolveAvailableUpdate(currentVersion: string): Promise<Available
     publishedAt: manifest.publishedAt,
     githubUrl: manifest.githubUrl,
   }
+}
+
+/**
+ * 解析通知使用的图标路径。开发环境用 build/icon.png，
+ * 打包后图标位于资源目录；找不到则返回 undefined（系统用默认图标）。
+ */
+function getNotificationIcon(): string | undefined {
+  const candidates = [
+    path.join(process.env.APP_ROOT || '', 'build', 'icon.png'),
+    path.join(process.resourcesPath || '', 'build', 'icon.png'),
+    path.join(process.resourcesPath || '', 'icon.png'),
+    path.join(process.env.VITE_PUBLIC || '', 'icon.png'),
+  ]
+  for (const candidate of candidates) {
+    try {
+      if (candidate && fs.existsSync(candidate)) return candidate
+    } catch {
+      // ignore
+    }
+  }
+  return undefined
+}
+
+/**
+ * 将主窗口带到前台并聚焦：
+ * 处理最小化 / 隐藏 / 失焦等各种情况，供系统通知点击「快捷跳转」时调用。
+ */
+function focusMainWindow() {
+  if (!win || win.isDestroyed()) {
+    // 窗口已被关闭（如 macOS 全部关闭后），尝试重建
+    createWindow()
+    return
+  }
+  if (win.isMinimized()) win.restore()
+  if (!win.isVisible()) win.show()
+  // Windows 上 setAlwaysOnTop 短暂置顶可确保窗口真正跳到最前，随后恢复
+  win.setAlwaysOnTop(true)
+  win.show()
+  win.focus()
+  win.setAlwaysOnTop(false)
 }
 
 function createWindow() {
@@ -1635,6 +1675,53 @@ ipcMain.handle('app-updater-open-link', async (_event, url: string): Promise<Ope
   }
 })
 
+// ==================== 系统通知（视频生成成功等） ====================
+type ShowNotificationOptions = {
+  title: string
+  body?: string
+  /** 是否在点击通知/按钮时把主窗口带到前台，默认 true */
+  focusOnClick?: boolean
+  /** 静音（不发出提示音） */
+  silent?: boolean
+  /** 通知按钮文案（Windows 需系统支持；不支持时点击通知主体同样可跳转） */
+  actionText?: string
+}
+
+ipcMain.handle('notify-show', async (_event, options: ShowNotificationOptions) => {
+  try {
+    if (!Notification.isSupported()) {
+      return { success: false, error: '当前系统不支持通知' }
+    }
+    const focusOnClick = options.focusOnClick !== false
+    // Windows 上「操作按钮」需要应用已注册为 toast 通知源，且部分系统不显示按钮；
+    // 因此同时监听通知主体 click 与按钮 action，任一触发都执行跳转，保证可用。
+    const notification = new Notification({
+      title: options.title || '有点创艺',
+      body: options.body || '',
+      silent: options.silent ?? false,
+      icon: getNotificationIcon(),
+      actions: options.actionText
+        ? [{ type: 'button', text: options.actionText }]
+        : undefined,
+    })
+
+    if (focusOnClick) {
+      notification.on('click', () => focusMainWindow())
+      // Windows 通知上的按钮点击
+      notification.on('action', () => focusMainWindow())
+    }
+
+    notification.show()
+    return { success: true }
+  } catch (error) {
+    console.error('Failed to show notification:', error)
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+})
+
 // ==================== File Export (Save Dialog) ====================
 ipcMain.handle('save-file-dialog', async (_event, { localPath, defaultPath, filters }: { localPath: string, defaultPath: string, filters: { name: string, extensions: string[] }[] }) => {
   try {
@@ -1758,6 +1845,11 @@ protocol.registerSchemesAsPrivileged([{
 }])
 
 app.whenReady().then(() => {
+  // Windows: 注册 AppUserModelId，确保系统通知正确归属到本应用（否则可能不显示或显示为 electron）
+  if (process.platform === 'win32') {
+    app.setAppUserModelId('com.hotflow.moyin-creator')
+  }
+
   // Seed demo project on first run (before window creation)
   seedDemoProject()
 

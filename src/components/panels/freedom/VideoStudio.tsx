@@ -12,6 +12,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Progress } from '@/components/ui/progress';
 import { Switch } from '@/components/ui/switch';
 import { toast } from 'sonner';
+import { notifyVideoGenerated } from '@/lib/notify';
 import { useFreedomStore, type VideoFeatureMode, type ImageToVideoSubMode } from '@/stores/freedom-store';
 import { useFreedomHistoryStore } from '@/stores/freedom-history-store';
 import { useProjectStore } from '@/stores/project-store';
@@ -1108,6 +1109,7 @@ export function VideoStudio() {
         });
 
         toast.success('视频生成成功！已保存到素材库');
+        notifyVideoGenerated();
         // 保留任务卡片在当前任务列表中，由用户手动关闭，避免列表中“跳过”记录
       } catch (err: any) {
         clearInterval(progressTimer);

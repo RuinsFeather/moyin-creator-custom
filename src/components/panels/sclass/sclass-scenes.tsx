@@ -39,6 +39,7 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useMediaStore } from "@/stores/media-store";
 import { toast } from "sonner";
+import { notifyVideoGenerated } from "@/lib/notify";
 import {
   Tooltip,
   TooltipContent,
@@ -1410,6 +1411,7 @@ export function SClassScenes({ onBack, onGenerateVideos, mode }: SplitScenesProp
     const completedCount = splitScenes.filter(s => s.videoStatus === 'completed').length;
     if (completedCount === splitScenes.length) {
       toast.success("所有视频生成完成！");
+      notifyVideoGenerated(`全部 ${completedCount} 个分镜`);
     }
   }, [splitScenes, storyboardConfig, getApiKey, concurrency, updateSplitSceneVideo]);
 
@@ -1650,6 +1652,7 @@ export function SClassScenes({ onBack, onGenerateVideos, mode }: SplitScenesProp
         videoMediaId: mediaId,
       });
       toast.success(`分镜 ${sceneId + 1} 视频生成完成，已保存到素材库`);
+      notifyVideoGenerated(`分镜 ${sceneId + 1}`);
       
       // 视觉连续性：仅当分镜需要尾帧时，提取视频最后一帧
       const currentScene = splitScenes.find(s => s.id === sceneId);

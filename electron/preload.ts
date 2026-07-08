@@ -85,6 +85,17 @@ contextBridge.exposeInMainWorld('appUpdater', {
   openExternalLink: (url: string) => ipcRenderer.invoke('app-updater-open-link', url),
 })
 
+// 系统通知（视频生成成功等）：点击通知或按钮可将主窗口带到前台
+contextBridge.exposeInMainWorld('appNotification', {
+  show: (options: {
+    title: string
+    body?: string
+    focusOnClick?: boolean
+    silent?: boolean
+    actionText?: string
+  }) => ipcRenderer.invoke('notify-show', options),
+})
+
 contextBridge.exposeInMainWorld('imageHostUploader', {
   upload: (payload: {
     provider: {

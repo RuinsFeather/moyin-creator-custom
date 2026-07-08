@@ -11,8 +11,10 @@ import { corsFetch } from "@/lib/cors-fetch";
 import {
   queryFreedomTaskById,
   saveFreedomTaskResultToMedia,
+  probeFreedomImageResponse,
   type FreedomTaskQueryRoute,
   type FreedomTaskQueryResult,
+  type FreedomImageProbeResult,
 } from "@/lib/freedom/freedom-api";
 import { useFreedomTaskStore } from "@/stores/freedom-task-store";
 import type { PersistedFreedomTask } from "@/stores/freedom-task-store";
@@ -195,6 +197,15 @@ export function DebugPanel() {
   const [taskError, setTaskError] = useState<string | null>(null);
   const taskAbortRef = useRef<AbortController | null>(null);
 
+  // ── 图片同步生成探针（手动查询结果）──
+  const [probeModel, setProbeModel] = useState("");
+  const [probePrompt, setProbePrompt] = useState("");
+  const [probeLoading, setProbeLoading] = useState(false);
+  const [probeSaving, setProbeSaving] = useState(false);
+  const [probeResult, setProbeResult] = useState<FreedomImageProbeResult | null>(null);
+  const [probeError, setProbeError] = useState<string | null>(null);
+  const probeAbortRef = useRef<AbortController | null>(null);
+
   // 历史待查询任务（从持久化任务队列读取，便于一键回填 ID）
   const pendingTasks = useFreedomTaskStore((s) => s.tasks);
 
@@ -272,6 +283,64 @@ export function DebugPanel() {
     setTaskRoute("auto");
   }, []);
 
+  // ── 图片探针：真实发一次生图请求，展示未经提取的原始响应 + 提取诊断 ──
+  const handleProbeImage = useCallback(async () => {
+    setProbeLoading(true);
+    setProbeResult(null);
+    setProbeError(null);
+    const controller = new AbortController();
+    probeAbortRef.current = controller;
+    try {
+      const result = await probeFreedomImageResponse({
+        model: probeModel.trim() || undefined,
+        prompt: probePrompt.trim() || undefined,
+        signal: controller.signal,
+      });
+      setProbeResult(result);
+      if (result.extractedUrl) {
+        toast.success(`已提取到图片（命中 ${result.matchedExtractor}）`);
+      } else if (result.error) {
+        toast.warning("上游已返回，但当前逻辑未能提取图片，请查看原始响应结构");
+      }
+    } catch (err: any) {
+      if (err?.name === "AbortError") {
+        setProbeError("探测已取消");
+      } else {
+        setProbeError(err?.message || String(err));
+        toast.error(err?.message || "探测失败");
+      }
+    } finally {
+      setProbeLoading(false);
+      probeAbortRef.current = null;
+    }
+  }, [probeModel, probePrompt]);
+
+  const handleCancelProbe = useCallback(() => {
+    probeAbortRef.current?.abort();
+  }, []);
+
+  const handleSaveProbeResult = useCallback(async () => {
+    if (!probeResult?.extractedUrl) return;
+    setProbeSaving(true);
+    try {
+      const mediaId = await saveFreedomTaskResultToMedia({
+        url: probeResult.extractedUrl,
+        mediaType: "image",
+        prompt: probeModel.trim() ? `探针 ${probeModel.trim()}` : "图片探针",
+        projectId: useProjectStore.getState().activeProjectId,
+      });
+      if (mediaId) {
+        toast.success("已保存到素材库");
+      } else {
+        toast.error("保存失败：未返回媒体 ID");
+      }
+    } catch (err: any) {
+      toast.error(`保存失败：${err?.message || err}`);
+    } finally {
+      setProbeSaving(false);
+    }
+  }, [probeResult, probeModel]);
+
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
@@ -323,6 +392,17 @@ export function DebugPanel() {
           onCancel={handleCancelTask}
           onSave={handleSaveTaskResult}
           onUseTask={handleUseTask}
+          probeModel={probeModel}
+          setProbeModel={setProbeModel}
+          probePrompt={probePrompt}
+          setProbePrompt={setProbePrompt}
+          probeLoading={probeLoading}
+          probeSaving={probeSaving}
+          probeResult={probeResult}
+          probeError={probeError}
+          onProbe={handleProbeImage}
+          onCancelProbe={handleCancelProbe}
+          onSaveProbe={handleSaveProbeResult}
         />
       ) : (
       <div className="flex-1 flex min-h-0">
@@ -462,6 +542,18 @@ interface TaskQuerySectionProps {
   onCancel: () => void;
   onSave: () => void;
   onUseTask: (t: { serverTaskId?: string; model?: string; pollUrl?: string }) => void;
+  // 图片探针（手动查询结果）
+  probeModel: string;
+  setProbeModel: (v: string) => void;
+  probePrompt: string;
+  setProbePrompt: (v: string) => void;
+  probeLoading: boolean;
+  probeSaving: boolean;
+  probeResult: FreedomImageProbeResult | null;
+  probeError: string | null;
+  onProbe: () => void;
+  onCancelProbe: () => void;
+  onSaveProbe: () => void;
 }
 
 const STATUS_BADGE: Record<FreedomTaskQueryResult["status"], { label: string; cls: string }> = {
@@ -476,6 +568,9 @@ function TaskQuerySection(props: TaskQuerySectionProps) {
     taskId, setTaskId, taskModel, setTaskModel, taskRoute, setTaskRoute,
     taskPollUrl, setTaskPollUrl, taskLoading, taskSaving, taskResult, taskError,
     pendingTasks, onQuery, onCancel, onSave, onUseTask,
+    probeModel, setProbeModel, probePrompt, setProbePrompt,
+    probeLoading, probeSaving, probeResult, probeError,
+    onProbe, onCancelProbe, onSaveProbe,
   } = props;
 
   const rawText = taskResult
@@ -592,6 +687,59 @@ function TaskQuerySection(props: TaskQuerySectionProps) {
                 </div>
               </div>
             )}
+
+            {/* ── 图片同步生成探针（手动查询结果）── */}
+            <div className="space-y-3 pt-3 border-t">
+              <div className="space-y-1">
+                <Label className="text-xs font-medium flex items-center gap-1">
+                  <Search className="h-3.5 w-3.5" />
+                  图片手动查询结果（生图探针）
+                </Label>
+                <p className="text-[11px] text-amber-600 dark:text-amber-500 leading-relaxed">
+                  ⚠️ 会用「自由板块-图片」绑定的配置真实发起一次生图请求（可能扣费），
+                  用于抓取上游「未经提取」的原始响应结构，定位「已扣费但提取失败」的问题。
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label className="text-xs font-medium">模型 ID（留空则用默认绑定模型）</Label>
+                <Input
+                  value={probeModel}
+                  onChange={(e) => setProbeModel(e.target.value)}
+                  placeholder="例如 gpt-image-2 / gemini-3.1-flash-image"
+                  className="font-mono text-xs h-9"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label className="text-xs font-medium">提示词（留空则用内置测试提示词）</Label>
+                <textarea
+                  value={probePrompt}
+                  onChange={(e) => setProbePrompt(e.target.value)}
+                  placeholder="A cute corgi puppy sitting on green grass..."
+                  rows={2}
+                  className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-xs resize-none"
+                />
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  onClick={onProbe}
+                  disabled={probeLoading}
+                  variant="secondary"
+                  className="flex-1 h-9"
+                >
+                  {probeLoading ? (
+                    <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                  ) : (
+                    <Search className="h-4 w-4 mr-1.5" />
+                  )}
+                  {probeLoading ? "探测中…" : "发起探测 / 查询结果"}
+                </Button>
+                {probeLoading && (
+                  <Button variant="outline" onClick={onCancelProbe} className="h-9">
+                    取消
+                  </Button>
+                )}
+              </div>
+            </div>
           </div>
         </ScrollArea>
       </div>
@@ -665,6 +813,111 @@ function TaskQuerySection(props: TaskQuerySectionProps) {
                 {rawText || (taskLoading ? "查询中…" : "点击「查询任务」查看结果")}
               </pre>
             </div>
+
+            {/* ── 图片探针结果 ── */}
+            {(probeResult || probeError || probeLoading) && (
+              <div className="space-y-2 pt-3 border-t">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs font-medium flex items-center gap-1">
+                    <Search className="h-3.5 w-3.5" />
+                    探针结果
+                  </Label>
+                  {probeResult?.extractedUrl && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7"
+                      onClick={onSaveProbe}
+                      disabled={probeSaving}
+                    >
+                      {probeSaving ? (
+                        <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                      ) : (
+                        <Download className="h-3.5 w-3.5 mr-1" />
+                      )}
+                      保存到素材库
+                    </Button>
+                  )}
+                </div>
+
+                {probeError && (
+                  <div className="rounded-md border border-red-300 bg-red-50 dark:bg-red-900/20 dark:border-red-900/50 px-3 py-2 text-xs text-red-700 dark:text-red-400">
+                    {probeError}
+                  </div>
+                )}
+
+                {probeResult && (
+                  <>
+                    {/* 诊断信息 */}
+                    <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+                      <div className="rounded-md border bg-muted/40 px-2 py-1">
+                        <span className="text-muted-foreground">路由</span>{" "}
+                        <span className="font-mono">{probeResult.route}</span>
+                      </div>
+                      <div className="rounded-md border bg-muted/40 px-2 py-1">
+                        <span className="text-muted-foreground">HTTP</span>{" "}
+                        <span className="font-mono">{probeResult.httpStatus}</span>
+                      </div>
+                      <div className="col-span-2 rounded-md border bg-muted/40 px-2 py-1 break-all">
+                        <span className="text-muted-foreground">端点</span>{" "}
+                        <span className="font-mono">{probeResult.endpoint}</span>
+                      </div>
+                      <div className="col-span-2 rounded-md border bg-muted/40 px-2 py-1">
+                        <span className="text-muted-foreground">提取结果</span>{" "}
+                        {probeResult.extractedUrl ? (
+                          <span className="font-mono text-green-600 dark:text-green-400">
+                            成功（命中 {probeResult.matchedExtractor}）
+                          </span>
+                        ) : (
+                          <span className="font-mono text-red-600 dark:text-red-400">
+                            未提取到图片
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {probeResult.error && (
+                      <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-900/50 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-400">
+                        {probeResult.error}
+                      </div>
+                    )}
+
+                    {probeResult.extractedUrl && (
+                      <div className="space-y-1.5">
+                        <div className="rounded-md border bg-muted/40 px-2 py-1.5 text-[11px] font-mono break-all">
+                          {probeResult.extractedUrl.startsWith("data:")
+                            ? `${probeResult.extractedUrl.slice(0, 80)}…（base64）`
+                            : probeResult.extractedUrl}
+                        </div>
+                        <img
+                          src={probeResult.extractedUrl}
+                          alt="probe-result"
+                          className="max-h-48 rounded-md border object-contain"
+                        />
+                      </div>
+                    )}
+
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] font-medium text-muted-foreground">
+                        请求体
+                      </Label>
+                      <pre className="text-[11px] font-mono whitespace-pre-wrap break-words overflow-x-auto max-w-full text-foreground/80 rounded-md border bg-muted/30 p-2.5">
+                        {sanitizeResponseForDisplay(probeResult.requestBody)}
+                      </pre>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] font-medium text-muted-foreground">
+                        上游原始响应（未提取）
+                      </Label>
+                      <pre className="text-[11px] font-mono whitespace-pre-wrap break-words overflow-x-auto max-w-full text-foreground/90 rounded-md border bg-muted/30 p-2.5">
+                        {sanitizeResponseForDisplay(probeResult.raw)}
+                      </pre>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </ScrollArea>
       </div>

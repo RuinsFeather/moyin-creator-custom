@@ -55,6 +55,17 @@ declare global {
       checkForUpdates: () => Promise<UpdateCheckResult>;
       openExternalLink: (url: string) => Promise<OpenExternalResult>;
     };
+    appNotification?: {
+      show: (options: {
+        title: string;
+        body?: string;
+        /** 点击通知/按钮时是否将主窗口带到前台，默认 true */
+        focusOnClick?: boolean;
+        silent?: boolean;
+        /** 通知上的按钮文案（如「打开软件」） */
+        actionText?: string;
+      }) => Promise<{ success: boolean; error?: string }>;
+    };
     imageHostUploader?: {
       upload: (payload: {
         provider: {

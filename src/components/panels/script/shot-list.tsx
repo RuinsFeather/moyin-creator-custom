@@ -43,6 +43,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { toast } from "sonner";
+import { notifyVideoGenerated } from "@/lib/notify";
 import { cn } from "@/lib/utils";
 import { getStyleTokens as getStyleTokensFromLib } from "@/lib/constants/visual-styles";
 
@@ -192,6 +193,7 @@ export function ShotList({ projectId, shots, styleId }: ShotListProps) {
         videoUrl,
       });
       toast.success(`镜头 ${shot.index} 视频生成完成`);
+      notifyVideoGenerated(`镜头 ${shot.index}`);
     } catch (error) {
       const err = error as Error;
       updateShot(projectId, shot.id, {

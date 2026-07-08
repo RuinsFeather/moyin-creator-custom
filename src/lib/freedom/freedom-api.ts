@@ -341,8 +341,7 @@ function resolveFreedomFeatureConfig(
   return { config: null, source: feature };
 }
 
-type FreedomImageRoute = 'midjourney' | 'ideogram' | 'kling_image' | 'gemini_native' | 'openai_chat' | 'openai_images' | 'replicate';
-
+export type FreedomImageRoute = 'midjourney' | 'ideogram' | 'kling_image' | 'gemini_native' | 'openai_chat' | 'openai_images' | 'replicate';
 function detectFreedomImageRoute(model: string, endpointTypes?: string[]): FreedomImageRoute {
   const lower = model.toLowerCase();
   const hasEndpoint = (re: RegExp) => (endpointTypes || []).some((t) => re.test(t));
@@ -1111,6 +1110,16 @@ async function generateViaChatCompletions(
   const imageUrl = extractChatCompletionsImage(data);
 
   if (!imageUrl) {
+    // 优先识别「上游内嵌失败文案」（HTTP 200 但内容是"生图失败/负载过高/已重试N次"等）。
+    // 这类是上游自身重试后仍失败，并非本地提取问题——透传真实失败原因，避免误导。
+    const failureReason = extractChatCompletionsFailureReason(data);
+    if (failureReason) {
+      console.warn('[Freedom] chat/completions 上游返回内嵌失败文案:', failureReason);
+      // 这类通常为上游重试失败（多数不计费成功），用普通 Error 抛出真实原因。
+      // 若原因文本已含"失败"字样则不再重复加前缀，避免"生图失败: 生图失败…"。
+      const message = /失败|failed/i.test(failureReason) ? failureReason : `生图失败: ${failureReason}`;
+      throw new Error(message);
+    }
     // 上游已返回 2xx（通常已扣费）但未能解析出图片：抛 Billed 错误，禁止外层回退再次付费请求。
     // 具体的原始响应结构已由 extractChatCompletionsImage 打印到 console，便于定位新格式。
     throw new FreedomBilledError('未能从聊天响应中提取图片 URL（上游已返回成功，请查看控制台日志确认返回格式）', response.status);
@@ -1119,6 +1128,71 @@ async function generateViaChatCompletions(
   const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image', params.projectId);
   params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
   return { url: imageUrl, mediaId };
+}
+
+/**
+ * 检测「聊天端点」返回体里的**上游内嵌失败文案**。
+ *
+ * 背景：大量 gpt-image 系列中转站在生图失败时，仍然返回 HTTP 200 + 正常的
+ * chat.completion 结构，但把失败信息塞进 `message.content` 文本里，例如：
+ *   "\n\n> 🎨 生成中...\n\n\n\n> ❌ 生图失败（已重试 3 次）: 当前模型负载较高，请稍候重试，或者切换其他模型\n"
+ * 此时既没有图片，也不是真正的「成功」。若仍按「未能提取图片 URL（上游已返回成功）」
+ * 报错，会误导用户以为是本地提取逻辑问题。这里把这类文案识别为**明确的上游失败**，
+ * 抽取出可读的失败原因透传给用户。
+ *
+ * @returns 命中失败文案时返回清洗后的失败原因；否则返回 null（可能是真的有图/其它格式）
+ */
+function extractChatCompletionsFailureReason(data: any): string | null {
+  // 汇总所有可能承载文本的位置
+  const choice = data?.choices?.[0];
+  const message = choice?.message ?? choice?.delta;
+  const texts: string[] = [];
+  const pushText = (v: unknown) => {
+    if (typeof v === 'string' && v.trim()) texts.push(v);
+  };
+  if (message) {
+    if (typeof message.content === 'string') pushText(message.content);
+    else if (Array.isArray(message.content)) {
+      for (const part of message.content) pushText(part?.text);
+    }
+    pushText(message.reasoning_content);
+    pushText(message.reasoning);
+  }
+  pushText(data?.content);
+  if (texts.length === 0) return null;
+
+  const combined = texts.join('\n');
+
+  // 若文本里其实**包含图片/URL/base64**，则不当作失败（交给正常提取逻辑）
+  if (imageFromText(combined)) return null;
+
+  // 失败关键字（中英文）：命中即视为上游明确失败
+  const FAILURE_PATTERNS: RegExp[] = [
+    /生图失败/, /生成失败/, /图片生成失败/, /绘图失败/,
+    /失败[（(]已重试/, /已重试\s*\d+\s*次/,
+    /模型负载(较高)?/, /负载过高/, /请稍[候后]重试/, /稍后重试/,
+    /切换其?他模型/, /当前不可用/, /暂不可用/, /服务繁忙/,
+    /generation\s+failed/i, /failed\s+to\s+generate/i, /image\s+generation\s+failed/i,
+    /model\s+(is\s+)?overloaded/i, /overloaded/i, /rate\s*limit/i,
+    /please\s+(try|retry)\s+again/i, /try\s+again\s+later/i,
+    /❌/, /⚠️\s*(失败|error|failed)/i,
+  ];
+  const isFailure = FAILURE_PATTERNS.some((re) => re.test(combined));
+  if (!isFailure) return null;
+
+  // 提炼可读原因：优先取带有 ❌ / 失败 / failed 的那一行，去掉 markdown 引用符号与表情
+  const lines = combined
+    .split(/\r?\n/)
+    .map((l) => l.replace(/^\s*>+\s*/, '').trim()) // 去掉 markdown 引用前缀
+    .filter(Boolean);
+  const failureLine =
+    lines.find((l) => /❌|生图失败|生成失败|failed|overloaded|负载|重试/i.test(l)) ||
+    lines[lines.length - 1] ||
+    combined.trim();
+
+  // 清洗：去掉前导 emoji/符号
+  const reason = failureLine.replace(/^[❌⚠️🎨✅\s:：]+/, '').trim() || failureLine.trim();
+  return reason || '上游生图失败';
 }
 
 /**
@@ -1179,6 +1253,12 @@ function extractChatCompletionsImage(data: any): string | null {
       }
     }
   }
+
+  // Format 7: 标准 images 结构兜底（gpt-image 系列常把 data:[{url|b64_json}] 直接混入 chat 端点响应）
+  //   例如 { data: [{ b64_json: '...' }] } 或 { data: [{ url: '...' }] } 或顶层 url/output。
+  //   复用 extractImageUrl 覆盖 data[0].url / data[0].b64_json / url / output 等 OpenAI 官方形态。
+  const imagesEndpointHit = extractImageUrl(data);
+  if (imagesEndpointHit) return imagesEndpointHit;
 
   // 提取失败：打印真实响应结构，便于定位新的返回格式（上游已扣费的关键排查信息）
   try {
@@ -2177,6 +2257,174 @@ export async function queryFreedomTaskById(options: {
   }
 
   return { status, pollUrl, route, resultUrl, mediaType, raw, httpStatus };
+}
+
+// ==================== 图片同步生成探针（Debug） ====================
+
+export interface FreedomImageProbeResult {
+  /** 命中的图片路由 */
+  route: FreedomImageRoute;
+  /** 实际请求地址 */
+  endpoint: string;
+  /** 发送的请求体（用于核对下发字段） */
+  requestBody: unknown;
+  /** HTTP 状态码 */
+  httpStatus: number;
+  /** 服务端原始响应（已解析或原始文本） */
+  raw: unknown;
+  /** 用当前提取逻辑尝试提取到的图片链接（成功=已能正确解析） */
+  extractedUrl?: string;
+  /** 命中提取的提取器名称，便于定位是哪种格式 */
+  matchedExtractor?: string;
+  /** 失败/异常时的说明 */
+  error?: string;
+}
+
+/**
+ * 图片「手动查询结果」探针：用真实的「自由板块-图片」配置与路由，
+ * 对同步生图模型（gpt-image / gemini / chat 多模态等）发起一次真实生成请求，
+ * 返回**未经提取的完整原始响应** + 各提取器诊断。
+ *
+ * 用途：当出现「未能从聊天/Gemini 响应中提取图片」但上游已扣费成功时，
+ * 借此看到该模型经中转站返回的真实结构，从而定位/修复提取逻辑。
+ *
+ * 注意：这会真实发起一次生成（可能扣费）。仅供调试使用。
+ */
+export async function probeFreedomImageResponse(options: {
+  /** 模型 ID（如 gpt-image-2）。留空则用「自由板块-图片」默认模型 */
+  model?: string;
+  /** 提示词，默认一段安全的通用提示 */
+  prompt?: string;
+  /** 宽高比，默认 1:1 */
+  aspectRatio?: string;
+  /** 分辨率档位（如 1k/2k），默认 1k */
+  resolution?: string;
+  /** 强制指定路由（留空则自动检测） */
+  forceRoute?: FreedomImageRoute;
+  signal?: AbortSignal;
+}): Promise<FreedomImageProbeResult> {
+  const { config } = resolveFreedomFeatureConfig('freedom_image', 'character_generation', options.model);
+  if (!config) {
+    throw new Error('未找到「自由板块-图片」的 API 配置。请先在设置中配置图片服务映射');
+  }
+
+  const model = options.model || config.model;
+  if (!model) throw new Error('请填写模型 ID');
+  const baseUrl = (config.baseUrl || '').replace(/\/+$/, '');
+  const apiKey = config.keyManager?.getCurrentKey?.() || config.apiKey || '';
+  const prompt = options.prompt?.trim() || 'A cute corgi puppy sitting on green grass, soft daylight, high detail';
+  const aspectRatio = options.aspectRatio || '1:1';
+  const resolution = options.resolution || '1k';
+
+  const endpointTypes = useAPIConfigStore.getState().modelEndpointTypes[model];
+  const route = options.forceRoute || detectFreedomImageRoute(model, endpointTypes);
+
+  // 依路由构造与真实生图一致的请求体与地址
+  let endpoint = '';
+  let requestBody: Record<string, any> = {};
+  const authHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${apiKey}`,
+  };
+
+  if (route === 'gemini_native') {
+    const rootBase = getRootBaseUrl(baseUrl);
+    const supportsImageSize = geminiSupportsImageSize(model);
+    const imageConfig: Record<string, any> = { aspectRatio };
+    if (supportsImageSize) imageConfig.imageSize = normalizeGeminiImageSize(resolution);
+    requestBody = {
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: { responseModalities: ['IMAGE'], imageConfig },
+    };
+    endpoint = `${rootBase}/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+    authHeaders['x-goog-api-key'] = apiKey;
+  } else if (route === 'openai_chat') {
+    endpoint = buildEndpoint(baseUrl, 'chat/completions');
+    const isGemini = isGeminiImageModel(model);
+    const isGptImage = isGptImageModelId(model);
+    requestBody = {
+      model,
+      messages: [{ role: 'user', content: prompt }],
+    };
+    if (isGemini) {
+      requestBody.aspectRatio = aspectRatio;
+      if (geminiSupportsImageSize(model)) requestBody.imageSize = normalizeGeminiImageSize(resolution);
+    } else if (isGptImage) {
+      requestBody.size = normalizeGptImageSize(aspectRatio, resolution);
+    } else {
+      const sized = aspectRatioToSize(aspectRatio, resolution);
+      if (sized) requestBody.size = sized.size;
+      requestBody.aspect_ratio = aspectRatio;
+    }
+  } else {
+    // openai_images 及其它默认走标准 images 端点
+    const imagePaths = getImageEndpointPaths(endpointTypes || []);
+    const rootBase = getRootBaseUrl(baseUrl);
+    endpoint = `${rootBase}${imagePaths.submit}`;
+    const isGptImage = isGptImageModelId(model);
+    requestBody = { prompt, model };
+    if (aspectRatio && aspectRatio !== 'auto') requestBody.aspect_ratio = aspectRatio;
+    if (isGptImage) {
+      requestBody.size = normalizeGptImageSize(aspectRatio, resolution);
+    } else {
+      requestBody.resolution = resolution;
+      const sized = aspectRatioToSize(aspectRatio, resolution);
+      if (sized) { requestBody.size = sized.size; requestBody.width = sized.width; requestBody.height = sized.height; }
+    }
+  }
+
+  console.log('[Freedom][Probe] Sending probe request:', { model, route, endpoint });
+  const response = await corsFetch(endpoint, {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify(requestBody),
+    signal: options.signal,
+  });
+  const httpStatus = response.status;
+  const text = await response.text();
+  let raw: unknown = text;
+  try { raw = JSON.parse(text); } catch { /* 保留原始文本 */ }
+
+  if (!response.ok) {
+    return {
+      route, endpoint, requestBody, httpStatus, raw,
+      error: `请求失败：HTTP ${httpStatus}`,
+    };
+  }
+
+  // 依路由用对应提取器诊断（同时给出「能否提取到图片」的结论）
+  const data = raw as any;
+  let extractedUrl: string | null = null;
+  let matchedExtractor: string | undefined;
+  if (route === 'gemini_native') {
+    extractedUrl = extractGeminiImage(data);
+    if (extractedUrl) matchedExtractor = 'extractGeminiImage';
+  } else {
+    extractedUrl = extractChatCompletionsImage(data);
+    if (extractedUrl) matchedExtractor = 'extractChatCompletionsImage';
+    if (!extractedUrl) {
+      extractedUrl = extractImageUrl(data);
+      if (extractedUrl) matchedExtractor = 'extractImageUrl(images 端点格式)';
+    }
+  }
+
+  // 未提取到图片时，区分「上游内嵌失败文案」与「提取规则缺失」，给出更准确的诊断
+  let diagnosisError: string | undefined;
+  if (!extractedUrl) {
+    const failureReason = route === 'gemini_native'
+      ? extractGeminiErrorReason(data)
+      : (extractChatCompletionsFailureReason(data) ?? extractGeminiErrorReason(data));
+    diagnosisError = failureReason
+      ? `上游返回 HTTP ${httpStatus}，但内容是失败信息（并非真正生成了图片）：${failureReason}`
+      : '当前提取逻辑未能从响应中解析出图片（请把上面的原始响应结构反馈给开发者以补充解析规则）';
+  }
+
+  return {
+    route, endpoint, requestBody, httpStatus, raw,
+    extractedUrl: extractedUrl || undefined,
+    matchedExtractor,
+    error: diagnosisError,
+  };
 }
 
 /**
