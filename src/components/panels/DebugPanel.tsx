@@ -18,6 +18,64 @@ import { useFreedomTaskStore } from "@/stores/freedom-task-store";
 import type { PersistedFreedomTask } from "@/stores/freedom-task-store";
 import { useProjectStore } from "@/stores/project-store";
 
+/** 单个字符串字段超过此长度即视为「超长内容」（base64 图片/视频数据等），展示时截断 */
+const LONG_STRING_LIMIT = 512;
+/** 整体展示文本的最大长度上限，避免 DOM 渲染超大文本导致卡死/撕裂 */
+const MAX_DISPLAY_LENGTH = 200_000;
+
+/** 从超长字符串里提取可读摘要（保留首尾片段 + 长度），并标注疑似类型 */
+function summarizeLongString(value: string): string {
+  const len = value.length;
+  let kind = "长文本";
+  if (/^data:[^;]+;base64,/.test(value)) kind = "DataURL(base64)";
+  else if (/^[A-Za-z0-9+/=\s]+$/.test(value.slice(0, 128)) && len > 1024) kind = "疑似 base64 数据";
+  const head = value.slice(0, 48).replace(/\s+/g, "");
+  return `‹${kind} 已省略 · 长度=${len} · 头部="${head}…"›`;
+}
+
+/**
+ * 递归清洗响应对象：把超长字符串字段替换为摘要，防止 base64 图片数据撑爆 DOM。
+ * 返回适合在 <pre> 中安全展示的字符串。
+ */
+function sanitizeResponseForDisplay(raw: unknown): string {
+  const walk = (node: any): any => {
+    if (typeof node === "string") {
+      return node.length > LONG_STRING_LIMIT ? summarizeLongString(node) : node;
+    }
+    if (Array.isArray(node)) return node.map(walk);
+    if (node && typeof node === "object") {
+      const out: Record<string, any> = {};
+      for (const [k, v] of Object.entries(node)) out[k] = walk(v);
+      return out;
+    }
+    return node;
+  };
+
+  let text: string;
+  if (typeof raw === "string") {
+    // 纯文本响应：先尝试解析为 JSON，成功则走对象清洗，失败则按纯文本处理
+    try {
+      text = JSON.stringify(walk(JSON.parse(raw)), null, 2);
+    } catch {
+      text =
+        raw.length > LONG_STRING_LIMIT * 4 ? summarizeLongString(raw) : raw;
+    }
+  } else {
+    try {
+      text = JSON.stringify(walk(raw), null, 2);
+    } catch {
+      text = String(raw);
+    }
+  }
+
+  if (text.length > MAX_DISPLAY_LENGTH) {
+    text =
+      text.slice(0, MAX_DISPLAY_LENGTH) +
+      `\n\n…（响应过长，已截断，仅展示前 ${MAX_DISPLAY_LENGTH} 字符）`;
+  }
+  return text;
+}
+
 /**
  * Debug 面板：直接使用 JSON 请求体调用模型 API 进行测试。
  * 替代原来的"帮助"外链，方便开发者在应用内快速调试接口。
@@ -39,6 +97,7 @@ export function DebugPanel() {
     )
   );
   const [response, setResponse] = useState("");
+  const [rawResponse, setRawResponse] = useState("");
   const [loading, setLoading] = useState(false);
   const [elapsed, setElapsed] = useState<number | null>(null);
   const [statusCode, setStatusCode] = useState<number | null>(null);
@@ -68,9 +127,9 @@ export function DebugPanel() {
 
     setLoading(true);
     setResponse("");
+    setRawResponse("");
     setStatusCode(null);
     setElapsed(null);
-
     const controller = new AbortController();
     abortRef.current = controller;
     const startTime = Date.now();
@@ -87,13 +146,10 @@ export function DebugPanel() {
       const text = await resp.text();
       setElapsed(Date.now() - startTime);
 
-      // 尝试格式化 JSON
-      try {
-        const json = JSON.parse(text);
-        setResponse(JSON.stringify(json, null, 2));
-      } catch {
-        setResponse(text);
-      }
+      // 保留完整原始文本供「复制」使用；展示用经过脱敏/截断处理，
+      // 避免 Gemini 生图等返回的超长 base64 数据撑爆 DOM 导致窗口撕裂。
+      setRawResponse(text);
+      setResponse(sanitizeResponseForDisplay(text));
     } catch (err: any) {
       setElapsed(Date.now() - startTime);
       if (err?.name === "AbortError") {
@@ -112,14 +168,17 @@ export function DebugPanel() {
   }, []);
 
   const handleCopyResponse = useCallback(() => {
-    if (response) {
-      navigator.clipboard.writeText(response);
+    // 复制完整原始响应（含被省略展示的 base64），展示区仅为防撕裂的精简版
+    const toCopy = rawResponse || response;
+    if (toCopy) {
+      navigator.clipboard.writeText(toCopy);
       toast.success("已复制响应内容");
     }
-  }, [response]);
+  }, [rawResponse, response]);
 
   const handleClear = useCallback(() => {
     setResponse("");
+    setRawResponse("");
     setStatusCode(null);
     setElapsed(null);
   }, []);
@@ -372,7 +431,7 @@ export function DebugPanel() {
             </div>
           </div>
           <ScrollArea className="flex-1">
-            <pre className="p-4 text-xs font-mono whitespace-pre-wrap break-all text-foreground/90">
+            <pre className="p-4 text-xs font-mono whitespace-pre-wrap break-words overflow-x-auto max-w-full text-foreground/90">
               {response || (loading ? "等待响应…" : "点击「发送请求」查看结果")}
             </pre>
           </ScrollArea>
@@ -420,9 +479,7 @@ function TaskQuerySection(props: TaskQuerySectionProps) {
   } = props;
 
   const rawText = taskResult
-    ? typeof taskResult.raw === "string"
-      ? taskResult.raw
-      : JSON.stringify(taskResult.raw, null, 2)
+    ? sanitizeResponseForDisplay(taskResult.raw)
     : "";
 
   // 仅展示带有服务端任务 ID / pollUrl 的历史任务，便于一键回填
@@ -604,7 +661,7 @@ function TaskQuerySection(props: TaskQuerySectionProps) {
 
             <div className="space-y-2">
               <Label className="text-xs font-medium">原始响应</Label>
-              <pre className="text-xs font-mono whitespace-pre-wrap break-all text-foreground/90 rounded-md border bg-muted/30 p-3">
+              <pre className="text-xs font-mono whitespace-pre-wrap break-words overflow-x-auto max-w-full text-foreground/90 rounded-md border bg-muted/30 p-3">
                 {rawText || (taskLoading ? "查询中…" : "点击「查询任务」查看结果")}
               </pre>
             </div>

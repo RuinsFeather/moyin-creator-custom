@@ -156,6 +156,29 @@ function isRetryableError(error: unknown): boolean {
 }
 
 /**
+ * 判定「网关超时」类错误：504(Gateway Timeout) / 524(Cloudflare Timeout) / 522。
+ * 这类错误的语义是：请求已转发给上游、上游正在生成（很可能已扣费），只是网关在
+ * 结果返回前超时。对同步生成接口（如 Gemini 原生 generateContent）而言，
+ * 自动重试会重新提交请求 → 二次扣费，且若模型生成耗时恒定超过网关窗口则每次都超时，
+ * 因此**不应自动重试**，而应把准确原因透传给用户，由用户决定降分辨率或稍后手动重试。
+ * 同时基于 HTTP 状态码与响应体文本双重判定，兼容中转站把网关超时包成
+ * OpenAI 错误信封（openai_error / bad_response_status_code）或非标准状态码的情形。
+ */
+function isGatewayTimeout(status?: number, bodyText?: string): boolean {
+  if (status === 504 || status === 524 || status === 522) return true;
+  const t = (bodyText || '').toLowerCase();
+  if (!t) return false;
+  return (
+    /\b(504|524|522)\b/.test(t) ||
+    t.includes('gateway timeout') ||
+    t.includes('gateway time-out') ||
+    t.includes('结果确认超时') ||
+    t.includes('确认超时') ||
+    (t.includes('timeout') && t.includes('gateway'))
+  );
+}
+
+/**
  * Retry an operation with exponential backoff for retryable errors.
  * 支持 keyManager：遇到可重试错误时先触发 key 轮换，下次重试自动使用新 key。
  */
@@ -706,23 +729,149 @@ async function urlToGeminiInlineData(
  * 从 Gemini generateContent 响应中提取图片
  * 返回 dataURL（inlineData）或 http(s) URL
  */
-function extractGeminiImage(data: any): string | null {
-  const parts = data?.candidates?.[0]?.content?.parts;
-  if (!Array.isArray(parts)) return null;
-  for (const part of parts) {
-    // 原生 camelCase
-    if (part.inlineData?.data) {
-      const mime = part.inlineData.mimeType || 'image/png';
-      return `data:${mime};base64,${part.inlineData.data}`;
+/**
+ * 从字符串里尽力抓图（markdown 图片、裸 http(s) URL、data:base64、无前缀 base64）。
+ * 模块级共享，供 Gemini 原生与 chat/completions 两条提取路径复用。
+ */
+function imageFromText(text: unknown): string | null {
+  if (typeof text !== 'string' || !text) return null;
+  // markdown 图片: ![alt](url)
+  const mdMatch = text.match(/!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/i);
+  if (mdMatch) return mdMatch[1];
+  // data:image;base64
+  const dataUrlMatch = text.match(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+/);
+  if (dataUrlMatch) return dataUrlMatch[0].replace(/\s+/g, '');
+  // 裸 http(s) 图片链接（含常见图片后缀或图床/oss 域名）
+  const urlMatch = text.match(/https?:\/\/[^\s"')\]]+/i);
+  if (urlMatch) {
+    const u = urlMatch[0];
+    if (/\.(png|jpe?g|webp|gif|bmp|avif)(\?|$)/i.test(u) || /(image|img|oss|cdn|cos|obs|aliyun|bce|s3|storage|file|media)/i.test(u)) {
+      return u;
     }
-    // snake_case 兜底
-    if (part.inline_data?.data) {
-      const mime = part.inline_data.mime_type || part.inline_data.mimeType || 'image/png';
-      return `data:${mime};base64,${part.inline_data.data}`;
-    }
-    if (part.fileData?.fileUri) return part.fileData.fileUri;
-    if (part.file_data?.file_uri) return part.file_data.file_uri;
+    // 兜底：内容里只有一个 URL 时也认为它就是图片
+    if (text.trim() === u) return u;
   }
+  // 无前缀的超长 base64（>256 视为图片数据）
+  const rawB64 = text.match(/[A-Za-z0-9+/]{256,}={0,2}/);
+  if (rawB64) return `data:image/png;base64,${rawB64[0]}`;
+  return null;
+}
+
+/**
+ * 在任意 part / 对象里找图片字段（含 Gemini 原生 inlineData/fileData 与各类中转站字段）。
+ * 模块级共享，供 Gemini 原生与 chat/completions 两条提取路径复用。
+ */
+function imageFromPart(part: any): string | null {
+  if (!part || typeof part !== 'object') return null;
+  if (part.image_url?.url) return part.image_url.url;
+  if (typeof part.image_url === 'string') return part.image_url;
+  if (part.image?.url) return part.image.url;
+  if (typeof part.image === 'string' && part.image) {
+    return /^https?:\/\//i.test(part.image) || part.image.startsWith('data:')
+      ? part.image
+      : `data:image/png;base64,${part.image}`;
+  }
+  if (part.url && /^https?:\/\//i.test(part.url)) return part.url;
+  if (part.b64_json) return `data:image/png;base64,${part.b64_json}`;
+  // Gemini 原生结构 camelCase
+  if (part.inlineData?.data) {
+    return `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
+  }
+  // snake_case 兜底
+  if (part.inline_data?.data) {
+    return `data:${part.inline_data.mime_type || part.inline_data.mimeType || 'image/png'};base64,${part.inline_data.data}`;
+  }
+  // 文件 URI（Gemini fileData）
+  if (part.fileData?.fileUri) return part.fileData.fileUri;
+  if (part.file_data?.file_uri) return part.file_data.file_uri;
+  if (part.data && typeof part.data === 'string' && (part.type === 'image' || part.type === 'image_url')) {
+    return part.data.startsWith('data:') ? part.data : `data:image/png;base64,${part.data}`;
+  }
+  return null;
+}
+
+/**
+ * 从 Gemini 原生 generateContent 响应中提取图片。
+ *
+ * 注意：gemini-3.1-flash-image 等模型经不同中转站返回时，图片可能出现在：
+ *   - candidates[i].content.parts[].inlineData / fileData（官方标准）
+ *   - parts[].text 里的 markdown 图 / 裸 URL / base64（中转站常见）
+ *   - 非首个 candidate（candidates[1..]）
+ *   - parts[].image_url / b64_json 等被归一化的字段
+ *   - 顶层 images / data / output / artifacts 数组（中转站归一化）
+ * 因此这里遍历「全部 candidates 的全部 parts」并复用共享提取器，最后兜底扫顶层数组，
+ * 避免上游已生成（已扣费）却因结构差异被误判为「未能提取图片」。
+ */
+function extractGeminiImage(data: any): string | null {
+  const candidates = data?.candidates;
+  if (Array.isArray(candidates)) {
+    for (const candidate of candidates) {
+      const parts = candidate?.content?.parts ?? candidate?.content?.[0]?.parts;
+      if (Array.isArray(parts)) {
+        for (const part of parts) {
+          const hit = imageFromPart(part) || imageFromText(part?.text);
+          if (hit) return hit;
+        }
+      }
+    }
+  }
+
+  // 兜底：顶层 images / data / output / artifacts 数组（部分中转站归一化到此）
+  for (const arrKey of ['images', 'data', 'output', 'artifacts'] as const) {
+    const arr = (data as any)?.[arrKey];
+    if (Array.isArray(arr)) {
+      for (const item of arr) {
+        const hit = imageFromPart(item) || (typeof item === 'string' ? imageFromText(item) : null);
+        if (hit) return hit;
+      }
+    }
+  }
+
+  return null;
+}
+
+const GEMINI_SAFETY_FINISH_REASONS = new Set([
+  'SAFETY',
+  'IMAGE_SAFETY',
+  'PROHIBITED_CONTENT',
+  'BLOCKLIST',
+  'SPII',
+  'RECITATION',
+]);
+
+/**
+ * 从「HTTP 200 但 body 实际携带错误/安全拦截信息」的 Gemini 响应中提取真实原因。
+ * 很多中转站会把上游的 403/4xx 错误包在 200 响应体里返回，
+ * 或者 Gemini 官方在触发安全策略时仍返回 200 但 candidates 为空/finishReason=SAFETY。
+ * 命中时返回可读的错误信息；未命中返回 null（表示不是错误，继续走正常提取逻辑）。
+ */
+function extractGeminiErrorReason(data: any): string | null {
+  // Case 1: 顶层显式 error 对象（部分中转站用 200 状态码包裹上游错误）
+  const topError = data?.error;
+  if (topError && (topError.message || topError.status || topError.code)) {
+    const parts = [topError.message, topError.status ? `status=${topError.status}` : null, topError.code ? `code=${topError.code}` : null]
+      .filter(Boolean);
+    return parts.join(' ') || 'Gemini 返回了错误响应';
+  }
+
+  // Case 2: promptFeedback.blockReason（请求整体被安全策略拦截，通常没有 candidates）
+  const blockReason = data?.promptFeedback?.blockReason || data?.prompt_feedback?.block_reason;
+  if (blockReason) {
+    const msg = data?.promptFeedback?.blockReasonMessage || data?.prompt_feedback?.block_reason_message;
+    return `请求被安全策略拦截: ${blockReason}${msg ? ` (${msg})` : ''}`;
+  }
+
+  // Case 3: candidates 存在但因安全原因未产出内容
+  const candidate = data?.candidates?.[0];
+  const finishReason = candidate?.finishReason || candidate?.finish_reason;
+  if (finishReason && GEMINI_SAFETY_FINISH_REASONS.has(String(finishReason).toUpperCase())) {
+    const ratings = candidate?.safetyRatings || candidate?.safety_ratings;
+    const ratingMsg = Array.isArray(ratings) && ratings.length > 0
+      ? ` (${ratings.map((r: any) => `${r.category}:${r.probability}`).join(', ')})`
+      : '';
+    return `生成的图片被判定为不安全内容 (finishReason=${finishReason})${ratingMsg}`;
+  }
+
   return null;
 }
 
@@ -796,6 +945,21 @@ async function generateViaGeminiNative(
 
   if (!response.ok) {
     const errorText = await response.text();
+    // 504(网关超时)/524(Cloudflare 边缘超时)：上游同步生成接口耗时超过网关等待窗口。
+    // gemini-3-pro-image 等高质量模型在 2K/4K 下生成较慢，中转站到 Google 的连接常触发
+    // 网关超时——此时「上游其实已在生成甚至已完成（已扣费）」，只是结果未能在超时前送达。
+    // 绝不能自动重试整个操作（会重新提交、二次扣费，且大概率同样超时），
+    // 因此抛 FreedomBilledError 让外层直接终止，并给出可操作的中文指引。
+    if (isGatewayTimeout(response.status, errorText)) {
+      console.warn('[Freedom] Gemini native gateway timeout:', response.status, errorText.slice(0, 300));
+      throw new FreedomBilledError(
+        `生图请求网关超时（HTTP ${response.status}）。所选模型（如 gemini-3-pro-image）生成较慢，` +
+        `上游可能已完成生成（并已计费）但结果未能在超时前返回。建议：` +
+        `①降低分辨率（如从 4K/2K 改为 1K）以缩短生成时间；②稍后重试；` +
+        `③若上游已扣费成功，可在「调试面板→任务查询」用任务 ID 找回结果，避免重复生成。`,
+        response.status,
+      );
+    }
     let msg = `Gemini native API 错误: ${response.status}`;
     try { const j = JSON.parse(errorText); msg = j.error?.message || msg; } catch {}
     throw toHttpError(msg, response.status, errorText);
@@ -803,9 +967,30 @@ async function generateViaGeminiNative(
 
   params.onProgress?.({ phase: 'finalizing', percent: 90, message: '解析结果…' });
   const data = await response.json();
+
+  // 关键：很多中转站会把上游 4xx（尤其 403 内容安全拦截）包在 HTTP 200 响应体里返回，
+  // 或 Gemini 官方触发安全策略时返回 200 但无图片。先检测真实错误原因并透传给用户，
+  // 避免误报为「未能从 Gemini 响应中提取图片」。
+  const errorReason = extractGeminiErrorReason(data);
+  if (errorReason) {
+    console.warn('[Freedom] Gemini native returned error/safety reason in body:', errorReason);
+    // 内容安全 / 上游错误：不回退到 chat/completions（重试或换端点通常同样被拦截）。
+    // 用 FreedomBilledError 让外层直接终止而不重试，并把真实原因透传给用户。
+    throw new FreedomBilledError(`Gemini 生图失败: ${errorReason}`, response.status);
+  }
+
   const imageUrl = extractGeminiImage(data);
   if (!imageUrl) {
-    console.warn('[Freedom] Gemini response without image:', JSON.stringify(data).slice(0, 500));
+    // 提取失败：打印真实响应结构（长字符串截断），便于定位新的返回格式——
+    // 这是「上游已扣费却提取不到图」的关键排查信息。
+    try {
+      const preview = JSON.stringify(data, (_k, v) =>
+        typeof v === 'string' && v.length > 300 ? `${v.slice(0, 300)}…(len=${v.length})` : v,
+      );
+      console.error('[Freedom] 未能从 Gemini 响应中提取图片，原始响应结构:', preview?.slice(0, 4000));
+    } catch {
+      console.error('[Freedom] 未能从 Gemini 响应中提取图片，且响应无法序列化');
+    }
     // 上游已返回 2xx（已扣费），仅是解析未拿到图片；标记为「已扣费」错误，
     // 外层禁止回退到 chat/completions，避免二次扣费。
     throw new FreedomBilledError('未能从 Gemini 响应中提取图片（上游已返回结果，请检查该模型是否为图片生成模型或稍后重试）', response.status);
@@ -906,17 +1091,29 @@ async function generateViaChatCompletions(
 
   if (!response.ok) {
     const errorText = await response.text();
+    // 网关超时（504/524）：上游生成较慢导致确认超时，可能已扣费。
+    // 禁止自动重试/回退（避免二次扣费），透传可操作提示。
+    if (isGatewayTimeout(response.status, errorText)) {
+      console.warn('[Freedom] chat/completions gateway timeout:', response.status, errorText.slice(0, 300));
+      throw new FreedomBilledError(
+        `生图请求网关超时（HTTP ${response.status}）。所选模型生成较慢，` +
+        `上游可能已完成生成（并已计费）但结果未能在超时前返回。建议：` +
+        `①降低分辨率以缩短生成时间；②稍后重试；` +
+        `③若上游已扣费成功，可在「调试面板→任务查询」用任务 ID 找回结果，避免重复生成。`,
+        response.status,
+      );
+    }
     let msg = `图片生成 API 错误: ${response.status}`;
     try { const j = JSON.parse(errorText); msg = j.error?.message || msg; } catch {}
     throw toHttpError(msg, response.status, errorText);
   }
-
-  params.onProgress?.({ phase: 'finalizing', percent: 90, message: '解析结果…' });
   const data = await response.json();
   const imageUrl = extractChatCompletionsImage(data);
 
   if (!imageUrl) {
-    throw new Error('未能从聊天响应中提取图片 URL');
+    // 上游已返回 2xx（通常已扣费）但未能解析出图片：抛 Billed 错误，禁止外层回退再次付费请求。
+    // 具体的原始响应结构已由 extractChatCompletionsImage 打印到 console，便于定位新格式。
+    throw new FreedomBilledError('未能从聊天响应中提取图片 URL（上游已返回成功，请查看控制台日志确认返回格式）', response.status);
   }
 
   const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image', params.projectId);
@@ -928,32 +1125,69 @@ async function generateViaChatCompletions(
  * Extract image URL from chat completions response (multiple formats)
  */
 function extractChatCompletionsImage(data: any): string | null {
-  const choice = data.choices?.[0];
-  if (!choice) return null;
+  // 复用模块级共享提取器（与 Gemini 原生路径保持一致的解析能力）
+  const fromText = imageFromText;
+  const fromPart = imageFromPart;
 
-  const message = choice.message;
+  const choice = data?.choices?.[0];
+  const message = choice?.message ?? choice?.delta;
 
-  // Format 1: content is array with image parts (OpenAI multimodal)
-  if (Array.isArray(message?.content)) {
-    for (const part of message.content) {
-      if (part.type === 'image_url' && part.image_url?.url) {
-        return part.image_url.url;
+  if (message) {
+    // Format 1: content 是数组（OpenAI 多模态）
+    if (Array.isArray(message.content)) {
+      for (const part of message.content) {
+        const hit = fromPart(part) || fromText(part?.text);
+        if (hit) return hit;
       }
-      if (part.type === 'image' && part.image?.url) {
-        return part.image.url;
+    }
+
+    // Format 2: message.images[]（OpenRouter / 大量 Gemini 图片中转站）
+    if (Array.isArray(message.images)) {
+      for (const img of message.images) {
+        const hit = fromPart(img) || (typeof img === 'string' ? fromText(img) : null);
+        if (hit) return hit;
       }
-      if (part.type === 'image' && part.data) {
-        return `data:image/png;base64,${part.data}`;
+    }
+
+    // Format 3: content 是字符串（markdown / 裸 URL / base64）
+    if (typeof message.content === 'string') {
+      const hit = fromText(message.content);
+      if (hit) return hit;
+    }
+
+    // Format 4: 部分中转把图塞进 reasoning_content
+    const reasoningHit = fromText(message.reasoning_content) || fromText(message.reasoning);
+    if (reasoningHit) return reasoningHit;
+  }
+
+  // Format 5: Gemini 原生 candidates 结构透传到 chat 响应
+  const geminiParts = data?.candidates?.[0]?.content?.parts;
+  if (Array.isArray(geminiParts)) {
+    for (const part of geminiParts) {
+      const hit = fromPart(part) || fromText(part?.text);
+      if (hit) return hit;
+    }
+  }
+
+  // Format 6: 顶层 images / data 数组（部分中转把图放这里）
+  for (const arrKey of ['images', 'data', 'output', 'artifacts'] as const) {
+    const arr = (data as any)?.[arrKey];
+    if (Array.isArray(arr)) {
+      for (const item of arr) {
+        const hit = fromPart(item) || (typeof item === 'string' ? fromText(item) : null);
+        if (hit) return hit;
       }
     }
   }
 
-  // Format 2: content is string with markdown image link or base64
-  if (typeof message?.content === 'string') {
-    const mdMatch = message.content.match(/!\[.*?\]\((https?:\/\/[^)]+)\)/);
-    if (mdMatch) return mdMatch[1];
-    const b64Match = message.content.match(/(data:image\/[^;]+;base64,[A-Za-z0-9+/=]+)/);
-    if (b64Match) return b64Match[1];
+  // 提取失败：打印真实响应结构，便于定位新的返回格式（上游已扣费的关键排查信息）
+  try {
+    const preview = JSON.stringify(data, (_k, v) =>
+      typeof v === 'string' && v.length > 300 ? `${v.slice(0, 300)}…(len=${v.length})` : v,
+    );
+    console.error('[Freedom] 未能从聊天响应中提取图片 URL，原始响应结构:', preview?.slice(0, 4000));
+  } catch {
+    console.error('[Freedom] 未能从聊天响应中提取图片 URL，且响应无法序列化');
   }
 
   return null;
