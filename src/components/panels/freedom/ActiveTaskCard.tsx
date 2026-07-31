@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from 'react';
-import { Loader2, StopCircle, X, CheckCircle2, AlertCircle, VideoIcon } from 'lucide-react';
+import { Loader2, StopCircle, X, CheckCircle2, AlertCircle, VideoIcon, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
@@ -13,13 +13,18 @@ interface ActiveTaskCardProps {
   onSelect?: () => void;
   onCancel?: () => void;
   onDismiss?: () => void;
+  /**
+   * 「重新查询」：仅在任务已失败/中断且持久层仍保留上游 taskId 时提供。
+   * 用于断网导致查询链断开、但上游已生成完成的场景，避免白花的 token。
+   */
+  onRetryQuery?: () => void;
 }
 
 /**
  * 进行中 / 已完成的任务小窗，显示在历史栏顶部。
  * 点击卡片可在主预览区查看进度；运行中可取消，结束后可关闭。
  */
-export function ActiveTaskCard({ task, selected, onSelect, onCancel, onDismiss }: ActiveTaskCardProps) {
+export function ActiveTaskCard({ task, selected, onSelect, onCancel, onDismiss, onRetryQuery }: ActiveTaskCardProps) {
   const running = task.status === 'running' || task.status === 'cancelling';
   const isError = task.status === 'error';
   const isDone = task.status === 'done';
@@ -121,6 +126,22 @@ export function ActiveTaskCard({ task, selected, onSelect, onCancel, onDismiss }
               已等待 {elapsedText}
             </span>
           </div>
+        </div>
+      )}
+
+      {/* 失败/中断任务的「重新查询」入口：上游可能已生成完成，可直接领取结果 */}
+      {isError && onRetryQuery && (
+        <div className="px-2 pb-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 w-full text-[11px]"
+            onClick={(e) => { e.stopPropagation(); onRetryQuery(); }}
+            title="用已保存的任务 ID 重新向上游查询结果"
+          >
+            <RefreshCw className="h-3 w-3 mr-1.5" />
+            重新查询结果
+          </Button>
         </div>
       )}
 

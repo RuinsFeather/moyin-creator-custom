@@ -20,8 +20,9 @@ import { useAPIConfigStore } from '@/stores/api-config-store';
 import { ModelSelector } from './ModelSelector';
 import { GenerationHistory } from './GenerationHistory';
 import { ActiveTaskCard, formatElapsed } from './ActiveTaskCard';
-import { generateFreedomVideo, resumeFreedomVideoTask, FreedomCancelledError, type FreedomVideoUploadFile, type FreedomVideoUploadRole } from '@/lib/freedom/freedom-api';
+import { generateFreedomVideo, resumeFreedomVideoTask, FreedomCancelledError, FreedomNetworkInterruptedError, type FreedomVideoUploadFile, type FreedomVideoUploadRole } from '@/lib/freedom/freedom-api';
 import { useFreedomTaskStore, type PersistedFreedomTask } from '@/stores/freedom-task-store';
+import { inFlightVideoTaskIds, setVideoStudioMounted } from '@/lib/freedom/video-task-recovery';
 import { VolcAssetPanel, type VolcAssetItem } from './VolcAssetPanel';
 import {
   getAspectRatiosForT2VModel,
@@ -47,6 +48,9 @@ const RESOLUTION_OPTIONS = [
   { value: '1080p', label: '1080p', desc: 'FHD 全高清' },
   { value: '4k', label: '4K', desc: 'H.265 超高清' },
 ] as const;
+
+// 「进程内已有活跃轮询链」的守卫改为从共享模块导入：App 启动时的全局恢复
+// 与本组件的恢复逻辑必须共用同一份，否则同一任务会被起两条链。
 
 const FEATURE_MODE_OPTIONS: { value: VideoFeatureMode; label: string; icon: React.ReactNode; desc: string }[] = [
   { value: 'text-to-video', label: '文生视频', icon: <Type className="h-4 w-4" />, desc: '输入文字描述生成视频' },
@@ -307,7 +311,6 @@ export function VideoStudio() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const selectedTaskIdRef = useRef<string | null>(null);
   selectedTaskIdRef.current = selectedTaskId;
-  const restoredVideoTaskIdsRef = useRef<Set<string>>(new Set());
 
   const promptTextareaRef = useRef<PromptTextareaRef>(null);
 
@@ -342,8 +345,10 @@ export function VideoStudio() {
 
   const runRecoveredVideoTask = useCallback((task: PersistedFreedomTask) => {
     if (!task.serverTaskId || !task.pollUrl) return;
-    if (restoredVideoTaskIdsRef.current.has(task.id)) return;
-    restoredVideoTaskIdsRef.current.add(task.id);
+    // 该任务在本进程内已有活跃轮询链（可能是原始生成链，也可能是上一次恢复），
+    // 不能再起第二条，否则会重复保存文件、重复弹提示。
+    if (inFlightVideoTaskIds.has(task.id)) return;
+    inFlightVideoTaskIds.add(task.id);
 
     const existing = useFreedomStore.getState().activeTasks.find((item) => item.id === task.id);
     if (!existing) {
@@ -410,12 +415,29 @@ export function VideoStudio() {
           }
           return {};
         });
-        toast.success('已恢复并完成上次视频生成任务');
+        toast.success('已恢复并完成上次视频生成任务', {
+          id: `freedom-video-done-${task.id}`,
+        });
       } catch (err: any) {
-        restoredVideoTaskIdsRef.current.delete(task.id);
+        inFlightVideoTaskIds.delete(task.id);
         if (err instanceof FreedomCancelledError || err?.name === 'AbortError') {
           updateActiveTask(task.id, { status: 'cancelled', message: '已取消' });
           useFreedomTaskStore.getState().updateTask(task.id, { status: 'cancelled' });
+          return;
+        }
+        // 网络中断：上游任务可能已完成，保持可恢复状态而非终态失败
+        if (err instanceof FreedomNetworkInterruptedError) {
+          const message = err.message || '网络中断，查询已暂停';
+          updateActiveTask(task.id, { status: 'error', message, error: message });
+          useFreedomTaskStore.getState().updateTask(task.id, {
+            status: 'interrupted',
+            error: message,
+            recoverAttempts: (task.recoverAttempts || 0) + 1,
+            lastRecoverAt: Date.now(),
+          });
+          toast.warning('网络中断，任务已保留。恢复网络后可点击任务卡片「重新查询」领取结果', {
+            id: `freedom-video-interrupted-${task.id}`,
+          });
           return;
         }
         const message = err instanceof Error ? err.message : '恢复查询失败';
@@ -424,6 +446,32 @@ export function VideoStudio() {
       }
     })();
   }, [addActiveTask, addHistoryEntry, setSelectedTaskId, updateActiveTask]);
+
+  /**
+   * 手动「重新查询」：用持久层保存的上游 taskId + pollUrl 再发起一次查询链。
+   * 场景：断网/网络波动打断了轮询，但上游已经生成完成（token 已消耗）。
+   */
+  const handleRetryQuery = useCallback((taskId: string) => {
+    const persisted = useFreedomTaskStore.getState().tasks.find((item) => item.id === taskId);
+    if (!persisted?.serverTaskId || !persisted.pollUrl) {
+      toast.error('该任务未保存上游任务 ID，无法重新查询');
+      return;
+    }
+    if (inFlightVideoTaskIds.has(taskId)) {
+      toast.info('该任务正在查询中，请稍候');
+      return;
+    }
+    // 允许用户在网络恢复后无限次手动重试：清空自动恢复计数
+    useFreedomTaskStore.getState().updateTask(taskId, {
+      status: 'polling',
+      error: undefined,
+      recoverAttempts: 0,
+      lastRecoverAt: Date.now(),
+    });
+    updateActiveTask(taskId, { status: 'running', percent: 35, message: '正在重新查询结果…', error: undefined });
+    const refreshed = useFreedomTaskStore.getState().tasks.find((item) => item.id === taskId);
+    if (refreshed) runRecoveredVideoTask(refreshed);
+  }, [runRecoveredVideoTask, updateActiveTask]);
 
   const moveCompletedVideoTasksToHistory = useCallback(() => {
     const completedTasks = useFreedomStore
@@ -447,11 +495,33 @@ export function VideoStudio() {
     });
   }, [addHistoryEntry, removeActiveTask]);
 
+  // 上报挂载状态：挂载期间由本组件负责网络恢复后的接续，App 的全局监听让位
   useEffect(() => {
-    const pendingTasks = useFreedomTaskStore.getState().getPendingTasks('video');
-    pendingTasks
-      .filter((task) => !!task.serverTaskId && !!task.pollUrl)
+    setVideoStudioMounted(true);
+    return () => setVideoStudioMounted(false);
+  }, []);
+
+  useEffect(() => {
+    useFreedomTaskStore
+      .getState()
+      .getRecoverableTasks('video')
       .forEach((task) => runRecoveredVideoTask(task));
+  }, [runRecoveredVideoTask]);
+
+  // 网络恢复时的自动接续统一由 App.tsx 的全局监听负责（共用 inFlightVideoTaskIds
+  // 守卫），此处不再重复监听 online，避免同一任务被起两条链或弹两次提示。
+  useEffect(() => {
+    const handleOnline = () => {
+      const recoverable = useFreedomTaskStore.getState().getRecoverableTasks('video');
+      const pending = recoverable.filter((task) => !inFlightVideoTaskIds.has(task.id));
+      if (pending.length === 0) return;
+      toast.info(`网络已恢复，正在重新查询 ${pending.length} 个未完成任务`, {
+        id: 'freedom-video-online-recover',
+      });
+      pending.forEach((task) => runRecoveredVideoTask(task));
+    };
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
   }, [runRecoveredVideoTask]);
 
   const capabilityModelId = useMemo(
@@ -972,6 +1042,9 @@ export function VideoStudio() {
     const taskId = `vid_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const controller = new AbortController();
     const startedAt = Date.now();
+    // 标记本任务在当前进程已有活跃轮询链：即使用户切走导致组件卸载，
+    // 重新挂载时的恢复逻辑也不会对它再起一条重复的链。
+    inFlightVideoTaskIds.add(taskId);
 
     // 新建视频任务时，将此前已成功完成的任务从“当前任务”迁移到历史记录。
     // 失败/取消的任务继续保留在当前任务中，便于用户手动查看和清除。
@@ -1108,7 +1181,10 @@ export function VideoStudio() {
           return {};
         });
 
-        toast.success('视频生成成功！已保存到素材库');
+        // 固定 id：即便同一任务因异常路径被多次走到成功分支，也只展示一条提示
+        toast.success('视频生成成功！已保存到素材库', {
+          id: `freedom-video-done-${taskId}`,
+        });
         notifyVideoGenerated();
         // 保留任务卡片在当前任务列表中，由用户手动关闭，避免列表中“跳过”记录
       } catch (err: any) {
@@ -1118,6 +1194,20 @@ export function VideoStudio() {
           updateActiveTask(taskId, { status: 'cancelled', message: '已取消' });
           useFreedomTaskStore.getState().updateTask(taskId, { status: 'cancelled' });
           // 保留已取消的任务卡片，由用户手动关闭
+        } else if (err instanceof FreedomNetworkInterruptedError) {
+          // 断网/网络波动打断了查询链，但上游任务已提交（很可能已扣费并完成）。
+          // 标记为 interrupted 而非 error，保留 serverTaskId/pollUrl 供自动或手动重新查询。
+          const message = err.message || '网络中断，查询已暂停';
+          updateActiveTask(taskId, { status: 'error', message, error: message });
+          useFreedomTaskStore.getState().updateTask(taskId, {
+            status: 'interrupted',
+            error: message,
+          });
+          toast.warning('网络中断，任务已保留。恢复网络后可点击任务卡片「重新查询」领取结果', {
+            id: `freedom-video-interrupted-${taskId}`,
+            duration: Infinity,
+            closeButton: true,
+          });
         } else {
           const message = err instanceof Error ? err.message : '未知错误';
           updateActiveTask(taskId, {
@@ -1134,6 +1224,10 @@ export function VideoStudio() {
           // 保留失败的任务卡片，由用户手动关闭，便于事后查看错误信息
         }
       } finally {
+        // 链条已终止（成功/失败/取消），释放守卫。
+        // 失败时任务在持久层已是 error/cancelled，不会再被恢复逻辑捞起；
+        // 成功时结果已落库，API 层的 finalize 缓存也会挡住重复保存。
+        inFlightVideoTaskIds.delete(taskId);
         setVideoGenerating(false);
       }
     })();
@@ -1715,6 +1809,7 @@ export function VideoStudio() {
                   selected={selectedTaskId === t.id}
                   onSelect={() => setSelectedTaskId(t.id)}
                   onCancel={() => handleCancelTask(t.id)}
+                  onRetryQuery={t.serverTaskId && t.pollUrl ? () => handleRetryQuery(t.id) : undefined}
                   onDismiss={() => {
                     removeActiveTask(t.id);
                     if (selectedTaskId === t.id) setSelectedTaskId(null);

@@ -109,6 +109,9 @@ const VIDU_VIDEO_VARIANTS = [
   'viduq2',
   'viduq2-pro',
   'viduq2-turbo',
+  'viduq3',
+  'viduq3-mix',
+  'viduq3-turbo',
   'viduq3-pro',
 ];
 
@@ -143,6 +146,9 @@ const LUMA_VIDEO_VARIANTS = [
 ];
 
 const GROK_VIDEO_VARIANTS = [
+  'grok-imagine-1.5',
+  'grok-imagine-video',
+  'grok-imagine-video-1.5-preview',
   'grok-video-3',
   'grok-video-3-10s',
   'grok-video-3-15s',
@@ -272,6 +278,9 @@ const VIDEO_FAMILY_VARIANTS: Record<string, string[]> = {
   'viduq2': VIDU_VIDEO_VARIANTS,
   'viduq2-pro': VIDU_VIDEO_VARIANTS,
   'viduq2-turbo': VIDU_VIDEO_VARIANTS,
+  'viduq3': VIDU_VIDEO_VARIANTS,
+  'viduq3-mix': VIDU_VIDEO_VARIANTS,
+  'viduq3-turbo': VIDU_VIDEO_VARIANTS,
   'viduq3-pro': VIDU_VIDEO_VARIANTS,
   'aigc-video-vidu': VIDU_VIDEO_VARIANTS,
   // MiniMax
@@ -296,6 +305,9 @@ const VIDEO_FAMILY_VARIANTS: Record<string, string[]> = {
   'luma_video_api': LUMA_VIDEO_VARIANTS,
   'luma_video_extend_api': LUMA_VIDEO_VARIANTS,
   // Grok
+  'grok-imagine-1.5': GROK_VIDEO_VARIANTS,
+  'grok-imagine-video': GROK_VIDEO_VARIANTS,
+  'grok-imagine-video-1.5-preview': GROK_VIDEO_VARIANTS,
   'grok-video-3': GROK_VIDEO_VARIANTS,
   'grok-video-3-10s': GROK_VIDEO_VARIANTS,
   'grok-video-3-15s': GROK_VIDEO_VARIANTS,

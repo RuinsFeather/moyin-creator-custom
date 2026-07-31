@@ -77,12 +77,18 @@ export function classifyModelByName(modelName: string): ModelCapability[] {
 
   // ---- 视频生成模型 ----
   const videoPatterns = [
-    'veo', 'sora', 'wan', 'kling', 'runway', 'luma', 'seedance',
+    'veo', 'sora', 'wan', 'vidu', 'kling', 'runway', 'luma', 'seedance',
     'cogvideo', 'hunyuan-video', 'minimax-video', 'hailuo', 'pika',
     'gen-3', 'gen3', 'mochi', 'ltx', 'happyhorse',
   ];
-  // 精确匹配：grok-video 类
-  if (/grok[- ]?video/.test(name)) return ['video_generation'];
+  // Grok 视频：兼容 grok-video-*、grok-imagine-video-* 与平台 ID grok-imagine-1.5。
+  // 显式包含 image 的 Grok 图片模型不能误归为视频。
+  const isGrokImage = /grok[-_. ]imagine[-_. ]image/.test(name);
+  if (!isGrokImage && (
+    /grok[-_. ]?video/.test(name)
+    || /grok[-_. ]imagine[-_. ]video/.test(name)
+    || /^grok[-_. ]imagine[-_. ]1(?:\.5)?(?:[-_. ]|$)/.test(name)
+  )) return ['video_generation'];
   if (videoPatterns.some(p => name.includes(p))) return ['video_generation'];
 
   // ---- 图片生成模型 ----

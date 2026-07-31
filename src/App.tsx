@@ -11,9 +11,12 @@ import { useAppSettingsStore } from "@/stores/app-settings-store";
 import { parseApiKeys } from "@/lib/api-key-manager";
 import { Loader2 } from "lucide-react";
 import { migrateToProjectStorage, recoverFromLegacy } from "@/lib/storage-migration";
+import { recoverAllPendingVideoTasks, isVideoStudioMounted } from "@/lib/freedom/video-task-recovery";
+import { useFreedomTaskStore } from "@/stores/freedom-task-store";
 import type { AvailableUpdateInfo } from "@/types/update";
 
 let hasTriggeredStartupUpdateCheck = false;
+let hasTriggeredStartupTaskRecovery = false;
 
 function App() {
   const { theme } = useThemeStore();
@@ -72,6 +75,41 @@ function App() {
       cancelled = true;
     };
   }, [isMigrating]);
+
+  // 启动时接续上次未完成的视频任务（断网/退出应用导致查询链断开的场景）。
+  // 不依赖用户是否打开「自由 → 视频」标签页：上游已扣费的结果必须能被领回。
+  useEffect(() => {
+    if (isMigrating || hasTriggeredStartupTaskRecovery) return;
+    hasTriggeredStartupTaskRecovery = true;
+
+    let cancelled = false;
+    (async () => {
+      // 任务队列走 fileStorage 异步持久化，需先等 rehydrate 完成再读
+      await useFreedomTaskStore.persist.rehydrate();
+      if (cancelled) return;
+      const started = recoverAllPendingVideoTasks();
+      if (started > 0) {
+        console.log(`[App] Resumed ${started} pending video task(s)`);
+      }
+    })().catch((error) => {
+      console.warn("[App] Video task recovery failed:", error);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isMigrating]);
+
+  // 网络恢复时兜底再扫一遍。
+  // 若 VideoStudio 正挂载，交由它自己处理（它能同步刷新任务卡片 UI），此处不抢。
+  useEffect(() => {
+    const handleOnline = () => {
+      if (isVideoStudioMounted()) return;
+      recoverAllPendingVideoTasks();
+    };
+    window.addEventListener("online", handleOnline);
+    return () => window.removeEventListener("online", handleOnline);
+  }, []);
 
   // 同步主题到 html 元素
   useEffect(() => {

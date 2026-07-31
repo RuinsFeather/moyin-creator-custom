@@ -1258,7 +1258,7 @@ export const T2V_MODELS: T2VModel[] = [
   // 35
   {
     id: 'vidu-v2.0-t2v',
-    providerAliases: ["vidu-v2.0-t2v","vidu-v2-0","vidu2.0","viduq1","viduq1-classic","aigc-video-vidu"],
+    providerAliases: ["vidu-v2.0-t2v","vidu-v2-0","vidu2.0","viduq1","viduq1-classic","viduq2","viduq2-pro","viduq2-turbo","viduq3","viduq3-mix","viduq3-turbo","viduq3-pro","aigc-video-vidu"],
     name: 'Vidu V2.0 T2V',
     inputs: {
       prompt: promptInput(),
@@ -1280,7 +1280,7 @@ export const T2V_MODELS: T2VModel[] = [
   // 37
   {
     id: 'grok-imagine-text-to-video',
-    providerAliases: ["grok-imagine-text-to-video","grok-video-3","grok-video-3-10s","grok-video-3-15s"],
+    providerAliases: ["grok-imagine-text-to-video","grok-imagine-1.5","grok-imagine-video","grok-imagine-video-1.5-preview","grok-video-3","grok-video-3-10s","grok-video-3-15s"],
     name: 'Grok Imagine Text to Video',
     inputs: {
       prompt: promptInput(),

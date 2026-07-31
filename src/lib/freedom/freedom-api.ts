@@ -197,6 +197,10 @@ async function freedomRetry<T>(
       if ((error as any)?.name === 'AbortError') throw new FreedomCancelledError();
       // 已触达上游 / 已扣费的错误：绝不重试整个操作（重试会重新 submit → 二次扣费）
       if (error instanceof FreedomBilledError) throw error;
+      // 轮询阶段的网络中断/终止：任务已提交到上游，重试会重新 submit → 二次扣费。
+      // 必须原样抛出，交由 UI 转入「可恢复」状态并复用已持久化的 taskId 重新查询。
+      if (error instanceof FreedomNetworkInterruptedError) throw error;
+      if (error instanceof FreedomPollTerminatedError) throw error;
       if (!isRetryableError(error)) throw error;
 
       // 触发 key 轮换（如果有 keyManager）
@@ -274,6 +278,169 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
     };
     signal?.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+// ==================== 轮询容错（断网 / 网络波动） ====================
+
+/**
+ * 「网络中断导致查询链断开」错误。
+ * 语义：任务**已提交到上游且很可能已扣费/已完成**，只是本地查询链因网络问题断开。
+ * UI 收到该错误应把任务标记为 `interrupted`（可恢复），而不是 `error`（终态），
+ * 并保留 serverTaskId / pollUrl 供后续重新查询领取结果。
+ */
+export class FreedomNetworkInterruptedError extends Error {
+  /** 上游任务 ID（若已拿到） */
+  taskId?: string;
+  /** 查询地址，供恢复时复用 */
+  pollUrl?: string;
+  constructor(message: string, taskId?: string, pollUrl?: string) {
+    super(message);
+    this.name = 'FreedomNetworkInterruptedError';
+    this.taskId = taskId;
+    this.pollUrl = pollUrl;
+  }
+}
+
+/**
+ * 「查询终止」错误：鉴权失败 / 任务不存在等，重试没有意义。
+ * 与网络中断区分开，避免把 401/404 也当成可恢复状态无限接续。
+ */
+export class FreedomPollTerminatedError extends Error {
+  status?: number;
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = 'FreedomPollTerminatedError';
+    this.status = status;
+  }
+}
+
+/** 连续网络失败的最大容忍次数（配合指数退避，约覆盖 5 分钟以上的断网窗口） */
+const POLL_MAX_NETWORK_FAILURES = 30;
+/** 连续 HTTP 非 2xx（可重试类）的最大容忍次数，避免 `!ok → continue` 无限静默循环 */
+const POLL_MAX_HTTP_FAILURES = 15;
+/** 网络失败后的退避上限 */
+const POLL_BACKOFF_MAX = 15000;
+
+/** 轮询过程中的失败计数状态，由每个轮询循环各自持有 */
+interface PollFailureState {
+  networkFailures: number;
+  httpFailures: number;
+  taskId?: string;
+  pollUrl?: string;
+}
+
+function createPollState(taskId?: string, pollUrl?: string): PollFailureState {
+  return { networkFailures: 0, httpFailures: 0, taskId, pollUrl };
+}
+
+/** 判定是否为「网络层」错误（断网、连接被重置、DNS 失败、代理不可达等） */
+function isNetworkError(error: unknown): boolean {
+  if (!error) return false;
+  const err = error as any;
+  const name = String(err.name || '');
+  if (name === 'TypeError') return true;
+  const message = String(err.message || err || '').toLowerCase();
+  return (
+    message.includes('failed to fetch') ||
+    message.includes('networkerror') ||
+    message.includes('network error') ||
+    message.includes('load failed') ||
+    message.includes('econnreset') ||
+    message.includes('econnrefused') ||
+    message.includes('econnaborted') ||
+    message.includes('enotfound') ||
+    message.includes('etimedout') ||
+    message.includes('ehostunreach') ||
+    message.includes('enetunreach') ||
+    message.includes('epipe') ||
+    message.includes('socket hang up') ||
+    message.includes('net::err_') ||
+    message.includes('proxy fetch failed') ||
+    message.includes('fetch failed')
+  );
+}
+
+/** 浏览器/Electron 报告当前离线（保守：拿不到该信息时视为在线） */
+function isOffline(): boolean {
+  return typeof navigator !== 'undefined' && navigator.onLine === false;
+}
+
+/**
+ * 带容错的单次轮询请求。
+ *
+ * 返回值语义：
+ * - `Response`：本轮请求成功（2xx），调用方正常解析
+ * - `null`：本轮失败但可继续（已内部退避等待），调用方应 `continue`
+ *
+ * 抛出：
+ * - `FreedomCancelledError`：用户取消
+ * - `FreedomPollTerminatedError`：鉴权/任务不存在等无意义重试的情形
+ * - `FreedomNetworkInterruptedError`：连续网络失败超限，任务需转入可恢复状态
+ */
+async function pollFetchWithRetry(
+  url: string,
+  init: RequestInit,
+  state: PollFailureState,
+  signal?: AbortSignal,
+): Promise<Response | null> {
+  state.pollUrl = state.pollUrl || url;
+  try {
+    const resp = await corsFetch(url, init);
+    if (resp.ok) {
+      state.networkFailures = 0;
+      state.httpFailures = 0;
+      return resp;
+    }
+
+    // 鉴权失败 / 任务不存在：重试没有意义，立即终止
+    if (resp.status === 401 || resp.status === 403 || resp.status === 404) {
+      throw new FreedomPollTerminatedError(
+        `查询被拒绝：HTTP ${resp.status}（请检查 API Key 与任务 ID 是否有效）`,
+        resp.status,
+      );
+    }
+
+    state.httpFailures += 1;
+    if (state.httpFailures > POLL_MAX_HTTP_FAILURES) {
+      throw new FreedomNetworkInterruptedError(
+        `查询持续返回 HTTP ${resp.status}，已暂停查询。上游任务可能仍在进行，可稍后重新查询领取结果。`,
+        state.taskId,
+        state.pollUrl,
+      );
+    }
+    return null;
+  } catch (error) {
+    // 取消与终止类错误原样抛出
+    if (error instanceof FreedomCancelledError) throw error;
+    if ((error as any)?.name === 'AbortError') throw new FreedomCancelledError();
+    if (error instanceof FreedomPollTerminatedError) throw error;
+    if (error instanceof FreedomNetworkInterruptedError) throw error;
+    if (!isNetworkError(error)) throw error;
+
+    // 网络类错误：不终止任务，退避后重试。
+    // 明确离线时不消耗重试配额——等网络回来即可无感继续。
+    const offline = isOffline();
+    if (!offline) {
+      state.networkFailures += 1;
+      if (state.networkFailures > POLL_MAX_NETWORK_FAILURES) {
+        throw new FreedomNetworkInterruptedError(
+          '网络中断导致查询链断开。上游任务可能已完成，可在任务卡片上「重新查询」领取结果。',
+          state.taskId,
+          state.pollUrl,
+        );
+      }
+    }
+
+    const delay = offline
+      ? POLL_BACKOFF_MAX
+      : Math.min(POLL_BACKOFF_MAX, VIDEO_POLL_INTERVAL * Math.pow(2, Math.min(state.networkFailures, 3)));
+    console.warn(
+      `[Freedom] 轮询请求失败（${offline ? '当前离线' : `连续 ${state.networkFailures} 次`}），` +
+      `${delay}ms 后重试：${(error as Error)?.message || error}`,
+    );
+    await abortableSleep(delay, signal);
+    return null;
+  }
 }
 
 // ==================== Helpers: Endpoint Building ====================
@@ -516,7 +683,8 @@ function geminiSupportsImageSize(model: string): boolean {
 function normalizeGeminiImageSize(resolution?: string): string {
   if (!resolution) return '2K';
   const upper = resolution.toUpperCase();
-  if (upper === '512') return '512';
+  // 上游（12ai NanoBanana）严格大小写：512 档需写成 '512px'，其余为 '1K'/'2K'/'4K'。
+  if (upper === '512' || upper === '512PX') return '512px';
   if (['1K', '2K', '4K'].includes(upper)) return upper;
   return '2K';
 }
@@ -607,6 +775,49 @@ function aspectRatioToSize(
   height = Math.max(64, Math.round(height / 8) * 8);
 
   return { width, height, size: `${width}x${height}` };
+}
+
+/**
+ * 生成「宽高比强约束」的 prompt 兜底文本。
+ *
+ * 背景：Gemini 原生 generateContent 用 generationConfig.imageConfig.aspectRatio 控制比例，
+ * 但很多中转站/代理并不透传该结构化字段——此时 Gemini 官方默认行为会触发：
+ *   「有参考图 → 匹配参考图尺寸；无参考图 → 回落 1:1」
+ * 导致用户选 16:9 却拿到 9:16（匹配了竖版参考图）或方图。
+ * 因此在 prompt 里再用自然语言强调一次比例，作为结构化参数被丢弃时的兜底引导。
+ *
+ * 特别地：当存在参考图时，额外明确「只参考内容/风格，不要沿用其画幅比例」，
+ * 避免模型把参考图的竖版比例带到输出上。
+ */
+function buildAspectRatioHint(
+  aspectRatio: string | undefined,
+  hasReferenceImages: boolean,
+  sized?: { width: number; height: number } | null,
+): string {
+  const ar = (aspectRatio || '').trim();
+  if (!ar || ar.toLowerCase() === 'auto') return '';
+
+  const m = ar.match(/^(\d+)\s*[:xX]\s*(\d+)$/);
+  const orientation = m
+    ? (parseInt(m[1], 10) > parseInt(m[2], 10)
+        ? 'landscape (wider than tall)'
+        : parseInt(m[1], 10) < parseInt(m[2], 10)
+          ? 'portrait (taller than wide)'
+          : 'square')
+    : '';
+
+  let hint = `IMPORTANT — OUTPUT CANVAS ASPECT RATIO: The generated image MUST be exactly ${ar}`;
+  if (orientation) hint += ` (${orientation})`;
+  if (sized) hint += `, sized ${sized.width}×${sized.height} pixels`;
+  hint += '.';
+  if (hasReferenceImages) {
+    // 参考图场景是「输出沿用参考图画幅」的重灾区，用最强措辞明确：
+    // 参考图仅供内容/风格，输出画布比例必须以上面指定的 aspectRatio 为准。
+    hint += ` The reference image(s) may have a DIFFERENT aspect ratio — IGNORE their dimensions and canvas shape completely. `
+      + `Do NOT match, crop to, or letterbox the reference image size. `
+      + `The final output canvas MUST be ${ar}${orientation ? ` (${orientation})` : ''}, regardless of the reference image proportions.`;
+  }
+  return hint;
 }
 
 export async function generateFreedomImage(
@@ -894,22 +1105,38 @@ async function generateViaGeminiNative(
   const supportsImageSize = geminiSupportsImageSize(model);
   const imageSize = supportsImageSize ? normalizeGeminiImageSize(params.resolution) : undefined;
 
-  // 构造 parts：先文本，再参考图
-  const parts: any[] = [{ text: params.prompt }];
+  const hasReferenceImages = !!(params.referenceImages && params.referenceImages.length > 0);
+  // Prompt 级宽高比兜底：中转站若忽略 imageConfig.aspectRatio，则靠这段自然语言约束。
+  // 尤其是有参考图时，Gemini 默认会「匹配参考图尺寸」，导致目标比例被参考图的画幅覆盖。
+  // 附带目标像素尺寸（sized），让「多参考图沿用多数派画幅」的场景有明确数字锚点。
+  const sized = aspectRatioToSize(aspectRatio, params.resolution);
+  const aspectHint = buildAspectRatioHint(aspectRatio, hasReferenceImages, sized);
+
+  // 构造 parts：参考图在前，文本指令在后（对齐官方多图示例 [Image, Image, "指令"]）。
+  // Gemini 对「最后出现的指令」注意力更高——把比例约束放在参考图之后，
+  // 可显著降低「输出沿用参考图画幅（如竖版 9:16）」的概率。
+  const parts: any[] = [];
   if (params.referenceImages && params.referenceImages.length > 0) {
     params.onProgress?.({ phase: 'submitting', percent: 5, message: '编码参考图…' });
-    for (const refUrl of params.referenceImages.slice(0, 10)) {
+    // 文档：flash/pro 系列最多支持 14 张参考图
+    for (const refUrl of params.referenceImages.slice(0, 14)) {
       throwIfAborted(params.signal);
       const inline = await urlToGeminiInlineData(refUrl);
       if (inline) parts.push({ inlineData: inline });
     }
   }
+  const promptWithHint = aspectHint ? `${params.prompt}\n\n${aspectHint}` : params.prompt;
+  parts.push({ text: promptWithHint });
 
+  // 严格对齐上游（12ai NanoBanana）Gemini 原生格式：仅下发标准 camelCase 字段。
+  // 注意：上游严格校验 imageConfig，塞入非标准 snake_case（aspect_ratio/image_size）
+  // 反而可能触发字段校验拒绝、令整个 imageConfig 失效，导致 aspectRatio 不生效。
   const imageConfig: Record<string, any> = { aspectRatio };
   if (imageSize) imageConfig.imageSize = imageSize;
 
+  // contents 不带 role：与上游文档示例一致（`contents: [{ parts: [...] }]`）。
   const requestBody: Record<string, any> = {
-    contents: [{ role: 'user', parts }],
+    contents: [{ parts }],
     generationConfig: {
       responseModalities: ['IMAGE'],
       imageConfig,
@@ -926,6 +1153,7 @@ async function generateViaGeminiNative(
     aspectRatio,
     imageSize: imageSize ?? '(n/a)',
     refCount: params.referenceImages?.length ?? 0,
+    aspectHintApplied: !!aspectHint,
   });
   params.onProgress?.({ phase: 'submitting', percent: 15, message: '提交 Gemini 请求…' });
   throwIfAborted(params.signal);
@@ -1019,12 +1247,10 @@ async function generateViaChatCompletions(
   const geminiImageSize = geminiHasImageSize ? normalizeGeminiImageSize(params.resolution) : undefined;
   const gptImageSize = isGptImage ? normalizeGptImageSize(aspectRatio, params.resolution) : undefined;
 
-  // Prompt 文本里强调宽高比和精确像素，作为参数被丢弃时的兜底引导
-  const dimsHint = aspectRatio === 'auto'
-    ? ''
-    : sized
-    ? ` The output image MUST have an aspect ratio of exactly ${aspectRatio} and resolution ${sized.width}x${sized.height} pixels (${sized.width} wide, ${sized.height} tall).`
-    : ` The output image MUST have an aspect ratio of exactly ${aspectRatio}.`;
+  // Prompt 文本里强调宽高比和精确像素，作为参数被丢弃时的兜底引导。
+  // 统一复用 buildAspectRatioHint，附带「参考图不要沿用画幅比例」的约束。
+  const hasReferenceImages = !!(params.referenceImages && params.referenceImages.length > 0);
+  const dimsHint = buildAspectRatioHint(aspectRatio, hasReferenceImages, sized);
 
   const userContent: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
     { type: 'text', text: dimsHint ? `${params.prompt}\n\n${dimsHint}` : params.prompt },
@@ -1831,13 +2057,16 @@ async function generateViaMidjourneyEndpoint(
   if (!taskId) throw new Error('Midjourney 返回空任务 ID');
 
   const pollUrl = `${rootBase}/mj/task/${taskId}/fetch`;
+  const pollState = createPollState(String(taskId), pollUrl);
   for (let i = 0; i < IMAGE_POLL_MAX_ATTEMPTS; i++) {
     await abortableSleep(2500, params.signal);
-    const pollResp = await corsFetch(pollUrl, {
-      headers: { 'Authorization': `Bearer ${apiKey}` },
-      signal: params.signal,
-    });
-    if (!pollResp.ok) continue;
+    const pollResp = await pollFetchWithRetry(
+      pollUrl,
+      { headers: { 'Authorization': `Bearer ${apiKey}` }, signal: params.signal },
+      pollState,
+      params.signal,
+    );
+    if (!pollResp) continue;
     const pollData = await pollResp.json();
     const status = String(pollData.status || '').toLowerCase();
     // MJ 服务端会返回字符串如 "50%"，提取数字
@@ -2053,6 +2282,12 @@ async function generateViaReplicateImageEndpoint(
 
 // ==================== Video Generation ====================
 
+/**
+ * 已完成落库的视频结果缓存（key = 上游任务 ID 或结果 URL）。
+ * 用于保证同一个视频任务只写一次本地文件、只插一条素材记录。
+ */
+const finalizedVideoResults = new Map<string, Promise<GenerationResult>>();
+
 export async function generateFreedomVideo(
   params: FreedomVideoParams
 ): Promise<GenerationResult> {
@@ -2092,39 +2327,73 @@ async function _generateFreedomVideoInner(
     prompt: params.prompt.slice(0, 50),
   });
 
+  // 记录上游任务 ID：与恢复链（resumeFreedomVideoTask）共用同一个去重键，
+  // 确保同一个上游任务无论被几条链条完成，都只落库一次。
+  let upstreamTaskId: string | undefined;
+  const innerParams: FreedomVideoParams = {
+    ...params,
+    onTaskCreated: (info) => {
+      upstreamTaskId = info.taskId;
+      params.onTaskCreated?.(info);
+    },
+  };
+
   let result: GenerationResult;
   switch (route) {
     case 'openai_official':
-      result = await generateVideoViaOpenAIOfficial(params, model, apiKey, baseUrl);
+      result = await generateVideoViaOpenAIOfficial(innerParams, model, apiKey, baseUrl);
       break;
     case 'volc':
-      result = await generateVideoViaVolc(params, model, apiKey, baseUrl);
+      result = await generateVideoViaVolc(innerParams, model, apiKey, baseUrl);
       break;
     case 'wan':
-      result = await generateVideoViaWan(params, model, apiKey, baseUrl);
+      result = await generateVideoViaWan(innerParams, model, apiKey, baseUrl);
       break;
     case 'kling':
-      result = await generateVideoViaKling(params, model, apiKey, baseUrl);
+      result = await generateVideoViaKling(innerParams, model, apiKey, baseUrl);
       break;
     case 'replicate':
-      result = await generateVideoViaReplicate(params, model, apiKey, baseUrl);
+      result = await generateVideoViaReplicate(innerParams, model, apiKey, baseUrl);
       break;
     default:
-      result = await generateVideoViaUnified(params, model, apiKey, baseUrl);
+      result = await generateVideoViaUnified(innerParams, model, apiKey, baseUrl);
       break;
   }
 
-  return finalizeFreedomVideoResult(result, params.prompt, params.projectId);
+  return finalizeFreedomVideoResult(result, params.prompt, params.projectId, upstreamTaskId);
 }
 
 async function finalizeFreedomVideoResult(
   result: GenerationResult,
   prompt: string,
   projectId?: string | null,
+  dedupeKey?: string,
 ): Promise<GenerationResult> {
-  const persistentUrl = await persistFreedomVideoResult(result.url, prompt);
-  const mediaId = saveToMediaLibrary(persistentUrl, prompt, 'ai-video', projectId);
-  return { ...result, url: persistentUrl, mediaId };
+  // 幂等保护：同一任务可能被多条链条完成（例如切换 Tab 导致 VideoStudio 卸载重挂载后
+  // 恢复逻辑又起了一条轮询链，而原始链条仍在后台运行）。若不去重，每条链都会
+  // 各自写一个 mp4（文件名带 Date.now()）并各自往素材库插一条记录。
+  const key = dedupeKey || result.url;
+  if (key) {
+    const existing = finalizedVideoResults.get(key);
+    if (existing) {
+      console.log('[Freedom] Reusing finalized video result (dedupe):', key);
+      return existing;
+    }
+  }
+
+  const task = (async () => {
+    const persistentUrl = await persistFreedomVideoResult(result.url, prompt);
+    const mediaId = saveToMediaLibrary(persistentUrl, prompt, 'ai-video', projectId);
+    return { ...result, url: persistentUrl, mediaId };
+  })();
+
+  if (key) {
+    finalizedVideoResults.set(key, task);
+    // 失败则允许后续重试，不要把错误结果永久缓存
+    task.catch(() => finalizedVideoResults.delete(key));
+  }
+
+  return task;
 }
 
 export async function resumeFreedomVideoTask(
@@ -2138,7 +2407,7 @@ export async function resumeFreedomVideoTask(
   } else {
     result = await pollUnifiedVideoTask(params.pollUrl, params.taskId, params.model, params.signal);
   }
-  return finalizeFreedomVideoResult(result, params.prompt, params.projectId);
+  return finalizeFreedomVideoResult(result, params.prompt, params.projectId, params.taskId);
 }
 
 // ==================== Task Query (Debug) ====================
@@ -2741,14 +3010,12 @@ async function pollOpenAIOfficialVideoTask(
   signal?: AbortSignal,
 ): Promise<GenerationResult> {
   const authHeaders = buildResumeAuthHeaders(model);
+  const pollState = createPollState(taskId, pollUrl);
   // 无限轮询：视频生成耗时不定，由用户手动取消或服务端返回失败状态
   while (true) {
     await abortableSleep(VIDEO_POLL_INTERVAL, signal);
-    const pollResp = await corsFetch(pollUrl, {
-      headers: authHeaders,
-      signal,
-    });
-    if (!pollResp.ok) continue;
+    const pollResp = await pollFetchWithRetry(pollUrl, { headers: authHeaders, signal }, pollState, signal);
+    if (!pollResp) continue;
     const pollData = await pollResp.json();
     const status = String(pollData.status || '').toLowerCase();
     if (status === 'completed' || status === 'succeeded' || status === 'success') {
@@ -2933,13 +3200,11 @@ async function pollUnifiedVideoTask(
   signal?: AbortSignal,
 ): Promise<GenerationResult> {
   const authHeaders = buildResumeAuthHeaders(model);
+  const pollState = createPollState(taskId, pollUrl);
   while (true) {
     await abortableSleep(VIDEO_POLL_INTERVAL, signal);
-    const pollResp = await corsFetch(pollUrl, {
-      headers: authHeaders,
-      signal,
-    });
-    if (!pollResp.ok) continue;
+    const pollResp = await pollFetchWithRetry(pollUrl, { headers: authHeaders, signal }, pollState, signal);
+    if (!pollResp) continue;
     const pollData = await pollResp.json();
     const status = String(pollData.status || pollData.state || pollData.data?.status || '').toLowerCase();
     if (status === 'completed' || status === 'succeeded' || status === 'success') {
@@ -3061,13 +3326,11 @@ async function pollVolcVideoTask(
   // 无限轮询：Seedance/Doubao 多模态参考耗时不定，不再设超时上限，
   // 间隔保持 5s 减少无效请求，由用户手动取消或服务端返回失败状态。
   const VOLC_POLL_INTERVAL = 5000;
+  const pollState = createPollState(pollUrl.split('/').filter(Boolean).pop(), pollUrl);
   while (true) {
     await abortableSleep(VOLC_POLL_INTERVAL, signal);
-    const pollResp = await corsFetch(pollUrl, {
-      headers: authHeaders,
-      signal,
-    });
-    if (!pollResp.ok) continue;
+    const pollResp = await pollFetchWithRetry(pollUrl, { headers: authHeaders, signal }, pollState, signal);
+    if (!pollResp) continue;
     const pollData = await pollResp.json();
     const status = String(pollData.status || '').toLowerCase();
     if (status === 'succeeded' || status === 'completed' || status === 'success') {
@@ -3128,13 +3391,18 @@ async function generateVideoViaWan(
   if (!taskId) throw new Error('Wan 返回空任务 ID');
 
   const pollUrl = `${rootBase}/alibailian/api/v1/tasks/${taskId}`;
+  params.onTaskCreated?.({ taskId: String(taskId), route: 'unified', pollUrl, model });
+  const pollState = createPollState(String(taskId), pollUrl);
   // 无限轮询：Wan 视频生成不再设超时上限，由服务端返回完成/失败状态。
   while (true) {
-    await new Promise((r) => setTimeout(r, VIDEO_POLL_INTERVAL));
-    const pollResp = await corsFetch(pollUrl, {
-      headers: { 'Authorization': `Bearer ${apiKey}` },
-    });
-    if (!pollResp.ok) continue;
+    await abortableSleep(VIDEO_POLL_INTERVAL, params.signal);
+    const pollResp = await pollFetchWithRetry(
+      pollUrl,
+      { headers: { 'Authorization': `Bearer ${apiKey}` }, signal: params.signal },
+      pollState,
+      params.signal,
+    );
+    if (!pollResp) continue;
     const pollData = await pollResp.json();
     const status = String(pollData.output?.task_status || '').toUpperCase();
     if (status === 'SUCCEEDED' || status === 'COMPLETED') {
@@ -3216,14 +3484,18 @@ async function generateVideoViaHappyHorseR2V(
   // 无限轮询（参考生视频耗时不定，不再设超时上限，由用户手动取消或服务端返回完成/失败）
   const POLL_INTERVAL = 5000;
   const pollUrl = `${rootBase}/alibailian/api/v1/tasks/${taskId}`;
+  params.onTaskCreated?.({ taskId: String(taskId), route: 'unified', pollUrl, model: params.model || '' });
+  const pollState = createPollState(String(taskId), pollUrl);
 
   while (true) {
     await abortableSleep(POLL_INTERVAL, params.signal);
-    const pollResp = await corsFetch(pollUrl, {
-      headers: { 'Authorization': `Bearer ${apiKey}` },
-      signal: params.signal,
-    });
-    if (!pollResp.ok) continue;
+    const pollResp = await pollFetchWithRetry(
+      pollUrl,
+      { headers: { 'Authorization': `Bearer ${apiKey}` }, signal: params.signal },
+      pollState,
+      params.signal,
+    );
+    if (!pollResp) continue;
     const pollData = await pollResp.json();
     const status = String(pollData.output?.task_status || '').toUpperCase();
     if (status === 'SUCCEEDED' || status === 'COMPLETED') {
@@ -3306,13 +3578,18 @@ async function generateVideoViaKling(
 
   // Poll URL mirrors the submit path: GET /kling/v1/videos/{path}/{task_id}
   const pollUrl = `${rootBase}/kling/v1/videos/${endpointPath}/${taskId}`;
+  params.onTaskCreated?.({ taskId: String(taskId), route: 'unified', pollUrl, model: model || params.model || '' });
+  const pollState = createPollState(String(taskId), pollUrl);
   // 无限轮询：Kling 视频生成耗时不定，不再设超时上限。
   while (true) {
-    await new Promise((r) => setTimeout(r, VIDEO_POLL_INTERVAL));
-    const pollResp = await corsFetch(pollUrl, {
-      headers: { 'Authorization': `Bearer ${apiKey}` },
-    });
-    if (!pollResp.ok) continue;
+    await abortableSleep(VIDEO_POLL_INTERVAL, params.signal);
+    const pollResp = await pollFetchWithRetry(
+      pollUrl,
+      { headers: { 'Authorization': `Bearer ${apiKey}` }, signal: params.signal },
+      pollState,
+      params.signal,
+    );
+    if (!pollResp) continue;
     const pollData = await pollResp.json();
     const status = String(pollData.data?.task_status || '').toLowerCase();
     if (status === 'succeed' || status === 'success' || status === 'completed') {
@@ -3371,13 +3648,18 @@ async function generateVideoViaReplicate(
   if (!predictionId) throw new Error('Replicate 返回空 prediction ID');
 
   const pollUrl = `${rootBase}/replicate/v1/predictions/${predictionId}`;
+  params.onTaskCreated?.({ taskId: String(predictionId), route: 'unified', pollUrl, model: model || params.model || '' });
+  const pollState = createPollState(String(predictionId), pollUrl);
   // 无限轮询：Replicate 视频生成耗时不定，不再设超时上限。
   while (true) {
-    await new Promise(r => setTimeout(r, VIDEO_POLL_INTERVAL));
-    const pollResp = await corsFetch(pollUrl, {
-      headers: { 'Authorization': `Bearer ${apiKey}` },
-    });
-    if (!pollResp.ok) continue;
+    await abortableSleep(VIDEO_POLL_INTERVAL, params.signal);
+    const pollResp = await pollFetchWithRetry(
+      pollUrl,
+      { headers: { 'Authorization': `Bearer ${apiKey}` }, signal: params.signal },
+      pollState,
+      params.signal,
+    );
+    if (!pollResp) continue;
     const pollData = await pollResp.json();
     const status = String(pollData.status || '').toLowerCase();
     if (status === 'succeeded') {
@@ -3491,13 +3773,30 @@ function saveToMediaLibrary(
 ): string | undefined {
   try {
     const mediaStore = useMediaStore.getState();
-    const targetProjectId = projectId ?? useProjectStore.getState().activeProjectId;
+    const activeProjectId = useProjectStore.getState().activeProjectId;
+    const targetProjectId = projectId ?? activeProjectId;
     const name = prompt.slice(0, 30).replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '_') || 'freedom';
     const type = source === 'ai-image' ? 'image' : 'video';
-    
+    const mediaName = `${name}_${Date.now()}`;
+
+    // 生成任务是后台异步的：若用户在生成期间切换了项目，此时的 activeProjectId
+    // 已经不是发起任务时的项目。直接写内存 store 会被 split storage 按当前激活
+    // 项目路由，导致图片落到别的项目文件夹。这里改为直接写入目标项目的文件。
+    if (targetProjectId && activeProjectId && targetProjectId !== activeProjectId) {
+      console.log('[Freedom] Project switched during generation, saving media to original project:', targetProjectId);
+      void mediaStore.addMediaFromUrlToProject({
+        url,
+        name: mediaName,
+        type: type as any,
+        source,
+        projectId: targetProjectId,
+      });
+      return undefined;
+    }
+
     const mediaId = mediaStore.addMediaFromUrl({
       url,
-      name: `${name}_${Date.now()}`,
+      name: mediaName,
       type: type as any,
       source,
       projectId: targetProjectId || undefined,

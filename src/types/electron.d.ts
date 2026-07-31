@@ -54,6 +54,8 @@ declare global {
       getCurrentVersion: () => Promise<string>;
       checkForUpdates: () => Promise<UpdateCheckResult>;
       openExternalLink: (url: string) => Promise<OpenExternalResult>;
+      /** 打开公司内网共享盘中对应版本号的安装包目录 */
+      openIntranetUpdateDir?: (version?: string) => Promise<OpenExternalResult>;
     };
     appNotification?: {
       show: (options: {

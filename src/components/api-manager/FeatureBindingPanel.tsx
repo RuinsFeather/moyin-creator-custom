@@ -185,6 +185,12 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
   'grok-video-3': ['video_generation'],
   'grok-video-3-10s': ['video_generation'],
   'grok-video-3-15s': ['video_generation'],
+  'grok-imagine-video': ['video_generation'],
+  'grok-imagine-video-1.5-preview': ['video_generation'],
+  'grok-imagine-1.5': ['video_generation'],
+  'viduq3': ['video_generation'],
+  'viduq3-mix': ['video_generation'],
+  'viduq3-turbo': ['video_generation'],
   'mj_video': ['video_generation'],
 
   // ---- 图片理解/视觉模型 ----
@@ -221,7 +227,8 @@ function modelSupportsCapability(
   provider: { platform: string; capabilities?: ModelCapability[] },
   required?: ModelCapability,
   modelType?: string,     // "文本" | "图像" | "音视频" | "检索"
-  modelTagsList?: string[] // ["对话","识图","工具"]
+  modelTagsList?: string[], // ["对话","识图","工具"]
+  endpointTypes?: string[],
 ): boolean {
   if (!required) return true;
 
@@ -240,7 +247,18 @@ function modelSupportsCapability(
     return inferred.includes(required);
   }
 
-  // 3. 平台元数据（来自 /api/pricing_new 的 model_type + tags）
+  // 3. API 端点是生成能力的强信号。部分视频模型的 tags 只有“首帧”，
+  // 但 supported_endpoint_types 会明确标注其视频任务类型。
+  const videoEndpointTypes = new Set([
+    '视频统一格式', 'openAI视频格式', 'openAI官方视频格式', '异步',
+    '豆包视频异步', 'grok视频', '文生视频', '图生视频', '视频延长',
+    '海螺视频生成', 'luma视频生成', 'luma视频扩展', 'runway图生视频',
+    'aigc-video', 'minimax/video-01异步', 'openai-response',
+  ]);
+  const hasVideoEndpoint = endpointTypes?.some(type => videoEndpointTypes.has(type)) ?? false;
+  if (hasVideoEndpoint) return required === 'video_generation';
+
+  // 4. 平台元数据（来自 /api/pricing_new 的 model_type + tags）
   if (modelType) {
     switch (required) {
       case 'text':
@@ -260,12 +278,12 @@ function modelSupportsCapability(
     }
   }
 
-  // 4. 模型名称模式推断（非 MemeFast 的其他供应商）
+  // 5. 模型名称模式推断（非 MemeFast 的其他供应商）
   if (inferred.length > 0) {
     return inferred.includes(required);
   }
 
-  // 5. 平台级别 fallback
+  // 6. 平台级别 fallback
   return providerSupportsCapability(provider, required);
 }
 
@@ -274,6 +292,7 @@ export function FeatureBindingPanel() {
     providers,
     modelTypes,
     modelTags,
+    modelEndpointTypes,
     modelEnableGroups,
     setFeatureBindings,
     toggleFeatureBinding,
@@ -314,7 +333,8 @@ export function FeatureBindingPanel() {
           // 使用平台元数据 (model_type/tags) 进行精确分类
           const mType = modelTypes[model];
           const mTags = modelTags[model];
-          if (!modelSupportsCapability(model, provider, feature.requiredCapability, mType, mTags)) continue;
+          const mEndpointTypes = modelEndpointTypes[model];
+          if (!modelSupportsCapability(model, provider, feature.requiredCapability, mType, mTags, mEndpointTypes)) continue;
           opts.push({
             providerId: provider.id,
             platform: provider.platform,
@@ -337,7 +357,7 @@ export function FeatureBindingPanel() {
     }
 
     return map;
-  }, [providers, configuredProviderIds, modelTypes, modelTags]);
+  }, [providers, configuredProviderIds, modelTypes, modelTags, modelEndpointTypes]);
 
   // 计算已配置的功能数（至少有一个有效绑定）
   const configuredCount = useMemo(() => {

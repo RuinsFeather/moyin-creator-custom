@@ -4,6 +4,7 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import { createSplitStorage } from "@/lib/project-storage";
+import { fileStorage } from "@/lib/indexed-db-storage";
 import { storageService } from "@/lib/storage/storage-service";
 import { generateUUID } from "@/lib/utils";
 import { MediaType, MediaFile, MediaFolder, MediaFolderCategory } from "@/types/media";
@@ -92,7 +93,21 @@ interface MediaStore {
     folderId?: string | null;
     projectId?: string;
   }) => string;
-  
+
+  // AI generated content that belongs to a project other than the active one.
+  // 直接把元数据写入 `_p/{projectId}/media`，不经过内存 store，
+  // 避免持久化时被 split storage 路由到当前激活项目。
+  addMediaFromUrlToProject: (options: {
+    url: string;
+    name: string;
+    type: MediaType;
+    source: 'upload' | 'ai-image' | 'ai-video';
+    thumbnailUrl?: string;
+    duration?: number;
+    folderId?: string | null;
+    projectId: string;
+  }) => Promise<string | undefined>;
+
   // Get or create system category folder (replaces getOrCreateAIFolder)
   getOrCreateCategoryFolder: (category: MediaFolderCategory) => string;
   
@@ -550,6 +565,77 @@ export const useMediaStore = create<MediaStore>()(
     }
     
     return id;
+  },
+
+  // 写入「非当前激活项目」的素材：绕过内存 store，直接落到该项目的持久化文件。
+  // 场景：自由板块生成任务是后台异步的，用户在生成期间切换了项目。
+  // 若仍走 addMediaFromUrl，persist 会用当前 activeProjectId 路由，导致图片跑到别的项目。
+  addMediaFromUrlToProject: async ({
+    url, name, type, source, thumbnailUrl, duration, folderId, projectId,
+  }) => {
+    const id = generateUUID();
+    let finalUrl = url;
+    let finalThumbnailUrl = thumbnailUrl;
+
+    // 先把远端/base64 资源落到本地，保证元数据里存的是可持久化的 local-image:// 路径
+    if ((type === 'image' || type === 'video') && url && (url.startsWith('http') || url.startsWith('data:'))) {
+      try {
+        const category: ImageCategory = type === 'video' ? 'videos' : 'shots';
+        const ext = type === 'video' ? '.mp4' : '.png';
+        const filename = `${name.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}${ext}`;
+        const localPath = await saveImageToLocal(url, category, filename);
+        if (localPath !== url && localPath.startsWith('local-image://')) {
+          finalUrl = localPath;
+        }
+        if (thumbnailUrl && thumbnailUrl.startsWith('data:')) {
+          const thumbFilename = `thumb_${name.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}.png`;
+          const thumbLocalPath = await saveImageToLocal(thumbnailUrl, category, thumbFilename);
+          if (thumbLocalPath !== thumbnailUrl && thumbLocalPath.startsWith('local-image://')) {
+            finalThumbnailUrl = thumbLocalPath;
+          }
+        }
+      } catch (error) {
+        console.warn('[MediaStore] Cross-project local save failed:', error);
+      }
+    }
+
+    // blob:/data: 无法持久化，与 partialize 的策略保持一致
+    const isTransientUrl = (u?: string) => !u || u.startsWith('blob:') || u.startsWith('data:');
+    const newItem: MediaFile = {
+      id,
+      name,
+      type,
+      url: finalUrl,
+      thumbnailUrl: isTransientUrl(finalThumbnailUrl) ? undefined : finalThumbnailUrl,
+      duration,
+      source,
+      folderId: folderId ?? null,
+      projectId,
+      file: null as any,
+    };
+
+    const key = `_p/${projectId}/media`;
+    try {
+      const raw = await fileStorage.getItem(key);
+      const parsed = raw ? JSON.parse(raw) : null;
+      const state = (parsed?.state ?? parsed ?? {}) as Partial<MediaPersistedState>;
+      const nextState: MediaPersistedState = {
+        folders: Array.isArray(state.folders) ? state.folders : [],
+        mediaFiles: [
+          ...(Array.isArray(state.mediaFiles) ? state.mediaFiles : []),
+          { ...newItem, url: isTransientUrl(finalUrl) ? undefined : finalUrl } as MediaFile,
+        ],
+      };
+      await fileStorage.setItem(key, JSON.stringify({
+        state: nextState,
+        version: parsed?.version ?? 0,
+      }));
+      console.log(`[MediaStore] Saved media to project ${projectId.substring(0, 8)} (not active)`);
+      return id;
+    } catch (error) {
+      console.warn('[MediaStore] Failed to save media to project file:', error);
+      return undefined;
+    }
   },
 
   // Get or create a system category folder

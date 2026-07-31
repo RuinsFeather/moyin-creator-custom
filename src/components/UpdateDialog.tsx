@@ -4,7 +4,7 @@
 "use client";
 
 import { useMemo } from "react";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, FolderOpen } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -53,6 +53,21 @@ export function UpdateDialog({
     onOpenChange(false);
   };
 
+  const handleOpenIntranetDir = async () => {
+    if (!window.appUpdater?.openIntranetUpdateDir) {
+      toast.error("请在桌面版中使用此功能");
+      return;
+    }
+    const result = await window.appUpdater.openIntranetUpdateDir(
+      updateInfo?.latestVersion,
+    );
+    if (!result.success) {
+      toast.error(result.error || "打开内网目录失败，请确认已连接公司内网");
+      return;
+    }
+    onOpenChange(false);
+  };
+
   if (!updateInfo) return null;
 
   return (
@@ -90,7 +105,7 @@ export function UpdateDialog({
               <div>
                 <p className="text-sm font-medium text-foreground">下载方式</p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  可前往 GitHub 下载最新安装包。
+                  可前往 GitHub 下载，或直接打开公司内网共享盘目录。
                 </p>
               </div>
             </div>
@@ -109,6 +124,15 @@ export function UpdateDialog({
                   GitHub 下载
                 </Button>
               )}
+              <Button
+                variant="outline"
+                className="flex-1"
+                onClick={() => void handleOpenIntranetDir()}
+                title={`\\\\YD\\ALL_Proj\\临时交换文件使用\\_素材\\软件\\有点创艺\\${updateInfo.latestVersion}`}
+              >
+                <FolderOpen className="h-4 w-4 mr-2" />
+                内网目录更新
+              </Button>
             </div>
           </div>
         </div>

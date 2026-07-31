@@ -83,6 +83,8 @@ contextBridge.exposeInMainWorld('appUpdater', {
   getCurrentVersion: () => ipcRenderer.invoke('app-updater-get-current-version'),
   checkForUpdates: () => ipcRenderer.invoke('app-updater-check'),
   openExternalLink: (url: string) => ipcRenderer.invoke('app-updater-open-link', url),
+  openIntranetUpdateDir: (version?: string) =>
+    ipcRenderer.invoke('app-updater-open-intranet-dir', version),
 })
 
 // 系统通知（视频生成成功等）：点击通知或按钮可将主窗口带到前台

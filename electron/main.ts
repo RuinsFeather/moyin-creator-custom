@@ -1675,6 +1675,41 @@ ipcMain.handle('app-updater-open-link', async (_event, url: string): Promise<Ope
   }
 })
 
+/** 公司内网共享盘中存放安装包的根目录（Windows UNC 路径） */
+const INTRANET_UPDATE_ROOT = '\\\\YD\\ALL_Proj\\临时交换文件使用\\_素材\\软件\\有点创艺'
+
+ipcMain.handle('app-updater-open-intranet-dir', async (_event, version?: string): Promise<OpenExternalResult> => {
+  if (process.platform !== 'win32') {
+    return { success: false, error: '内网目录仅支持 Windows 系统' }
+  }
+
+  // 仅允许版本号字符，避免路径穿越
+  const safeVersion = typeof version === 'string' ? version.trim().replace(/^v/i, '') : ''
+  if (safeVersion && !/^[0-9A-Za-z._-]+$/.test(safeVersion)) {
+    return { success: false, error: '无效的版本号' }
+  }
+
+  const targetDir = safeVersion
+    ? path.join(INTRANET_UPDATE_ROOT, safeVersion)
+    : INTRANET_UPDATE_ROOT
+
+  try {
+    // 目标版本目录不存在时，回退到根目录，方便用户自行查找
+    const dirToOpen = fs.existsSync(targetDir) ? targetDir : INTRANET_UPDATE_ROOT
+    const errorMessage = await shell.openPath(dirToOpen)
+    if (errorMessage) {
+      return { success: false, error: errorMessage }
+    }
+    return { success: true }
+  } catch (error) {
+    console.error('Failed to open intranet update dir:', error)
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+})
+
 // ==================== 系统通知（视频生成成功等） ====================
 type ShowNotificationOptions = {
   title: string
