@@ -21,6 +21,8 @@ import { useSceneStore } from '@/stores/scene-store';
 import { useSimpleTimelineStore } from '@/stores/simple-timeline-store';
 import { useSClassStore } from '@/stores/sclass-store';
 import { useFreedomHistoryStore } from '@/stores/freedom-history-store';
+import { useBlueprintStore } from '@/stores/blueprint-store';
+import { useScriptWorkspaceStore } from '@/stores/script-workspace-store';
 
 /**
  * Switch to a different project. Saves current project data and loads new project data.
@@ -66,6 +68,12 @@ export async function switchProject(newProjectId: string): Promise<void> {
   }
 
   try {
+    await useScriptWorkspaceStore.persist.rehydrate();
+  } catch (e) {
+    console.warn('[ProjectSwitcher] Failed to rehydrate script workspace store:', e);
+  }
+
+  try {
     await useDirectorStore.persist.rehydrate();
   } catch (e) {
     console.warn('[ProjectSwitcher] Failed to rehydrate director store:', e);
@@ -108,12 +116,19 @@ export async function switchProject(newProjectId: string): Promise<void> {
     console.warn('[ProjectSwitcher] Failed to rehydrate freedom history store:', e);
   }
 
+  try {
+    await useBlueprintStore.persist.rehydrate();
+  } catch (e) {
+    console.warn('[ProjectSwitcher] Failed to rehydrate blueprint store:', e);
+  }
+
   // 4. NOW sync internal activeProjectId in stores that track it.
   //    By this point, per-project data is already loaded into memory via rehydrate(),
   //    so the persist write triggered here will save the correct data (not empty defaults).
   useScriptStore.getState().setActiveProjectId(newProjectId);
   useDirectorStore.getState().setActiveProjectId(newProjectId);
   useSClassStore.getState().setActiveProjectId(newProjectId);
+  useBlueprintStore.getState().setActiveProjectId(newProjectId);
 
   // 5. Ensure project data exists in stores that need it
   useScriptStore.getState().ensureProject(newProjectId);

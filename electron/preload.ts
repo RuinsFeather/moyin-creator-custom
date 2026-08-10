@@ -56,6 +56,25 @@ contextBridge.exposeInMainWorld('fileStorage', {
   listDirs: (prefix: string) => ipcRenderer.invoke('file-storage-list-dirs', prefix),
   removeDir: (prefix: string) => ipcRenderer.invoke('file-storage-remove-dir', prefix),
 })
+
+contextBridge.exposeInMainWorld('scriptWorkspaceFs', {
+  selectRoot: (): Promise<string | null> => ipcRenderer.invoke('script-workspace:select-root'),
+  scan: (rootPath: string) => ipcRenderer.invoke('script-workspace:scan', rootPath),
+  writeFile: (rootPath: string, relativePath: string, content: string) =>
+    ipcRenderer.invoke('script-workspace:write-file', rootPath, relativePath, content),
+  readFile: (rootPath: string, relativePath: string) =>
+    ipcRenderer.invoke('script-workspace:read-file', rootPath, relativePath),
+  createDirectory: (rootPath: string, relativePath: string) =>
+    ipcRenderer.invoke('script-workspace:create-directory', rootPath, relativePath),
+  remove: (rootPath: string, relativePath: string) =>
+    ipcRenderer.invoke('script-workspace:delete', rootPath, relativePath),
+  move: (rootPath: string, sourcePath: string, targetPath: string) =>
+    ipcRenderer.invoke('script-workspace:move', rootPath, sourcePath, targetPath),
+  copy: (rootPath: string, sourcePath: string, targetPath: string) =>
+    ipcRenderer.invoke('script-workspace:copy', rootPath, sourcePath, targetPath),
+  reveal: (rootPath: string, relativePath: string) =>
+    ipcRenderer.invoke('script-workspace:reveal', rootPath, relativePath),
+})
 // Storage manager API for paths, cache, import/export
 contextBridge.exposeInMainWorld('storageManager', {
   getPaths: () => ipcRenderer.invoke('storage-get-paths'),

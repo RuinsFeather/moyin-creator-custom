@@ -176,6 +176,7 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
   'gemini-veo': ['video_generation'],
   'doubao-seedance-1-5-pro': ['video_generation'],
   'doubao-seedance-1-5-pro-251215': ['video_generation'],
+  'doubao-seedance-2-5-260628': ['video_generation'],
   'doubao-seedream-4-5-251128': ['image_generation'],
   'veo3.1': ['video_generation'],
   'sora-2-all': ['video_generation'],

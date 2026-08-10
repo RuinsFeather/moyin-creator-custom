@@ -45,6 +45,7 @@ import {
   SEEDANCE_LIMITS,
   type GroupPromptResult,
 } from "./sclass-prompt-builder";
+import { resolveSeedanceCapability } from "@/lib/video/seedance-capability";
 
 // ==================== Types ====================
 
@@ -174,6 +175,16 @@ export function useSClassGeneration() {
       }
       const sclassProjectData = getProjectData(projectId);
       const sclassConfig = sclassProjectData.config;
+      const seedanceCapability = resolveSeedanceCapability(featureConfig.model);
+      const seedanceLimits = {
+        maxImages: seedanceCapability.referenceLimits.maxImages,
+        maxVideos: seedanceCapability.referenceLimits.maxVideos,
+        maxAudios: seedanceCapability.referenceLimits.maxAudios,
+        maxTotalFiles: seedanceCapability.referenceLimits.maxTotal,
+        maxPromptChars: SEEDANCE_LIMITS.maxPromptChars,
+        minDuration: seedanceCapability.minDuration,
+        maxDuration: seedanceCapability.maxDuration,
+      };
 
       // 1b. 从 director-store 直读共享配置（单一数据源，避免双 store 同步问题）
       const directorState = useDirectorStore.getState();
@@ -272,6 +283,7 @@ export function useSClassGeneration() {
           aspectRatio,
           enableLipSync,
           gridImageRef,
+          limits: seedanceLimits,
         });
 
         if (promptResult.refs.overLimit) {
@@ -332,8 +344,8 @@ export function useSClassGeneration() {
         const prompt =
           promptResult.prompt || `Multi-shot video: ${group.name}`;
         const duration = Math.max(
-          SEEDANCE_LIMITS.minDuration,
-          Math.min(SEEDANCE_LIMITS.maxDuration, group.totalDuration || sclassConfig.defaultDuration)
+          seedanceLimits.minDuration,
+          Math.min(seedanceLimits.maxDuration, group.totalDuration || sclassConfig.defaultDuration)
         );
 
         console.log("[SClassGen] Generating group video:", {

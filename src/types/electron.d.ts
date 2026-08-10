@@ -29,6 +29,25 @@ declare global {
       listDirs: (prefix: string) => Promise<string[]>;
       removeDir: (prefix: string) => Promise<boolean>;
     };
+    scriptWorkspaceFs?: {
+      selectRoot: () => Promise<string | null>;
+      scan: (rootPath: string) => Promise<Array<{
+        name: string;
+        relativePath: string;
+        kind: 'file' | 'directory';
+        editable: boolean;
+        size?: number;
+        mtime?: number;
+        content?: string;
+      }>>;
+      writeFile: (rootPath: string, relativePath: string, content: string) => Promise<{ mtime: number; size: number }>;
+      readFile: (rootPath: string, relativePath: string) => Promise<string>;
+      createDirectory: (rootPath: string, relativePath: string) => Promise<boolean>;
+      remove: (rootPath: string, relativePath: string) => Promise<boolean>;
+      move: (rootPath: string, sourcePath: string, targetPath: string) => Promise<boolean>;
+      copy: (rootPath: string, sourcePath: string, targetPath: string) => Promise<boolean>;
+      reveal: (rootPath: string, relativePath: string) => Promise<boolean>;
+    };
     storageManager?: {
       getPaths: () => Promise<{ basePath: string; projectPath: string; mediaPath: string; cachePath: string }>;
       selectDirectory: () => Promise<string | null>;

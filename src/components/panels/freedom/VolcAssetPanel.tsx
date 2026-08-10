@@ -318,7 +318,7 @@ export function VolcAssetPanel({
       setUploadProgress("准备上传...");
 
       try {
-        const { uploadBase64Image } = await import(
+        const { uploadAssetImage } = await import(
           "@/lib/utils/image-upload"
         );
         const results: VolcAssetItem[] = [];
@@ -341,11 +341,19 @@ export function VolcAssetPanel({
             // 2. 缩略图先保存到本地。素材管理面板不再依赖火山返回的临时/远程 URL 展示。
             const localThumbnailUrl = await saveAssetThumbnailLocally(dataUrl, file.name);
 
-            // 3. 上传图床获取公网 URL，供火山 CreateAsset 使用
+            // 3. 优先上传对象存储获取公网 URL；对象存储不可用或失败时降级到图片图床。
+            //    使用原始 File 对应的 localPath，避免把图片先转成 base64 再上传图床。
             setUploadProgress(
-              `(${i + 1}/${imageFiles.length}) ${file.name}：上传到图床...`,
+              `(${i + 1}/${imageFiles.length}) ${file.name}：上传对象存储...`,
             );
-            const publicUrl = await uploadBase64Image(dataUrl);
+            const localPath = (() => {
+              try {
+                return window.objectStorage?.getPathForFile(file) || undefined;
+              } catch {
+                return undefined;
+              }
+            })();
+            const publicUrl = await uploadAssetImage(dataUrl, localPath);
 
             // 4. 提交到火山引擎素材资产库。
             // 这里仅创建资产，不逐张轮询 GetAsset，避免多图上传时密集触发 GetAsset 导致 429。

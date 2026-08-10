@@ -4,7 +4,6 @@
 import {
   ClapperboardIcon,
   UsersIcon,
-  VideoIcon,
   SettingsIcon,
   MapPinIcon,
   FileTextIcon,
@@ -12,7 +11,6 @@ import {
   SparklesIcon,
   PaletteIcon,
   LayoutDashboardIcon,
-  FolderOpenIcon,
   BugIcon,
   LucideIcon,
 } from "lucide-react";
@@ -20,7 +18,8 @@ import { create } from "zustand";
 import type { CharacterIdentityAnchors, CharacterNegativePrompt } from "@/types/script";
 
 // Tab-based navigation (simpler flat structure)
-export type Tab = "dashboard" | "overview" | "script" | "characters" | "scenes" | "freedom" | "storyboard" | "director" | "sclass" | "assets" | "media" | "export" | "settings" | "debug";
+// Legacy tabs are kept for backward compatibility but hidden from main nav
+export type Tab = "dashboard" | "overview" | "script" | "characters" | "scenes" | "freedom" | "storyboard" | "director" | "sclass" | "assets" | "media" | "export" | "settings" | "debug" | "blueprint" | "project-assets";
 
 export interface NavItem {
   id: Tab;
@@ -29,18 +28,34 @@ export interface NavItem {
   phase?: string; // Optional phase indicator
 }
 
-// Main navigation items (top section)
+/**
+ * Legacy tab → new tab redirect mapping (四模块迁移).
+ * Old tabs that are no longer in the main nav redirect to their new home.
+ */
+export const LEGACY_TAB_REDIRECTS: Partial<Record<Tab, Tab>> = {
+  overview: "script",
+  characters: "script",
+  scenes: "script",
+  director: "blueprint",
+  sclass: "blueprint",
+  media: "freedom",
+  export: "freedom",
+  assets: "freedom",
+  "project-assets": "freedom",
+};
+
+/** Resolve a tab, redirecting legacy tabs to their new home. */
+export function resolveTab(tab: Tab): Tab {
+  return LEGACY_TAB_REDIRECTS[tab] ?? tab;
+}
+
+// Main navigation items (top section) — four-module flow
+// 蓝图入口直接常驻侧边栏（§12.5 灰度发布——本版本不对外发布，无需功能开关控制）
 export const mainNavItems: NavItem[] = [
-  { id: "overview", label: "概览", icon: LayoutDashboardIcon },
   { id: "script", label: "剧本", icon: FileTextIcon, phase: "01" },
-  { id: "characters", label: "角色", icon: UsersIcon, phase: "02" },
-  { id: "scenes", label: "场景", icon: MapPinIcon, phase: "02" },
-  { id: "storyboard", label: "分镜表", icon: FilmIcon, phase: "03" },
-  { id: "director", label: "导演", icon: ClapperboardIcon, phase: "03" },
-  { id: "assets", label: "资产", icon: FolderOpenIcon },
-  { id: "media", label: "素材", icon: VideoIcon },
-  { id: "export", label: "导出", icon: FilmIcon, phase: "04" },
-  { id: "freedom", label: "自由", icon: PaletteIcon, phase: "02" },
+  { id: "storyboard", label: "分镜", icon: FilmIcon, phase: "02" },
+  { id: "blueprint", label: "蓝图", icon: SparklesIcon, phase: "03" },
+  { id: "freedom", label: "自由", icon: PaletteIcon, phase: "04" },
 ];
 
 // Bottom navigation items
@@ -49,7 +64,7 @@ export const bottomNavItems: NavItem[] = [
 ];
 
 // Legacy exports for compatibility
-export type Stage = "script" | "assets" | "director" | "export";
+export type Stage = "script" | "storyboard" | "blueprint" | "freedom";
 export interface StageConfig {
   id: Stage;
   label: string;
@@ -59,26 +74,28 @@ export interface StageConfig {
 }
 export const stages: StageConfig[] = [
   { id: "script", label: "剧本", phase: "Phase 01", icon: FileTextIcon, tabs: ["script"] },
-  { id: "assets", label: "角色与场景", phase: "Phase 02", icon: UsersIcon, tabs: ["characters", "scenes"] },
-  { id: "director", label: "导演工作台", phase: "Phase 03", icon: ClapperboardIcon, tabs: ["storyboard", "director"] },
-  { id: "export", label: "成片与导出", phase: "Phase 04", icon: FilmIcon, tabs: ["export"] },
+  { id: "storyboard", label: "分镜", phase: "Phase 02", icon: FilmIcon, tabs: ["storyboard"] },
+  { id: "blueprint", label: "蓝图", phase: "Phase 03", icon: SparklesIcon, tabs: ["blueprint"] },
+  { id: "freedom", label: "自由", phase: "Phase 04", icon: PaletteIcon, tabs: ["freedom"] },
 ];
 
 export const tabs: { [key in Tab]: { icon: LucideIcon; label: string; stage?: Stage } } = {
   dashboard: { icon: FileTextIcon, label: "项目" },
   overview: { icon: LayoutDashboardIcon, label: "概览" },
   script: { icon: FileTextIcon, label: "剧本", stage: "script" },
-  characters: { icon: UsersIcon, label: "角色", stage: "assets" },
-  scenes: { icon: MapPinIcon, label: "场景", stage: "assets" },
-  freedom: { icon: PaletteIcon, label: "自由" },
-  storyboard: { icon: FilmIcon, label: "分镜表", stage: "director" },
-  director: { icon: ClapperboardIcon, label: "导演", stage: "director" },
-  sclass: { icon: SparklesIcon, label: "S级", stage: "director" },
-  assets: { icon: FolderOpenIcon, label: "资产" },
-  media: { icon: VideoIcon, label: "素材" },
-  export: { icon: FilmIcon, label: "导出", stage: "export" },
+  characters: { icon: UsersIcon, label: "角色", stage: "script" },
+  scenes: { icon: MapPinIcon, label: "场景", stage: "script" },
+  freedom: { icon: PaletteIcon, label: "自由", stage: "freedom" },
+  storyboard: { icon: FilmIcon, label: "分镜", stage: "storyboard" },
+  director: { icon: ClapperboardIcon, label: "导演", stage: "blueprint" },
+  sclass: { icon: SparklesIcon, label: "S级", stage: "blueprint" },
+  assets: { icon: PaletteIcon, label: "资产", stage: "freedom" },
+  media: { icon: PaletteIcon, label: "素材", stage: "freedom" },
+  export: { icon: FilmIcon, label: "导出", stage: "freedom" },
   settings: { icon: SettingsIcon, label: "设置" },
   debug: { icon: BugIcon, label: "调试" },
+  blueprint: { icon: SparklesIcon, label: "蓝图", stage: "blueprint" },
+  "project-assets": { icon: PaletteIcon, label: "项目资产", stage: "freedom" },
 };
 
 // Data passed from script panel to director
@@ -204,9 +221,6 @@ interface MediaPanelStore {
   activeEpisodeScopeKey: string | null; // `${projectId}::ep-${episodeIndex}`
   enterEpisode: (index: number, projectId?: string) => void;
   backToSeries: () => void;
-  highlightMediaId: string | null;
-  requestRevealMedia: (mediaId: string) => void;
-  clearHighlight: () => void;
   // Cross-panel data passing
   pendingDirectorData: PendingDirectorData | null;
   setPendingDirectorData: (data: PendingDirectorData | null) => void;
@@ -228,17 +242,16 @@ export const useMediaPanelStore = create<MediaPanelStore>((set) => ({
   activeStage: "script",
   inProject: false,
   setActiveTab: (tab) => {
+    // Redirect legacy tabs to their new home
+    const resolved = resolveTab(tab);
     // Auto-update stage based on tab
-    const tabConfig = tabs[tab];
+    const tabConfig = tabs[resolved];
     if (tabConfig?.stage) {
-      set({ activeTab: tab, activeStage: tabConfig.stage, inProject: true });
-    } else if (tab === "dashboard") {
-      set({ activeTab: tab, inProject: false, activeEpisodeIndex: null, activeEpisodeScopeKey: null });
-    } else if (tab === "overview" || tab === "freedom") {
-      // 项目级 tab（无 stage 但属于项目内）
-      set({ activeTab: tab, inProject: true });
+      set({ activeTab: resolved, activeStage: tabConfig.stage, inProject: true });
+    } else if (resolved === "dashboard") {
+      set({ activeTab: resolved, inProject: false, activeEpisodeIndex: null, activeEpisodeScopeKey: null });
     } else {
-      set({ activeTab: tab });
+      set({ activeTab: resolved, inProject: true });
     }
   },
   setActiveStage: (stage) => {
@@ -268,25 +281,21 @@ export const useMediaPanelStore = create<MediaPanelStore>((set) => ({
   backToSeries: () => set({
     activeEpisodeIndex: null,
     activeEpisodeScopeKey: null,
-    activeTab: "overview",
+    activeTab: "script",
   }),
-  highlightMediaId: null,
-  requestRevealMedia: (mediaId) =>
-    set({ activeTab: "media", highlightMediaId: mediaId }),
-  clearHighlight: () => set({ highlightMediaId: null }),
   // Cross-panel data passing
   pendingDirectorData: null,
   setPendingDirectorData: (data) => set({ pendingDirectorData: data }),
   goToDirectorWithData: (data) => set({
     pendingDirectorData: data,
-    activeTab: "director",
-    activeStage: "director",
+    activeTab: "blueprint",
+    activeStage: "blueprint",
     inProject: true,
   }),
   goToStoryboardWithData: (data) => set({
     pendingDirectorData: data,
     activeTab: "storyboard",
-    activeStage: "director",
+    activeStage: "storyboard",
     inProject: true,
   }),
   // Character library data passing
@@ -295,7 +304,7 @@ export const useMediaPanelStore = create<MediaPanelStore>((set) => ({
   goToCharacterWithData: (data) => set({
     pendingCharacterData: data,
     activeTab: "characters",
-    activeStage: "assets",
+    activeStage: "script",
     inProject: true,
   }),
   // Scene library data passing
@@ -304,7 +313,7 @@ export const useMediaPanelStore = create<MediaPanelStore>((set) => ({
   goToSceneWithData: (data) => set({
     pendingSceneData: data,
     activeTab: "scenes",
-    activeStage: "assets",
+    activeStage: "script",
     inProject: true,
   }),
 }));

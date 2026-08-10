@@ -53,6 +53,7 @@ const PLATFORM_PRESETS: Array<{
     services: ["对话", "图片生成", "视频生成", "图片理解"],
     models: [
       "doubao-seed-2-0-pro-260215",
+      "doubao-seedance-2-5-260628",
       "doubao-seedance-2-0-260128",
     ],
     recommended: true,

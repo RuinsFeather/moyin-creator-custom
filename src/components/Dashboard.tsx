@@ -77,14 +77,14 @@ export function Dashboard() {
       setNewProjectName("");
       setShowNewProject(false);
       await switchProject(project.id);
-      setActiveTab("overview");
+      setActiveTab("script");
     }
   };
 
   const handleOpenProject = async (projectId: string) => {
     if (selectionMode) return; // Don't open in selection mode
     await switchProject(projectId);
-    setActiveTab("overview");
+    setActiveTab("script");
   };
 
   // ==================== Selection ====================
@@ -180,6 +180,7 @@ export function Dashboard() {
       // activeProjectId still points to the source project during this step.
       const KNOWN_STORES = [
         'director', 'script', 'sclass', 'timeline',   // createProjectScopedStorage
+        'blueprint',                                  // createProjectScopedStorage
         'characters', 'media', 'scenes',               // createSplitStorage (per-project portion)
       ];
 

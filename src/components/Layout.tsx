@@ -4,32 +4,28 @@
 import { TabBar } from "./TabBar";
 import { PreviewPanel } from "./PreviewPanel";
 import { RightPanel } from "./RightPanel";
-import { SimpleTimeline } from "./SimpleTimeline";
 import { Dashboard } from "./Dashboard";
 import { ProjectHeader } from "./ProjectHeader";
-import { useMediaPanelStore } from "@/stores/media-panel-store";
+import { useMediaPanelStore, resolveTab } from "@/stores/media-panel-store";
 import {
   ResizablePanelGroup,
   ResizablePanel,
   ResizableHandle,
 } from "@/components/ui/resizable";
 
-// Panel imports
+// Four-module panel imports
 import { ScriptView } from "@/components/panels/script";
-import { SClassView } from "@/components/panels/sclass";
-import { CharactersView } from "@/components/panels/characters";
-import { ScenesView } from "@/components/panels/scenes";
-import { FreedomView } from "@/components/panels/freedom";
-import { MediaView } from "@/components/panels/media";
 import { SettingsPanel } from "@/components/panels/SettingsPanel";
-import { ExportView } from "@/components/panels/export";
-import { OverviewPanel } from "@/components/panels/overview";
-import { AssetsView } from "@/components/panels/assets";
-import { StoryboardTablePanel } from "@/components/panels/storyboard-table";
+import { StoryboardPanel } from "@/components/panels/storyboard";
 import { DebugPanel } from "@/components/panels/DebugPanel";
+import { BlueprintView } from "@/components/blueprint/BlueprintView";
+import { ScriptWorkspace } from "@/components/script-workspace";
+import { FreedomView } from "@/components/panels/freedom";
 
 export function Layout() {
-  const { activeTab, inProject } = useMediaPanelStore();
+  const { activeTab: rawTab, inProject } = useMediaPanelStore();
+  // Resolve legacy tabs to their new module
+  const activeTab = resolveTab(rawTab);
 
   // Dashboard mode - show full-screen dashboard or settings
   if (!inProject) {
@@ -45,47 +41,29 @@ export function Layout() {
 
   // Full-screen views (no resizable panels)
   // 这些板块有自己的多栏布局，不需要全局的预览和属性面板
-  const fullScreenTabs = ["export", "settings", "overview", "script", "characters", "scenes", "freedom", "assets", "storyboard", "debug"];
+  const fullScreenTabs: string[] = ["settings", "script", "storyboard", "debug", "blueprint", "freedom"];
   if (fullScreenTabs.includes(activeTab)) {
     return (
       <div className="h-full flex bg-background">
         <TabBar />
         <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
           <ProjectHeader />
-          {activeTab === "export" && <ExportView />}
           {activeTab === "settings" && <SettingsPanel />}
-          {activeTab === "overview" && <OverviewPanel />}
-          {activeTab === "script" && <ScriptView />}
-          {activeTab === "characters" && <CharactersView />}
-          {activeTab === "scenes" && <ScenesView />}
-          {activeTab === "freedom" && <FreedomView />}
-          {activeTab === "assets" && <AssetsView />}
-          {activeTab === "storyboard" && <StoryboardTablePanel />}
+          {activeTab === "script" && <ScriptWorkspace />}
+          {activeTab === "storyboard" && <StoryboardPanel />}
           {activeTab === "debug" && <DebugPanel />}
+          {activeTab === "blueprint" && <BlueprintView />}
+          {activeTab === "freedom" && <FreedomView />}
         </div>
       </div>
     );
   }
 
-  // Only show timeline for director and media tabs
-  // 分镜表(storyboard) 不需要底部时间线（仅图片生成）
-  const showTimeline = activeTab === "director" || activeTab === "sclass" || activeTab === "media";
-
   // Left panel content based on active tab
+  // 注：旧 tab（characters/scenes/director/sclass/media/export/assets/project-assets/overview）
+  // 已由 resolveTab() 在入口处重定向，永远不会到达此分支
   const renderLeftPanel = () => {
     switch (activeTab) {
-      case "script":
-        return <ScriptView />;
-      case "director":
-      case "sclass":
-        // 导演：仅视频生成（分镜视频 + 预告片排列）
-        return <SClassView mode="video" />;
-      case "characters":
-        return <CharactersView />;
-      case "scenes":
-        return <ScenesView />;
-      case "media":
-        return <MediaView />;
       case "settings":
         return <SettingsPanel />;
       default:
@@ -140,15 +118,6 @@ export function Layout() {
           </ResizablePanelGroup>
         </ResizablePanel>
 
-          {/* Bottom: Timeline - only for director and media tabs */}
-          {showTimeline && (
-            <>
-              <ResizableHandle />
-              <ResizablePanel defaultSize={15} minSize={10} maxSize={40}>
-                <SimpleTimeline />
-              </ResizablePanel>
-            </>
-          )}
         </ResizablePanelGroup>
       </div>
     </div>

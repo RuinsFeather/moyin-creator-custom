@@ -11,6 +11,39 @@ import { uploadToImageHost, isImageHostConfigured } from '@/lib/image-host';
 import { readImageAsBase64 } from '@/lib/image-storage';
 
 /**
+ * 素材资产图片上传：优先使用对象存储，失败后再降级到图片图床。
+ *
+ * 对象存储上传本地文件，避免先把图片转成 base64 后再走稳定性较低的图床；
+ * imageData 仍作为降级路径保留，兼容浏览器环境或无法取得本地文件路径的场景。
+ */
+export async function uploadAssetImage(
+  imageData: string,
+  localPath?: string,
+): Promise<string> {
+  if (imageData.startsWith('http://') || imageData.startsWith('https://')) {
+    return imageData;
+  }
+
+  const objectStorage = typeof window !== 'undefined' ? window.objectStorage : undefined;
+  if (localPath && objectStorage?.upload) {
+    try {
+      const configured = await objectStorage.isConfigured?.();
+      if (configured) {
+        const url = await objectStorage.upload(localPath);
+        if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
+          return url;
+        }
+        console.warn('[ImageUpload] 对象存储返回了无效 URL，将降级到图片图床');
+      }
+    } catch (error) {
+      console.warn('[ImageUpload] 对象存储上传失败，将降级到图片图床:', error);
+    }
+  }
+
+  return uploadBase64Image(imageData);
+}
+
+/**
  * Upload base64 image and get HTTP URL
  * Uses the configured image host (imgbb/imgurl/custom)
  * Supports: base64 data URI (image/video/audio), HTTP URL, local-image:// paths

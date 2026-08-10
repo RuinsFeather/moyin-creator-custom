@@ -13,10 +13,13 @@ import { Loader2 } from "lucide-react";
 import { migrateToProjectStorage, recoverFromLegacy } from "@/lib/storage-migration";
 import { recoverAllPendingVideoTasks, isVideoStudioMounted } from "@/lib/freedom/video-task-recovery";
 import { useFreedomTaskStore } from "@/stores/freedom-task-store";
+import { useProjectStore } from "@/stores/project-store";
+import { useBlueprintStore } from "@/stores/blueprint-store";
 import type { AvailableUpdateInfo } from "@/types/update";
 
 let hasTriggeredStartupUpdateCheck = false;
 let hasTriggeredStartupTaskRecovery = false;
+let hasTriggeredBlueprintTaskRecovery = false;
 
 function App() {
   const { theme } = useThemeStore();
@@ -106,6 +109,41 @@ function App() {
     const handleOnline = () => {
       if (isVideoStudioMounted()) return;
       recoverAllPendingVideoTasks();
+    };
+    window.addEventListener("online", handleOnline);
+    return () => window.removeEventListener("online", handleOnline);
+  }, []);
+
+  // 启动时接续蓝图画布中未完成的视频生成任务（P1-2）。
+  // 蓝图数据按项目路由（createProjectScopedStorage），需先等 project/blueprint store
+  // rehydrate 完成、activeProjectId 就绪后才能定位到对应项目的视频生成节点。
+  useEffect(() => {
+    if (isMigrating || hasTriggeredBlueprintTaskRecovery) return;
+    hasTriggeredBlueprintTaskRecovery = true;
+
+    let cancelled = false;
+    (async () => {
+      await useProjectStore.persist.rehydrate();
+      if (cancelled) return;
+      await useBlueprintStore.persist.rehydrate();
+      if (cancelled) return;
+      const recovered = await useBlueprintStore.getState().recoverVideoTasks();
+      if (recovered) {
+        console.log("[App] Resumed blueprint video task(s)");
+      }
+    })().catch((error) => {
+      console.warn("[App] Blueprint video task recovery failed:", error);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isMigrating]);
+
+  // 网络恢复时再兜底扫一遍蓝图中的视频任务
+  useEffect(() => {
+    const handleOnline = () => {
+      void useBlueprintStore.getState().recoverVideoTasks();
     };
     window.addEventListener("online", handleOnline);
     return () => window.removeEventListener("online", handleOnline);

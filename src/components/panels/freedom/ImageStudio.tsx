@@ -203,6 +203,12 @@ export function ImageStudio() {
     return list.length > 0 ? (list.includes('auto') ? list : ['auto', ...list]) : DEFAULT_ASPECT_RATIOS;
   }, [selectedImageModel]);
 
+  // 模型切换后，避免保留上一个模型不支持的比例并继续提交到接口。
+  useEffect(() => {
+    if (aspectRatios.includes(imageAspectRatio)) return;
+    setImageAspectRatio(aspectRatios[0] || 'auto');
+  }, [aspectRatios, imageAspectRatio, setImageAspectRatio]);
+
   const resolutions = useMemo(() => {
     const list = (model?.inputs?.resolution?.enum as string[]) || [];
     return list.length > 0 ? list : DEFAULT_RESOLUTIONS;

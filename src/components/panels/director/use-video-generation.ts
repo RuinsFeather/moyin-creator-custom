@@ -8,6 +8,11 @@ import { normalizeUrl } from "./use-image-generation";
 import { useAPIConfigStore } from "@/stores/api-config-store";
 import { retryOperation } from "@/lib/utils/retry";
 import { corsFetch } from "@/lib/cors-fetch";
+import {
+  resolveSeedanceCapability,
+  validateSeedanceDuration,
+  validateSeedanceReferenceCounts,
+} from "@/lib/video/seedance-capability";
 
 // ==================== Content Moderation ====================
 
@@ -551,7 +556,7 @@ async function callUnifiedVideoApi(
   const isRunway = endpointTypes.some(t => /runway/i.test(t));
   const isGrok = endpointTypes.some(t => /grok/i.test(t)) || /grok/i.test(model);
   const isSeedance = /seedance|doubao-seedance/i.test(model);
-  const isSeedanceV2 = /seedance[-_](v?2|2\.0|2[-_]0)/i.test(model);
+  const isSeedanceV2 = resolveSeedanceCapability(model).structuredParameters;
   const endpointPaths = getUnifiedEndpointPaths(endpointTypes);
 
   // 构建请求体（对齐 freedom-api.ts generateVideoViaUnified）
@@ -724,8 +729,16 @@ async function callVolcVideoApi(
   // 文本内容：旧模型使用内联参数；Seedance 2.0/4K 使用结构化字段。
   let textContent = prompt;
   const resolution = (videoResolution || '720p').toLowerCase();
-  const isSeedanceV2 = /seedance[-_](v?2|2\.0|2[-_]0)/i.test(model);
+  const isSeedanceV2 = resolveSeedanceCapability(model).structuredParameters;
   const usesSeedanceV2Params = isSeedanceV2 || resolution === '4k' || aspectRatio === 'adaptive';
+  const durationError = validateSeedanceDuration(model, duration);
+  if (durationError) throw new Error(durationError);
+  const referenceError = validateSeedanceReferenceCounts(model, {
+    images: imageWithRoles.filter((image) => image.url).length,
+    videos: (videoRefs || []).filter(Boolean).length,
+    audios: (audioRefs || []).filter(Boolean).length,
+  });
+  if (referenceError) throw new Error(referenceError);
   if (!usesSeedanceV2Params) {
     textContent += ` --rs ${resolution}`;
     textContent += ` --rt ${aspectRatio}`;
@@ -753,6 +766,7 @@ async function callVolcVideoApi(
         content.push({
           type: 'video_url',
           video_url: { url: vUrl },
+          role: 'reference_video',
         });
       }
     }
@@ -765,6 +779,7 @@ async function callVolcVideoApi(
         content.push({
           type: 'audio_url',
           audio_url: { url: aUrl },
+          role: 'reference_audio',
         });
       }
     }
@@ -784,11 +799,14 @@ async function callVolcVideoApi(
   const isVolcNative = /\.volces\.com|ark\.cn-beijing/i.test(baseUrl);
   const normalizedBase = baseUrl.replace(/\/+$/, '');
   const rootBase = normalizedBase.replace(/\/v\d+$/, '');
+  const nativeApiBase = /\/api\/v3(?:\/|$)/i.test(normalizedBase)
+    ? normalizedBase.replace(/\/contents\/generations\/tasks$/i, '')
+    : `${normalizedBase}/api/v3`;
   const submitUrl = isVolcNative
-    ? `${normalizedBase}/contents/generations/tasks`
+    ? `${nativeApiBase}/contents/generations/tasks`
     : `${rootBase}/volc/v1/contents/generations/tasks`;
   const pollUrlPrefix = isVolcNative
-    ? `${normalizedBase}/contents/generations/tasks`
+    ? `${nativeApiBase}/contents/generations/tasks`
     : `${rootBase}/volc/v1/contents/generations/tasks`;
 
   console.log('[VideoGen] Volc format → POST', submitUrl, {

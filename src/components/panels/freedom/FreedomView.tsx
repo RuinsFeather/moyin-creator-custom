@@ -4,6 +4,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useFreedomStore } from '@/stores/freedom-store';
 import { ImageStudio } from './ImageStudio';
 import { VideoStudio } from './VideoStudio';
+import { Image, Video } from 'lucide-react';
 
 export function FreedomView() {
   const { activeStudio, setActiveStudio } = useFreedomStore();
@@ -18,10 +19,12 @@ export function FreedomView() {
         <div className="h-12 border-b flex items-center px-4 shrink-0">
           <TabsList className="h-9">
             <TabsTrigger value="image" className="text-sm px-4">
-              🖼️ 图片工作室
+              <Image className="w-4 h-4 mr-2" />
+              图片工作室
             </TabsTrigger>
             <TabsTrigger value="video" className="text-sm px-4">
-              🎥 视频工作室
+              <Video className="w-4 h-4 mr-2" />
+              视频工作室
             </TabsTrigger>
           </TabsList>
         </div>

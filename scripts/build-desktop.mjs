@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -124,7 +124,36 @@ function shouldGenerateIcons() {
     return true;
   }
 
+  if (statSync(logoPath).mtimeMs > statSync(iconPngPath).mtimeMs || statSync(logoPath).mtimeMs > statSync(iconIcoPath).mtimeMs) {
+    return true;
+  }
+
+  if (!isValidPngFrameIco(iconIcoPath)) {
+    return true;
+  }
+
   return buildTarget === 'mac' && !existsSync(iconIcnsPath);
+}
+
+function isValidPngFrameIco(filePath) {
+  try {
+    const buffer = readFileSync(filePath);
+    if (buffer.length < 6 || buffer.readUInt16LE(0) !== 0 || buffer.readUInt16LE(2) !== 1) return false;
+    const count = buffer.readUInt16LE(4);
+    const directoryEnd = 6 + count * 16;
+    if (count === 0 || directoryEnd > buffer.length) return false;
+    const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    for (let index = 0; index < count; index += 1) {
+      const entry = 6 + index * 16;
+      const size = buffer.readUInt32LE(entry + 8);
+      const offset = buffer.readUInt32LE(entry + 12);
+      if (size === 0 || offset < directoryEnd || offset + size > buffer.length) return false;
+      if (!buffer.subarray(offset, offset + 8).equals(pngSignature)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function tryRemoveDirectory(directory) {

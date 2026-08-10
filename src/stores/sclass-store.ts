@@ -51,7 +51,7 @@ export type SClassAspectRatio = '16:9' | '9:16' | '4:3' | '3:4' | '21:9' | '1:1'
 export type SClassResolution = '480p' | '720p' | '1080p';
 
 /** 输出视频时长（秒） */
-export type SClassDuration = 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15;
+export type SClassDuration = number;
 
 /** 创作模式 */
 export type SClassMode = 'storyboard' | 'free';

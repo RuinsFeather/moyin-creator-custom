@@ -225,8 +225,13 @@ function focusMainWindow() {
 }
 
 function createWindow() {
+  const windowIconPath = VITE_DEV_SERVER_URL
+    ? path.join(process.env.APP_ROOT, 'build', 'icon.png')
+    : path.join(process.resourcesPath, 'icon.png')
+
   win = new BrowserWindow({
     title: '有点创艺',
+    icon: fs.existsSync(windowIconPath) ? windowIconPath : undefined,
     width: 1400,
     height: 900,
     minWidth: 1200,
@@ -1962,5 +1967,224 @@ app.whenReady().then(() => {
     }
   })
   
+  // ==================== Script Workspace: Folder Import ====================
+  ipcMain.handle('dialog:openDirectory', async () => {
+    try {
+      const result = await dialog.showOpenDialog({
+        properties: ['openDirectory'],
+        title: '选择要导入的文件夹',
+      })
+      return result
+    } catch (error) {
+      console.error('Failed to open directory dialog:', error)
+      return { canceled: true, filePaths: [] }
+    }
+  })
+
+  ipcMain.handle('fs:readMarkdownFolder', async (_event, folderPath: string, options?: {
+    maxFiles?: number;
+    maxFileSize?: number;
+    allowedExtensions?: string[];
+  }) => {
+    const maxFiles = options?.maxFiles ?? 100
+    const maxFileSize = options?.maxFileSize ?? 500 * 1024
+    const allowedExts = new Set(options?.allowedExtensions ?? ['.md', '.txt', '.markdown'])
+
+    try {
+      if (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
+        return { error: '文件夹不存在或不是目录' }
+      }
+
+      const files: Array<{
+        name: string;
+        relativePath: string;
+        content: string;
+        size: number;
+        mtime: number;
+      }> = []
+      let skippedCount = 0
+      let symlinkCount = 0
+
+      async function walkDir(dir: string, relPrefix: string) {
+        const entries = await fs.promises.readdir(dir, { withFileTypes: true })
+        for (const entry of entries) {
+          if (files.length >= maxFiles) break
+          const fullPath = path.join(dir, entry.name)
+          const relPath = relPrefix ? `${relPrefix}/${entry.name}` : entry.name
+
+          if (entry.isSymbolicLink()) {
+            symlinkCount++
+            continue
+          }
+
+          if (entry.isDirectory()) {
+            // Skip hidden directories and node_modules
+            if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+            await walkDir(fullPath, relPath)
+          } else if (entry.isFile()) {
+            const ext = path.extname(entry.name).toLowerCase()
+            if (!allowedExts.has(ext)) {
+              skippedCount++
+              continue
+            }
+            try {
+              const stat = await fs.promises.stat(fullPath)
+              if (stat.size > maxFileSize) {
+                skippedCount++
+                continue
+              }
+              const content = await fs.promises.readFile(fullPath, 'utf-8')
+              files.push({
+                name: entry.name,
+                relativePath: relPath,
+                content,
+                size: stat.size,
+                mtime: stat.mtimeMs,
+              })
+            } catch {
+              skippedCount++
+            }
+          }
+        }
+      }
+
+      await walkDir(folderPath, '')
+      return { files, skippedCount, symlinkCount }
+    } catch (error) {
+      console.error('Failed to read markdown folder:', error)
+      return { error: String(error) }
+    }
+  })
+
+  const resolveScriptWorkspacePath = (rootPath: string, relativePath = '') => {
+    const root = path.resolve(rootPath)
+    const target = path.resolve(root, relativePath)
+    const relative = path.relative(root, target)
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+      throw new Error('路径超出工作区根目录')
+    }
+    return target
+  }
+
+  ipcMain.handle('script-workspace:select-root', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openDirectory', 'createDirectory'],
+      title: '打开剧本工作区文件夹',
+    })
+    return result.canceled ? null : result.filePaths[0] ?? null
+  })
+
+  ipcMain.handle('script-workspace:scan', async (_event, rootPath: string) => {
+    const root = resolveScriptWorkspacePath(rootPath)
+    const resources: Array<{
+      name: string
+      relativePath: string
+      kind: 'file' | 'directory'
+      editable: boolean
+      size?: number
+      mtime?: number
+      content?: string
+    }> = []
+    const editableExtensions = new Set(['.md', '.markdown', '.txt'])
+
+    async function walk(directory: string, prefix: string) {
+      const entries = await fs.promises.readdir(directory, { withFileTypes: true })
+      entries.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
+      for (const entry of entries) {
+        if (entry.isSymbolicLink()) continue
+        const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name
+        const fullPath = resolveScriptWorkspacePath(root, relativePath)
+        if (entry.isDirectory()) {
+          resources.push({ name: entry.name, relativePath, kind: 'directory', editable: false })
+          await walk(fullPath, relativePath)
+        } else if (entry.isFile()) {
+          const stat = await fs.promises.stat(fullPath)
+          const editable = editableExtensions.has(path.extname(entry.name).toLowerCase()) && stat.size <= 2 * 1024 * 1024
+          resources.push({
+            name: entry.name,
+            relativePath,
+            kind: 'file',
+            editable,
+            size: stat.size,
+            mtime: stat.mtimeMs,
+            content: editable ? await fs.promises.readFile(fullPath, 'utf-8') : undefined,
+          })
+        }
+      }
+    }
+
+    await walk(root, '')
+    return resources
+  })
+
+  ipcMain.handle('script-workspace:write-file', async (_event, rootPath: string, relativePath: string, content: string) => {
+    const target = resolveScriptWorkspacePath(rootPath, relativePath)
+    await fs.promises.mkdir(path.dirname(target), { recursive: true })
+    await fs.promises.writeFile(target, content, 'utf-8')
+    const stat = await fs.promises.stat(target)
+    return { mtime: stat.mtimeMs, size: stat.size }
+  })
+
+  ipcMain.handle('script-workspace:read-file', async (_event, rootPath: string, relativePath: string) => {
+    const target = resolveScriptWorkspacePath(rootPath, relativePath)
+    const stat = await fs.promises.stat(target)
+    if (!stat.isFile()) throw new Error('目标不是文件')
+    if (stat.size > 2 * 1024 * 1024) throw new Error('文件超过 2MB，无法读取')
+    return fs.promises.readFile(target, 'utf-8')
+  })
+
+  ipcMain.handle('script-workspace:create-directory', async (_event, rootPath: string, relativePath: string) => {
+    const target = resolveScriptWorkspacePath(rootPath, relativePath)
+    await fs.promises.mkdir(target, { recursive: false })
+    return true
+  })
+
+  ipcMain.handle('script-workspace:delete', async (_event, rootPath: string, relativePath: string) => {
+    if (!relativePath.trim()) throw new Error('不能删除工作区根目录')
+    const target = resolveScriptWorkspacePath(rootPath, relativePath)
+    await fs.promises.rm(target, { recursive: true, force: false })
+    return true
+  })
+
+  ipcMain.handle('script-workspace:move', async (_event, rootPath: string, sourcePath: string, targetPath: string) => {
+    if (!sourcePath.trim() || !targetPath.trim()) throw new Error('源路径和目标路径不能为空')
+    const source = resolveScriptWorkspacePath(rootPath, sourcePath)
+    const target = resolveScriptWorkspacePath(rootPath, targetPath)
+    if (source === target) return true
+    const sourceStat = await fs.promises.lstat(source)
+    if (sourceStat.isSymbolicLink()) throw new Error('不支持移动符号链接')
+    try {
+      await fs.promises.access(target)
+      throw new Error('目标位置已存在同名项目')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    await fs.promises.mkdir(path.dirname(target), { recursive: true })
+    await fs.promises.rename(source, target)
+    return true
+  })
+
+  ipcMain.handle('script-workspace:copy', async (_event, rootPath: string, sourcePath: string, targetPath: string) => {
+    if (!sourcePath.trim() || !targetPath.trim()) throw new Error('源路径和目标路径不能为空')
+    const source = resolveScriptWorkspacePath(rootPath, sourcePath)
+    const target = resolveScriptWorkspacePath(rootPath, targetPath)
+    const sourceStat = await fs.promises.lstat(source)
+    if (sourceStat.isSymbolicLink()) throw new Error('不支持复制符号链接')
+    try {
+      await fs.promises.access(target)
+      throw new Error('目标位置已存在同名项目')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    await fs.promises.cp(source, target, { recursive: sourceStat.isDirectory(), errorOnExist: true })
+    return true
+  })
+
+  ipcMain.handle('script-workspace:reveal', async (_event, rootPath: string, relativePath: string) => {
+    const target = resolveScriptWorkspacePath(rootPath, relativePath)
+    shell.showItemInFolder(target)
+    return true
+  })
+
   createWindow()
 })

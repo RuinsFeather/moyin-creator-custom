@@ -23,6 +23,12 @@ import { useProjectStore } from '@/stores/project-store';
 import { corsFetch } from '@/lib/cors-fetch';
 import { saveVideoToLocal } from '@/lib/image-storage';
 import { toast } from 'sonner';
+import { sanitizeErrorMessage } from '@/lib/blueprint/error-utils';
+import {
+  resolveSeedanceCapability,
+  validateSeedanceDuration,
+  validateSeedanceReferenceCounts,
+} from '@/lib/video/seedance-capability';
 
 // ==================== Types ====================
 
@@ -1712,9 +1718,11 @@ async function generateViaKlingImagesEndpoint(
 
 function toHttpError(prefix: string, status: number, body: string): Error & { status: number; retryable?: boolean } {
   const friendly = mapFriendlyErrorMessage(body, status);
-  const message = friendly
+  const rawMessage = friendly
     ? `${prefix}: ${status} ${friendly}`
     : `${prefix}: ${status} ${body}`;
+  // §11.3 — Sanitize to prevent API key leakage in error messages
+  const message = sanitizeErrorMessage(rawMessage);
   const err = new Error(message) as Error & { status: number; retryable?: boolean };
   err.status = status;
   if (isKnownNonRetryableApiError(body, status)) {
@@ -2096,7 +2104,7 @@ async function generateViaMidjourneyEndpoint(
       };
     }
     if (status === 'failure' || status === 'failed' || status === 'error') {
-      throw new Error(pollData.failReason || pollData.message || 'Midjourney 生成失败');
+      throw new Error(sanitizeErrorMessage(pollData.failReason || pollData.message || 'Midjourney 生成失败'));
     }
     const estimated = 25 + Math.min(55, Math.round((i / IMAGE_POLL_MAX_ATTEMPTS) * 60));
     const percent = Math.min(85, Math.max(estimated, Math.round(serverPct ?? 0)));
@@ -2268,7 +2276,7 @@ async function generateViaReplicateImageEndpoint(
       return { url: imageUrl, taskId: String(predictionId), mediaId };
     }
     if (status === 'failed' || status === 'canceled') {
-      throw new Error(pollData.error || 'Replicate 图片生成失败');
+      throw new Error(sanitizeErrorMessage(pollData.error || 'Replicate 图片生成失败'));
     }
     const estimated = 25 + Math.min(55, Math.round((i / IMAGE_POLL_MAX_ATTEMPTS) * 60));
     params.onProgress?.({
@@ -2775,6 +2783,25 @@ function countVideoUploadFiles(grouped: ReturnType<typeof groupVideoUploadFiles>
   );
 }
 
+function validateSeedanceVideoParams(
+  model: string,
+  params: FreedomVideoParams,
+  grouped: ReturnType<typeof groupVideoUploadFiles>,
+): void {
+  const durationError = validateSeedanceDuration(model, params.duration);
+  if (durationError) throw new Error(durationError);
+
+  const counts = { images: 0, videos: 0, audios: 0 };
+  for (const file of grouped.references) {
+    const type = file.assetType || inferAssetType(file);
+    if (type === 'video') counts.videos += 1;
+    else if (type === 'audio') counts.audios += 1;
+    else counts.images += 1;
+  }
+  const referenceError = validateSeedanceReferenceCounts(model, counts);
+  if (referenceError) throw new Error(referenceError);
+}
+
 function validateVeoVideoUploads(
   model: string,
   endpointTypes: string[] | undefined,
@@ -3023,7 +3050,7 @@ async function pollOpenAIOfficialVideoTask(
       return { url: videoUrl, taskId: String(taskId) };
     }
     if (status === 'failed' || status === 'error') {
-      throw new Error(pollData.error?.message || pollData.error || pollData.message || 'Sora 生成失败');
+      throw new Error(sanitizeErrorMessage(pollData.error?.message || pollData.error || pollData.message || 'Sora 生成失败'));
     }
   }
 }
@@ -3044,7 +3071,7 @@ async function generateVideoViaUnified(
     const isRunway = (endpointTypes || []).some(t => /runway/i.test(t));
     const isGrok = (endpointTypes || []).some(t => /grok/i.test(t)) || /grok/i.test(model);
     const isSeedance = /seedance|doubao-seedance/i.test(model);
-    const isSeedanceV2 = /seedance[-_](v?2|2\.0|2[-_]0)/i.test(model);
+    const usesStructuredSeedanceParams = resolveSeedanceCapability(model).structuredParameters;
 
     body = { model, prompt: params.prompt };
     const metadata: Record<string, any> = {};
@@ -3064,7 +3091,7 @@ async function generateVideoViaUnified(
         metadata.ratio = toRunwayRatio(params.aspectRatio);
       } else if (isSeedance) {
         metadata.ratio = params.aspectRatio;
-        if (isSeedanceV2 || params.aspectRatio === 'adaptive') {
+        if (usesStructuredSeedanceParams || params.aspectRatio === 'adaptive') {
           body.ratio = params.aspectRatio;
         }
       } else if (isGrok) {
@@ -3082,19 +3109,20 @@ async function generateVideoViaUnified(
         body.resolution = params.resolution;
       } else {
         metadata.resolution = params.resolution;
-        if (isSeedanceV2 || params.resolution.toLowerCase() === '4k') {
+        if (usesStructuredSeedanceParams || params.resolution.toLowerCase() === '4k') {
           body.resolution = params.resolution.toLowerCase();
         }
       }
     }
 
-    if (isSeedance && (isSeedanceV2 || params.resolution?.toLowerCase() === '4k' || params.aspectRatio === 'adaptive')) {
+    if (isSeedance && (usesStructuredSeedanceParams || params.resolution?.toLowerCase() === '4k' || params.aspectRatio === 'adaptive')) {
       body.generate_audio = params.generateAudio ?? true;
       body.watermark = params.watermark ?? false;
     }
 
     // Image inputs (wan2.6, doubao, luma, vidu, minimax, runway, etc.)
     const grouped = groupVideoUploadFiles(params.uploadFiles);
+    if (isSeedance) validateSeedanceVideoParams(model, params, grouped);
 
     if (isSeedance && grouped.references.length > 0) {
       // Seedance 多功能参考模式（官方格式）：
@@ -3212,7 +3240,7 @@ async function pollUnifiedVideoTask(
       if (videoUrl) return { url: videoUrl, taskId: String(taskId) };
     }
     if (status === 'failed' || status === 'error' || status === 'cancelled') {
-      throw new Error(pollData.error?.message || pollData.error || pollData.message || '视频生成失败');
+      throw new Error(sanitizeErrorMessage(pollData.error?.message || pollData.error || pollData.message || '视频生成失败'));
     }
   }
 }
@@ -3241,8 +3269,9 @@ async function generateVideoViaVolc(
   const submitPath = buildVolcVideoSubmitPath(baseUrl);
   const resolution = params.resolution?.toLowerCase();
   const ratio = params.aspectRatio;
-  const isSeedanceV2 = /seedance[-_](v?2|2\.0|2[-_]0)/i.test(model);
-  const usesSeedanceV2Params = isSeedanceV2 || resolution === '4k' || ratio === 'adaptive';
+  const usesSeedanceV2Params = resolveSeedanceCapability(model).structuredParameters
+    || resolution === '4k'
+    || ratio === 'adaptive';
   const promptParts = [params.prompt];
   if (!usesSeedanceV2Params) {
     if (resolution) promptParts.push(`--rs ${resolution}`);
@@ -3256,6 +3285,7 @@ async function generateVideoViaVolc(
 
   // 附加上传图片（首帧/尾帧），对齐 Director 面板的 callVolcVideoApi
   const grouped = groupVideoUploadFiles(params.uploadFiles);
+  validateSeedanceVideoParams(model, params, grouped);
   const primaryFile = grouped.single || grouped.first;
   if (primaryFile) {
     const url = await toUploadHttpUrl(primaryFile);
@@ -3340,7 +3370,7 @@ async function pollVolcVideoTask(
       return { url: videoUrl, taskId: taskId ? String(taskId) : undefined };
     }
     if (status === 'failed' || status === 'expired' || status === 'cancelled' || status === 'error') {
-      throw new Error(pollData.error?.message || pollData.error || 'Volc 视频生成失败');
+      throw new Error(sanitizeErrorMessage(pollData.error?.message || pollData.error || 'Volc 视频生成失败'));
     }
   }
 }
@@ -3411,7 +3441,7 @@ async function generateVideoViaWan(
       return { url: videoUrl, taskId: String(taskId) };
     }
     if (status === 'FAILED' || status === 'ERROR' || status === 'CANCELLED') {
-      throw new Error(pollData.output?.message || pollData.output?.error || 'Wan 视频生成失败');
+      throw new Error(sanitizeErrorMessage(pollData.output?.message || pollData.output?.error || 'Wan 视频生成失败'));
     }
   }
 }
@@ -3504,7 +3534,7 @@ async function generateVideoViaHappyHorseR2V(
       return { url: videoUrl, taskId: String(taskId) };
     }
     if (status === 'FAILED' || status === 'ERROR' || status === 'CANCELLED') {
-      throw new Error(pollData.output?.message || pollData.output?.error || 'HappyHorse 参考生视频失败');
+      throw new Error(sanitizeErrorMessage(pollData.output?.message || pollData.output?.error || 'HappyHorse 参考生视频失败'));
     }
   }
 }
@@ -3601,7 +3631,7 @@ async function generateVideoViaKling(
       return { url: videoUrl, taskId: String(taskId) };
     }
     if (status === 'failed' || status === 'error') {
-      throw new Error(pollData.data?.task_status_msg || pollData.message || 'Kling 视频生成失败');
+      throw new Error(sanitizeErrorMessage(pollData.data?.task_status_msg || pollData.message || 'Kling 视频生成失败'));
     }
   }
 }
@@ -3668,7 +3698,7 @@ async function generateVideoViaReplicate(
       return { url: videoUrl, taskId: String(predictionId) };
     }
     if (status === 'failed' || status === 'canceled') {
-      throw new Error(pollData.error || 'Replicate 视频生成失败');
+      throw new Error(sanitizeErrorMessage(pollData.error || 'Replicate 视频生成失败'));
     }
   }
 }
@@ -3742,7 +3772,7 @@ async function pollForResult(
 
       // Check failure
       if (status === 'failed' || status === 'error' || status === 'cancelled') {
-        throw new Error(`Generation failed: ${data.error || data.message || status}`);
+        throw new Error(sanitizeErrorMessage(`Generation failed: ${data.error || data.message || status}`));
       }
 
       // Still processing — 估算进度：25% 起步，逐步增长到 80%

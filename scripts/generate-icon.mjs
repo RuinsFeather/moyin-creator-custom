@@ -1,5 +1,4 @@
 import sharp from 'sharp'
-import pngToIco from 'png-to-ico'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
@@ -46,9 +45,12 @@ async function generateIcons() {
     )
   )
 
-  // 转换为 ICO
-  const icoBuffer = await pngToIco(pngBuffers)
-  fs.writeFileSync(icoPath, icoBuffer)
+  // 使用 PNG 帧生成 ICO。Windows 对这种格式的兼容性比手写 DIB/AND mask 更好。
+  const icoBuffer = createPngFrameIco(sizes, pngBuffers)
+  validateIco(icoBuffer)
+  const tempIcoPath = `${icoPath}.tmp-${process.pid}`
+  fs.writeFileSync(tempIcoPath, icoBuffer)
+  fs.renameSync(tempIcoPath, icoPath)
   console.log('✅ 生成 icon.ico (多尺寸: ' + sizes.join(', ') + ')')
 
   if (process.platform === 'darwin') {
@@ -92,4 +94,52 @@ async function generateIcons() {
   console.log(`\n📁 图标已保存到: ${buildDir}`)
 }
 
-generateIcons().catch(console.error)
+function createPngFrameIco(sizes, pngBuffers) {
+  const header = Buffer.alloc(6)
+  header.writeUInt16LE(0, 0)
+  header.writeUInt16LE(1, 2)
+  header.writeUInt16LE(sizes.length, 4)
+
+  const directory = Buffer.alloc(sizes.length * 16)
+  let offset = header.length + directory.length
+  for (let index = 0; index < sizes.length; index += 1) {
+    const size = sizes[index]
+    const frame = pngBuffers[index]
+    directory.writeUInt8(size >= 256 ? 0 : size, index * 16)
+    directory.writeUInt8(size >= 256 ? 0 : size, index * 16 + 1)
+    directory.writeUInt8(0, index * 16 + 2)
+    directory.writeUInt8(0, index * 16 + 3)
+    directory.writeUInt16LE(1, index * 16 + 4)
+    directory.writeUInt16LE(32, index * 16 + 6)
+    directory.writeUInt32LE(frame.length, index * 16 + 8)
+    directory.writeUInt32LE(offset, index * 16 + 12)
+    offset += frame.length
+  }
+
+  return Buffer.concat([header, directory, ...pngBuffers])
+}
+
+function validateIco(buffer) {
+  if (buffer.length < 6 || buffer.readUInt16LE(0) !== 0 || buffer.readUInt16LE(2) !== 1) {
+    throw new Error('生成的 ICO header 无效')
+  }
+  const count = buffer.readUInt16LE(4)
+  if (count === 0 || buffer.length < 6 + count * 16) throw new Error('生成的 ICO 目录无效')
+
+  for (let index = 0; index < count; index += 1) {
+    const entry = 6 + index * 16
+    const size = buffer.readUInt32LE(entry + 8)
+    const offset = buffer.readUInt32LE(entry + 12)
+    if (size === 0 || offset < 6 + count * 16 || offset + size > buffer.length) {
+      throw new Error(`生成的 ICO 第 ${index + 1} 个目录项越界`)
+    }
+    if (!buffer.subarray(offset, offset + 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+      throw new Error(`生成的 ICO 第 ${index + 1} 个帧不是 PNG`)
+    }
+  }
+}
+
+generateIcons().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})

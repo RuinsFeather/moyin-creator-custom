@@ -30,6 +30,11 @@ import {
   getResolutionsForModel,
 } from '@/lib/freedom/model-registry';
 import { resolveVeoUploadCapability, type VeoUploadCapability } from '@/lib/freedom/veo-capability';
+import {
+  resolveSeedanceCapability,
+  validateSeedanceDuration,
+  validateSeedanceReferenceCounts,
+} from '@/lib/video/seedance-capability';
 
 // ==================== 宽高比和分辨率常量 ====================
 
@@ -63,14 +68,8 @@ const I2V_SUB_MODE_OPTIONS: { value: ImageToVideoSubMode; label: string; desc: s
   { value: 'first-last-frame', label: '首尾帧功能', desc: '上传首帧和尾帧图片' },
 ];
 
-/** 多功能参考模式常量 */
-const MULTI_REF_MAX_ASSETS = 12;
-const MULTI_REF_AUDIO_MAX_SECONDS = 15;
 /** HappyHorse 多功能参考模式：仅图片，最多 9 张 */
 const HAPPYHORSE_MULTI_REF_MAX_IMAGES = 9;
-
-/** Seedance 多功能参考模式可选视频时长范围 (4s–15s) */
-const SEEDANCE_MULTI_REF_DURATIONS = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] as const;
 
 interface LocalUploadAsset {
   id: string;
@@ -121,6 +120,7 @@ interface MultiRefAsset {
     return 'vidu2.0';
   }
   if (/^doubao-seedance-/i.test(modelId)) {
+    if (modelId.includes('2-5')) return 'seedance-2.5';
     if (modelId.includes('pro-fast')) return 'seedance-pro-t2v-fast';
     if (modelId.includes('lite')) return 'seedance-lite-t2v';
     return 'seedance-pro-t2v';
@@ -139,7 +139,7 @@ function isSeedanceGroupModel(modelId: string): boolean {
 
 /** 判断模型是否属于 Seedance 2.0 组别 */
 function isSeedanceV2GroupModel(modelId: string): boolean {
-  return /seedance[-_](v?2|2\.0|2[-_]0)/i.test(modelId);
+  return resolveSeedanceCapability(modelId).structuredParameters;
 }
 
 /** 判断模型是否属于 HappyHorse 系列 */
@@ -546,13 +546,19 @@ export function VideoStudio() {
   const isSeedance = useMemo(() => isSeedanceGroupModel(selectedVideoModel), [selectedVideoModel]);
   /** 是否属于 Seedance 2.0 组 */
   const isSeedanceV2 = useMemo(() => isSeedanceV2GroupModel(selectedVideoModel), [selectedVideoModel]);
+  const seedanceCapability = useMemo(
+    () => resolveSeedanceCapability(selectedVideoModel),
+    [selectedVideoModel],
+  );
   /** 是否属于 HappyHorse 系列 */
   const isHappyHorse = useMemo(() => isHappyHorseModel(selectedVideoModel), [selectedVideoModel]);
   /** 是否支持多功能参考模式（Seedance 或 HappyHorse） */
   const supportsMultiRef = isSeedance || isHappyHorse;
   const showSeedanceWebSearch = isSeedance && videoFeatureMode === 'text-to-video';
   /** 多功能参考模式的最大素材数量（HappyHorse 仅支持 9 张图片） */
-  const multiRefMaxAssets = isHappyHorse ? HAPPYHORSE_MULTI_REF_MAX_IMAGES : MULTI_REF_MAX_ASSETS;
+  const multiRefMaxAssets = isHappyHorse
+    ? HAPPYHORSE_MULTI_REF_MAX_IMAGES
+    : seedanceCapability.referenceLimits.maxTotal;
 
   const multiRefInputRef = useRef<HTMLInputElement>(null);
 
@@ -700,18 +706,24 @@ export function VideoStudio() {
   const ingestMultiRefFiles = useCallback(async (files: File[]) => {
     if (files.length === 0) return;
 
-    const maxAssets = isHappyHorse ? HAPPYHORSE_MULTI_REF_MAX_IMAGES : MULTI_REF_MAX_ASSETS;
+    const limits = seedanceCapability.referenceLimits;
+    const maxAssets = isHappyHorse ? HAPPYHORSE_MULTI_REF_MAX_IMAGES : limits.maxTotal;
     let remaining = maxAssets - multiRefAssets.length;
     if (remaining <= 0) {
       toast.error(isHappyHorse
         ? `最多支持上传 ${HAPPYHORSE_MULTI_REF_MAX_IMAGES} 张参考图片`
-        : `最多支持上传 ${MULTI_REF_MAX_ASSETS} 个参考素材`);
+        : `最多支持上传 ${limits.maxTotal} 个参考素材`);
       return;
     }
 
     let existingAudioTotal = multiRefAssets
       .filter((a) => a.assetType === 'audio')
       .reduce((sum, a) => sum + (a.audioDuration ?? 0), 0);
+    const typeCounts = {
+      image: multiRefAssets.filter((asset) => asset.assetType === 'image').length,
+      video: multiRefAssets.filter((asset) => asset.assetType === 'video').length,
+      audio: multiRefAssets.filter((asset) => asset.assetType === 'audio').length,
+    };
 
     const newAssets: MultiRefAsset[] = [];
 
@@ -719,7 +731,7 @@ export function VideoStudio() {
       if (remaining <= 0) {
         toast.error(isHappyHorse
           ? `最多支持上传 ${HAPPYHORSE_MULTI_REF_MAX_IMAGES} 张参考图片`
-          : `最多支持上传 ${MULTI_REF_MAX_ASSETS} 个参考素材`);
+          : `最多支持上传 ${limits.maxTotal} 个参考素材`);
         break;
       }
       try {
@@ -737,6 +749,19 @@ export function VideoStudio() {
           continue;
         }
 
+        if (!isHappyHorse) {
+          const typeLimit = assetType === 'image'
+            ? limits.maxImages
+            : assetType === 'video'
+              ? limits.maxVideos
+              : limits.maxAudios;
+          if (typeCounts[assetType] >= typeLimit) {
+            const label = assetType === 'image' ? '图片' : assetType === 'video' ? '视频' : '音频';
+            toast.error(`参考${label}最多 ${typeLimit} 个`);
+            continue;
+          }
+        }
+
         // 视频 1GB 限制
         if (assetType === 'video' && file.size > 1024 * 1024 * 1024) {
           toast.error(`视频文件 ${file.name} 超过 1GB 限制（${(file.size / 1024 / 1024).toFixed(1)} MB）`);
@@ -746,9 +771,10 @@ export function VideoStudio() {
         let audioDuration: number | undefined;
         if (assetType === 'audio') {
           audioDuration = await getAudioDuration(file);
-          if (existingAudioTotal + audioDuration > MULTI_REF_AUDIO_MAX_SECONDS) {
+          const maxAudioDuration = limits.maxAudioDurationSeconds;
+          if (maxAudioDuration != null && existingAudioTotal + audioDuration > maxAudioDuration) {
             toast.error(
-              `音频总时长不能超过 ${MULTI_REF_AUDIO_MAX_SECONDS} 秒（已 ${Math.round(existingAudioTotal)}s，新增 ${Math.round(audioDuration)}s）`,
+              `音频总时长不能超过 ${maxAudioDuration} 秒（已 ${Math.round(existingAudioTotal)}s，新增 ${Math.round(audioDuration)}s）`,
             );
             continue;
           }
@@ -782,6 +808,7 @@ export function VideoStudio() {
           localPath,
           fileSize: file.size,
         });
+        typeCounts[assetType] += 1;
         remaining -= 1;
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : '读取文件失败';
@@ -792,7 +819,7 @@ export function VideoStudio() {
     if (newAssets.length > 0) {
       setMultiRefAssets((prev) => [...prev, ...newAssets]);
     }
-  }, [multiRefAssets, setMultiRefAssets, isHappyHorse]);
+  }, [multiRefAssets, setMultiRefAssets, isHappyHorse, seedanceCapability]);
 
   /** 多功能参考模式：上传文件（视频/图片/音频） */
   const handleMultiRefChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -815,9 +842,13 @@ export function VideoStudio() {
       return;
     }
     // 检查数量限制
-    const maxAssets = isHappyHorse ? HAPPYHORSE_MULTI_REF_MAX_IMAGES : MULTI_REF_MAX_ASSETS;
+    const maxAssets = isHappyHorse ? HAPPYHORSE_MULTI_REF_MAX_IMAGES : seedanceCapability.referenceLimits.maxTotal;
     if (multiRefAssets.length >= maxAssets) {
       toast.error(`参考素材已达上限 ${maxAssets} 个`);
+      return;
+    }
+    if (!isHappyHorse && multiRefAssets.filter((item) => item.assetType === 'image').length >= seedanceCapability.referenceLimits.maxImages) {
+      toast.error(`参考图片最多 ${seedanceCapability.referenceLimits.maxImages} 张`);
       return;
     }
     const newAsset: MultiRefAsset = {
@@ -831,7 +862,7 @@ export function VideoStudio() {
     };
     setMultiRefAssets((prev) => [...prev, newAsset]);
     toast.success(`已导入素材: ${asset.name}`);
-  }, [multiRefAssets, setMultiRefAssets, isHappyHorse]);
+  }, [multiRefAssets, setMultiRefAssets, isHappyHorse, seedanceCapability]);
 
   /** 计算某个素材在同类型中的序号标签，如 @image_file_1 */
   const getMultiRefTag = useCallback((assetId: string): string => {
@@ -953,6 +984,12 @@ export function VideoStudio() {
       return;
     }
 
+    const durationError = validateSeedanceDuration(selectedVideoModel, videoDuration);
+    if (durationError) {
+      toast.error(durationError);
+      return;
+    }
+
     // 图生视频模式验证
     if (videoFeatureMode === 'image-to-video') {
       if (videoI2VSubMode === 'first-frame' && !firstFrameUpload) {
@@ -969,6 +1006,15 @@ export function VideoStudio() {
     if (videoFeatureMode === 'multi-reference') {
       if (multiRefAssets.length === 0) {
         toast.error('请上传至少一个参考素材');
+        return;
+      }
+      const referenceError = validateSeedanceReferenceCounts(selectedVideoModel, {
+        images: multiRefAssets.filter((asset) => asset.assetType === 'image').length,
+        videos: multiRefAssets.filter((asset) => asset.assetType === 'video').length,
+        audios: multiRefAssets.filter((asset) => asset.assetType === 'audio').length,
+      });
+      if (referenceError) {
+        toast.error(referenceError);
         return;
       }
     }
@@ -1350,22 +1396,26 @@ export function VideoStudio() {
               <div className="flex items-center gap-3">
                 <span className="text-[11px] text-muted-foreground shrink-0">4s</span>
                 <Slider
-                  min={4}
-                  max={15}
+                  min={isSeedance ? seedanceCapability.minDuration : 4}
+                  max={isSeedance ? seedanceCapability.maxDuration : 15}
                   step={1}
-                  value={[Math.max(4, Math.min(15, videoDuration))]}
+                  value={[Math.max(isSeedance ? seedanceCapability.minDuration : 4, Math.min(isSeedance ? seedanceCapability.maxDuration : 15, videoDuration))]}
                   onValueChange={([v]) => setVideoDuration(v)}
                   className="flex-1"
                 />
-                <span className="text-[11px] text-muted-foreground shrink-0">15s</span>
+                <span className="text-[11px] text-muted-foreground shrink-0">{isSeedance ? seedanceCapability.maxDuration : 15}s</span>
                 <Input
                   type="number"
-                  min={4}
-                  max={15}
+                  min={isSeedance ? seedanceCapability.minDuration : 4}
+                  max={isSeedance ? seedanceCapability.maxDuration : 15}
                   value={videoDuration}
                   onChange={(e) => {
                     const v = parseInt(e.target.value, 10);
-                    if (!Number.isNaN(v)) setVideoDuration(Math.max(4, Math.min(15, v)));
+                    if (!Number.isNaN(v)) {
+                      const min = isSeedance ? seedanceCapability.minDuration : 4;
+                      const max = isSeedance ? seedanceCapability.maxDuration : 15;
+                      setVideoDuration(Math.max(min, Math.min(max, v)));
+                    }
                   }}
                   className="w-14 h-7 text-xs text-center px-1 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                 />
@@ -1522,8 +1572,11 @@ export function VideoStudio() {
                       <>已上传 {multiRefAssets.length}/{HAPPYHORSE_MULTI_REF_MAX_IMAGES} 张参考图片</>
                     ) : (
                       <>
-                        已上传 {multiRefAssets.length}/{MULTI_REF_MAX_ASSETS} 个素材 · 音频总时长限制 {MULTI_REF_AUDIO_MAX_SECONDS}s
-                        {multiRefAssets.some((a) => a.assetType === 'audio') && (
+                        已上传 {multiRefAssets.length}/{seedanceCapability.referenceLimits.maxTotal} 个素材
+                        {' · '}图片 {multiRefAssets.filter((a) => a.assetType === 'image').length}/{seedanceCapability.referenceLimits.maxImages}
+                        {' · '}视频 {multiRefAssets.filter((a) => a.assetType === 'video').length}/{seedanceCapability.referenceLimits.maxVideos}
+                        {' · '}音频 {multiRefAssets.filter((a) => a.assetType === 'audio').length}/{seedanceCapability.referenceLimits.maxAudios}
+                        {seedanceCapability.referenceLimits.maxAudioDurationSeconds != null && multiRefAssets.some((a) => a.assetType === 'audio') && (
                           <>（已用 {Math.round(multiRefAssets.filter((a) => a.assetType === 'audio').reduce((s, a) => s + (a.audioDuration ?? 0), 0))}s）</>
                         )}
                       </>

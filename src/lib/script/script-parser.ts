@@ -13,6 +13,7 @@ import { cleanJsonString, safeParseJson, normalizeIds } from "@/lib/utils/json-c
 import { delay, RATE_LIMITS } from "@/lib/utils/rate-limiter";
 import { ApiKeyManager } from "@/lib/api-key-manager";
 import { getModelLimits, parseModelLimitsFromError, cacheDiscoveredLimits, estimateTokens } from "@/lib/ai/model-registry";
+import { resolveRequestModel, resolveSupportedModelFromError } from "@/lib/ai/request-model-resolver";
 import { corsFetch } from "@/lib/cors-fetch";
 
 /**
@@ -245,7 +246,8 @@ export async function callChatAPI(
     : `${normalizedBaseUrl}/v1/chat/completions`;
   
   // 从 Model Registry 查询模型限制（三层查找：缓存→静态→default）
-  const modelLimits = getModelLimits(model);
+  const requestModel = resolveRequestModel(model);
+  const modelLimits = getModelLimits(requestModel);
   const requestedMaxTokens = options.maxTokens ?? 4096;
   const effectiveMaxTokens = Math.min(requestedMaxTokens, modelLimits.maxOutput);
   if (effectiveMaxTokens < requestedMaxTokens) {
@@ -301,7 +303,7 @@ export async function callChatAPI(
     };
     
     // 模型选择逻辑：必须使用配置 model
-    const modelName = model;
+    const modelName = requestModel;
     console.log('[callChatAPI] 使用模型:', modelName);
     
     const body: Record<string, any> = {
@@ -336,6 +338,26 @@ export async function callChatAPI(
       
       // === Error-driven Discovery: 400 错误自动发现模型限制并重试 ===
       if (response.status === 400) {
+        const supportedModel = resolveSupportedModelFromError(errorText, model);
+        if (supportedModel && supportedModel !== body.model) {
+          console.warn(`[callChatAPI] 模型名适配: ${body.model} -> ${supportedModel}，自动重试...`);
+          const retryResp = await corsFetch(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ ...body, model: supportedModel }),
+          });
+          if (retryResp.ok) {
+            const retryData = await retryResp.json();
+            const retryContent = retryData.choices?.[0]?.message?.content;
+            if (retryContent) {
+              if (totalKeys > 1) keyManager.rotateKey();
+              return retryContent;
+            }
+          } else {
+            console.warn('[callChatAPI] 模型名适配重试仍失败:', retryResp.status);
+          }
+        }
+
         const discovered = parseModelLimitsFromError(errorText);
         if (discovered) {
           cacheDiscoveredLimits(model, discovered);

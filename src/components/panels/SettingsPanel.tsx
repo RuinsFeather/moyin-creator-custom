@@ -118,10 +118,12 @@ export function SettingsPanel() {
     storagePaths,
     cacheSettings,
     updateSettings,
+    blueprintConfig,
     setResourceSharing,
     setStoragePaths,
     setCacheSettings,
     setUpdateSettings,
+    setBlueprintConfig,
   } = useAppSettingsStore();
   const { activeProjectId } = useProjectStore();
   const { assignProjectToUnscoped: assignCharactersToProject } = useCharacterLibraryStore();
@@ -1620,6 +1622,25 @@ export function SettingsPanel() {
                     此功能仅在桌面打包版中可用。
                   </p>
                 )}
+              </div>
+
+              {/* 蓝图灰度配置（P1-4） */}
+              <div className="border-t border-border pt-4 space-y-3">
+                <h3 className="text-sm font-semibold">蓝图执行灰度</h3>
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-medium">允许执行付费生成任务</p>
+                    <p className="text-xs text-muted-foreground">
+                      关闭后，蓝图中的图片/视频生成节点将拒绝提交付费任务（灰度渐进期开关）
+                    </p>
+                  </div>
+                  <Switch
+                    checked={blueprintConfig.allowPaidExecution}
+                    onCheckedChange={(checked) =>
+                      setBlueprintConfig({ allowPaidExecution: checked })
+                    }
+                  />
+                </div>
               </div>
 
               {/* About */}

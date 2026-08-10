@@ -2,3 +2,12 @@
 // Licensed under AGPL-3.0-or-later. See LICENSE for details.
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 /// <reference types="vite/client" />
+
+interface ImportMetaEnv {
+	/** Enables the unfinished blueprint UI when set to the literal string "true". */
+	readonly VITE_ENABLE_BLUEPRINT?: 'true' | 'false';
+}
+
+interface ImportMeta {
+	readonly env: ImportMetaEnv;
+}

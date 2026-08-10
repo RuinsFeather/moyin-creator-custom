@@ -132,14 +132,6 @@ const WAN_VIDEO_VARIANTS = [
   'wan2.6-i2v-flash',
 ];
 
-const SEEDANCE_VIDEO_VARIANTS = [
-  'doubao-seedance-1-5-pro-251215',
-  'doubao-seedance-1-0-pro-250528',
-  'doubao-seedance-1-0-pro-fast-251015',
-  'doubao-seedance-1-0-lite-t2v-250428',
-  'doubao-seedance-1-0-lite-i2v-250428',
-];
-
 const LUMA_VIDEO_VARIANTS = [
   'luma_video_api',
   'luma_video_extend_api',
@@ -294,13 +286,6 @@ const VIDEO_FAMILY_VARIANTS: Record<string, string[]> = {
   'wan2.5-i2v-preview': WAN_VIDEO_VARIANTS,
   'wan2.6-i2v': WAN_VIDEO_VARIANTS,
   'wan2.6-i2v-flash': WAN_VIDEO_VARIANTS,
-  // Doubao Seedance
-  'doubao-seedance-1-5-pro-251215': SEEDANCE_VIDEO_VARIANTS,
-  'doubao-seedance-1-0-pro-250528': SEEDANCE_VIDEO_VARIANTS,
-  'doubao-seedance-1-0-pro-fast-251015': SEEDANCE_VIDEO_VARIANTS,
-  'doubao-seedance-1-0-lite-t2v-250428': SEEDANCE_VIDEO_VARIANTS,
-  'doubao-seedance-1-0-lite-i2v-250428': SEEDANCE_VIDEO_VARIANTS,
-  'doubao-seedance-1-5-pro-250428': SEEDANCE_VIDEO_VARIANTS,
   // Luma
   'luma_video_api': LUMA_VIDEO_VARIANTS,
   'luma_video_extend_api': LUMA_VIDEO_VARIANTS,

@@ -692,7 +692,9 @@ export const T2I_MODELS: T2IModel[] = [
     category: 'premium',
     inputs: {
       prompt: promptInput(),
-      aspect_ratio: aspectRatioInput(['auto', '1:1', '2:3', '3:2', '16:9', '9:16']),
+      // 12ai 的 GPT Image 接口支持横向/竖向尺寸；4:3、3:4 在请求层
+      // 分别按横向、竖向尺寸下发，不能因为能力列表缺失而隐藏 UI 选项。
+      aspect_ratio: aspectRatioInput(['auto', '1:1', '2:3', '3:2', '4:3', '3:4', '16:9', '9:16']),
       quality: {
         type: 'string',
         enum: ['low', 'medium', 'high'],
@@ -776,6 +778,23 @@ export const T2I_MODELS: T2IModel[] = [
 // ---------------------------------------------------------------------------
 
 export const T2V_MODELS: T2VModel[] = [
+  {
+    id: 'seedance-2.5',
+    providerAliases: ['doubao-seedance-2-5-260628'],
+    name: 'Seedance 2.5',
+    category: 'latest',
+    inputs: {
+      prompt: promptInput(),
+      aspect_ratio: aspectRatioInput([
+        '21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive',
+      ], '16:9'),
+      duration: durationInput({
+        default: 15,
+        enum: Array.from({ length: 27 }, (_, index) => index + 4),
+      }),
+      resolution: resolutionInput(['480p', '720p'], '720p'),
+    },
+  },
   // 0
   {
     id: 'seedance-lite-t2v',

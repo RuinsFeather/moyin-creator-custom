@@ -161,7 +161,9 @@ export const useProjectStore = create<ProjectStore>()(
  * - 换电脑后指向旧数据目录，projects 列表为空
  */
 async function discoverProjectsFromDisk(): Promise<void> {
-  if (!window.fileStorage?.listDirs) return;
+  // Non-Electron environment (e.g. Vitest Node test env, plain browser
+  // fallback): there is no Electron IPC bridge, so disk discovery is a no-op.
+  if (typeof window === 'undefined' || !window.fileStorage?.listDirs) return;
 
   try {
     // 列出 _p/ 下所有子目录名（每个子目录名就是一个 projectId）

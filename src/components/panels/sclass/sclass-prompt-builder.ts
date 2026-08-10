@@ -87,6 +87,16 @@ export const SEEDANCE_LIMITS = {
   minDuration: 4,
 } as const;
 
+export interface SClassSeedanceLimits {
+  maxImages: number;
+  maxVideos: number;
+  maxAudios: number;
+  maxTotalFiles: number;
+  maxPromptChars: number;
+  maxDuration: number;
+  minDuration: number;
+}
+
 // ==================== Grid Image Merge ====================
 
 /**
@@ -314,6 +324,7 @@ export function collectAllRefs(
   characters: Character[],
   sceneLibrary: Scene[],
   gridImageRef?: AssetRef | null,
+  limits: SClassSeedanceLimits = SEEDANCE_LIMITS,
 ): CollectedRefs {
   // 1. 收集角色参考图（去重：组内所有镜头的 characterIds 合并）
   const allCharIds = Array.from(
@@ -329,24 +340,24 @@ export function collectAllRefs(
   if (gridImageRef) {
     // ========== 格子图模式 ==========
     // 格子图占 1 槽，剩余给角色引用 + 场景参考图
-    const remainingSlots = SEEDANCE_LIMITS.maxImages - 1;
+    const remainingSlots = limits.maxImages - 1;
     const charSlice = charRefs.slice(0, remainingSlots);
     images = [gridImageRef, ...charSlice];
     // 如果还有槽位，加入场景参考图
     const usedSlots = images.length;
-    if (usedSlots < SEEDANCE_LIMITS.maxImages) {
-      images.push(...sceneRefs.slice(0, SEEDANCE_LIMITS.maxImages - usedSlots));
+    if (usedSlots < limits.maxImages) {
+      images.push(...sceneRefs.slice(0, limits.maxImages - usedSlots));
     }
   } else {
     // ========== 旧版兼容模式：逐张首帧 > 角色 > 场景 ==========
     const frameRefs = collectFirstFrameRefs(scenes);
     const allImageRefs = [...frameRefs, ...charRefs, ...sceneRefs];
-    images = allImageRefs.slice(0, SEEDANCE_LIMITS.maxImages);
+    images = allImageRefs.slice(0, limits.maxImages);
   }
 
   // 5. 用户上传的视频/音频引用（已在 group 中）
-  const videoSlice = (group.videoRefs || []).slice(0, SEEDANCE_LIMITS.maxVideos);
-  const audioSlice = (group.audioRefs || []).slice(0, SEEDANCE_LIMITS.maxAudios);
+  const videoSlice = (group.videoRefs || []).slice(0, limits.maxVideos);
+  const audioSlice = (group.audioRefs || []).slice(0, limits.maxAudios);
 
   // 6. 重新编号 tag（map 创建新对象，消除副作用）
   const taggedImages = images.map((ref, i) => ({ ...ref, tag: `@图片${i + 1}` }));
@@ -356,11 +367,11 @@ export function collectAllRefs(
   // 7. 配额校验
   const totalFiles = taggedImages.length + taggedVideos.length + taggedAudios.length;
   const warnings: string[] = [];
-  if (taggedImages.length >= SEEDANCE_LIMITS.maxImages) {
-    warnings.push(`图片引用已达上限 ${SEEDANCE_LIMITS.maxImages}`);
+  if (taggedImages.length >= limits.maxImages) {
+    warnings.push(`图片引用已达上限 ${limits.maxImages}`);
   }
-  if (totalFiles > SEEDANCE_LIMITS.maxTotalFiles) {
-    warnings.push(`总文件数 ${totalFiles} 超出限制 ${SEEDANCE_LIMITS.maxTotalFiles}`);
+  if (totalFiles > limits.maxTotalFiles) {
+    warnings.push(`总文件数 ${totalFiles} 超出限制 ${limits.maxTotalFiles}`);
   }
 
   return {
@@ -368,7 +379,7 @@ export function collectAllRefs(
     videos: taggedVideos,
     audios: taggedAudios,
     totalFiles,
-    overLimit: totalFiles > SEEDANCE_LIMITS.maxTotalFiles,
+    overLimit: totalFiles > limits.maxTotalFiles,
     limitWarnings: warnings,
   };
 }
@@ -529,6 +540,8 @@ export interface BuildGroupPromptOptions {
   enableLipSync?: boolean;
   /** 格子图引用（如果提供，使用格子图模式收集引用） */
   gridImageRef?: AssetRef | null;
+  /** 当前绑定模型的引用与时长限制。 */
+  limits?: SClassSeedanceLimits;
 }
 
 /** purpose → 中文提示语映射 */
@@ -586,6 +599,7 @@ export function buildGroupPrompt(options: BuildGroupPromptOptions): GroupPromptR
     aspectRatio,
     enableLipSync = true,
     gridImageRef,
+    limits = SEEDANCE_LIMITS,
   } = options;
 
   // 0. 延长/编辑模式 — 走独立分支
@@ -595,7 +609,7 @@ export function buildGroupPrompt(options: BuildGroupPromptOptions): GroupPromptR
   }
 
   // 1. 收集所有 @引用（格子图模式或旧版模式）
-  const refs = collectAllRefs(group, scenes, characters, sceneLibrary, gridImageRef);
+  const refs = collectAllRefs(group, scenes, characters, sceneLibrary, gridImageRef, limits);
 
   // 2. 构建各镜头片段
   const shotSegments = scenes.map((scene, idx) =>

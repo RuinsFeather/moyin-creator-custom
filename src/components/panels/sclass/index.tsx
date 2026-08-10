@@ -32,7 +32,7 @@ interface SClassViewProps {
   mode?: 'image' | 'video';
 }
 
-export function SClassView({ mode = 'director' }: SClassViewProps = {}) {
+export function SClassView({ mode = 'video' }: SClassViewProps = {}) {
   // Sync active project ID from project-store
   const { activeProjectId } = useProjectStore();
   const { setActiveProjectId, ensureProject } = useDirectorStore();

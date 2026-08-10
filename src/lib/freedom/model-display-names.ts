@@ -276,6 +276,7 @@ export const MODEL_DISPLAY_NAMES: Record<string, string> = {
   'doubao-seedance-1-5-lite-251215': 'Seedance 1.5 Lite',
   'doubao-seedance-1-5-pro-i2v-251215': 'Seedance 1.5 Pro 图生视频',
   'doubao-seedance-2-0-260128': 'Seedance 2.0',
+  'doubao-seedance-2-5-260628': 'Seedance 2.5',
 
   // --- Vidu ---
   'vidu2.0': 'Vidu 2.0',
