@@ -59,6 +59,31 @@ function apiCorsProxyPlugin(): Plugin {
           const ct = response.headers.get('content-type');
           if (ct) headers['Content-Type'] = ct;
 
+          // SSE 流式响应：逐块转发，避免整体缓冲破坏流式
+          const isEventStream = (ct ?? '').includes('text/event-stream');
+          if (isEventStream && response.body) {
+            headers['Cache-Control'] = 'no-cache';
+            headers['X-Accel-Buffering'] = 'no';
+            res.writeHead(response.status, headers);
+            res.flushHeaders();
+            const reader = response.body.getReader();
+            try {
+              for (;;) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (value && value.byteLength > 0) {
+                  res.write(Buffer.from(value));
+                  // @ts-ignore Node HTTP 响应支持 flush
+                  res.flush?.();
+                }
+              }
+            } finally {
+              await reader.cancel().catch(() => {});
+              res.end();
+            }
+            return;
+          }
+
           res.writeHead(response.status, headers);
           res.end(Buffer.from(respBody));
         } catch (err: any) {

@@ -906,11 +906,11 @@ async function _generateFreedomImageInner(
     }
   }
 
-  if (route === 'openai_images' && isGptImageModel && params.referenceImages && params.referenceImages.length > 0) {
-    console.log('[Freedom] GPT Image with reference images: routing through chat completions for multimodal input');
-    return await generateViaChatCompletions(params, model, apiKey, normalizedBase);
-  }
-
+  // 注意：GPT Image + 参考图不再改道 chat/completions。
+  // images/generations 端点本身支持多模态编辑（body.image 传参考图），
+  // 且 size 白名单在该端点生效；改道 chat 会导致 size 被中转站丢弃
+  // （自动回落 auto/沿用参考图画幅），并因中转站通常只给 gpt-image 注册
+  // images 通道而出现「无可用渠道」的间歇性连接失败。
   return await generateViaImagesEndpoint(params, model, apiKey, normalizedBase, endpointTypes);
 }
 
@@ -1288,6 +1288,11 @@ async function generateViaChatCompletions(
   } else if (isGptImage) {
     // GPT-IMG 系列：size 必须是接口白名单里的像素字符串。
     requestBody.size = gptImageSize;
+    // 部分中转站 chat 通道不识别 size，附带 aspect_ratio 作为兜底，
+    // 避免 size 被丢弃后自动回落 auto / 沿用参考图画幅。
+    if (aspectRatio && aspectRatio !== 'auto') {
+      requestBody.aspect_ratio = aspectRatio;
+    }
   } else {
     // 非 Gemini：附带 size / aspect_ratio / 宽高，兼容各家代理
     if (sized) {

@@ -252,7 +252,30 @@ declare global {
         statusText: string;
         headers: Record<string, string>;
         body: string;
+      }>;      /**
+       * 流式 fetch（SSE）。返回响应头；body chunk 通过 netProxyStream 事件推送，
+       * 渲染端应使用 fetchStreamResponse()（@/lib/cors-fetch）包装为 Response。
+       */
+      fetchStream?: (req: {
+        url: string
+        method?: string
+        headers?: Record<string, string>
+        body?: string
+        bodyIsBase64?: boolean
+        timeoutMs?: number
+      }) => Promise<{
+        ok: boolean
+        status: number
+        statusText: string
+        headers: Record<string, string>
+        streamChannel?: string
       }>;
     };
+    /** 流式代理事件（配合 netProxy.fetchStream 使用） */
+    netProxyStream?: {
+      on: (
+        channel: string,
+        cb: (event: { type: 'chunk' | 'done' | 'error'; text?: string; message?: string }) => void,
+      ) => () => void;    };
   }
 }

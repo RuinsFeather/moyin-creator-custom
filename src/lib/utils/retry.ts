@@ -78,6 +78,11 @@ export async function retryOperation<T>(
     } catch (error) {
       lastError = error as Error;
 
+      // 用户主动中止（AbortController.abort）不是瞬时故障 —— 永不重试
+      if ((error as any)?.name === 'AbortError' || (error as any)?.aborted) {
+        throw error;
+      }
+
       // Only retry on rate limit errors (when enabled)
       if (!retryOn429 || !isRateLimitError(error)) {
         throw error;

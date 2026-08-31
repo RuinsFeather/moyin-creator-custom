@@ -75,6 +75,109 @@ function buildResponseFromProxy(result: {
   });
 }
 
+/**
+ * Electron 主进程流式代理：返回一个 body 为实时 ReadableStream 的 Response。
+ *
+ * 主进程把响应 chunk 通过唯一 channel 逐块推送，这里用 PullSource 语义的
+ * ReadableStream 拼装。stream:true 的 SSE 请求必须走这条路径，
+ * 否则 net:proxy-fetch 会整体缓冲，失去流式效果。
+ */
+async function proxyFetchStream(
+  np: NonNullable<Window['netProxy']>,
+  stream: NonNullable<Window['netProxyStream']>,
+  targetUrl: string,
+  init: RequestInit | undefined,
+  timeoutMs: number,
+): Promise<Response> {
+  const ser = await serializeForProxy(init);
+  const fetchStream = np.fetchStream;
+  if (!fetchStream) {
+    console.warn('[corsFetch] preload 不支持流式通道，降级为整体缓冲');
+    const buffered = await np.fetch({
+      url: targetUrl,
+      method: ser.method,
+      headers: ser.headers,
+      body: ser.body,
+      bodyIsBase64: ser.bodyIsBase64,
+      timeoutMs,
+    });
+    return buildResponseFromProxy(buffered);
+  }
+  const head = await fetchStream({
+    url: targetUrl,
+    method: ser.method,
+    headers: ser.headers,
+    body: ser.body,
+    bodyIsBase64: ser.bodyIsBase64,
+    timeoutMs,
+  });
+
+  // 通道名由 preload 内部生成并回传；旧版 preload 无此字段时降级为整体缓冲
+  const channel = (head as any).streamChannel as string | undefined;
+  if (!channel) {
+    console.warn('[corsFetch] preload 不支持流式通道，降级为整体缓冲');
+    const buffered = await np.fetch({
+      url: targetUrl,
+      method: ser.method,
+      headers: ser.headers,
+      body: ser.body,
+      bodyIsBase64: ser.bodyIsBase64,
+      timeoutMs,
+    });
+    return buildResponseFromProxy(buffered);
+  }
+
+  const encoder = new TextEncoder();
+  let pullResolve: (() => void) | null = null;
+  const queue: Uint8Array[] = [];
+  let finished = false;
+  let failure: Error | null = null;
+
+  const off = stream.on(channel, (event) => {
+    if (event.type === 'chunk' && event.text) {
+      queue.push(encoder.encode(event.text));
+    } else if (event.type === 'done') {
+      finished = true;
+    } else if (event.type === 'error') {
+      failure = new Error(event.message || '主进程流式代理失败');
+      finished = true;
+    }
+    pullResolve?.();
+    pullResolve = null;
+  });
+
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      // 队列为空且未结束时，等待下一个 chunk 事件
+      while (queue.length === 0 && !finished) {
+        await new Promise<void>((resolve) => { pullResolve = resolve; });
+      }
+      if (queue.length > 0) {
+        controller.enqueue(queue.shift()!);
+        return;
+      }
+      if (failure) {
+        controller.error(failure);
+        return;
+      }
+      controller.close();
+      off();
+    },
+    cancel() {
+      off();
+      finished = true;
+      pullResolve?.();
+      pullResolve = null;
+    },
+  });
+
+  return new Response(body, {
+    status: head.status,
+    statusText: head.statusText,
+    headers: head.headers,
+  });
+}
+
 /** 把 RequestInit.headers / body 序列化成主进程能接受的字符串形式 */
 async function serializeForProxy(init?: RequestInit): Promise<{
   method: string;
@@ -133,20 +236,25 @@ export async function corsFetch(
 ): Promise<Response> {
   const targetUrl = url.toString();
 
+  // 检测是否为流式请求（SSE）——流式必须走流式通道，避免整体缓冲
+  const isStreamRequest =
+    typeof init?.body === 'string' && /"stream"\s*:\s*true/.test(init.body);
+
   // Electron：第三方原生域走主进程代理
   if (isElectron() && shouldUseMainProxy(targetUrl)) {
-    const np = (window as any).netProxy as {
-      fetch: (req: {
-        url: string;
-        method?: string;
-        headers?: Record<string, string>;
-        body?: string;
-        bodyIsBase64?: boolean;
-        timeoutMs?: number;
-      }) => Promise<{ ok: boolean; status: number; statusText: string; headers: Record<string, string>; body: string }>;
-    };
+    const np = (window as any).netProxy as Window['netProxy'];
+    if (isStreamRequest && np?.fetchStream && (window as any).netProxyStream) {
+      // 流式路径：body chunk 经 IPC 逐块推送
+      return proxyFetchStream(
+        np,
+        (window as any).netProxyStream,
+        targetUrl,
+        init,
+        10 * 60_000,
+      );
+    }
     const ser = await serializeForProxy(init);
-    const result = await np.fetch({
+    const result = await np!.fetch({
       url: targetUrl,
       method: ser.method,
       headers: ser.headers,
@@ -158,12 +266,12 @@ export async function corsFetch(
     return buildResponseFromProxy(result);
   }
 
-  // Electron 同源/自家中转 或 浏览器生产 → 直连
+  // Electron 同源/自家中转 或 浏览器生产 → 直连（fetch 原生支持流式）
   if (isElectron() || !isViteDev()) {
     return fetch(targetUrl, init);
   }
 
-  // 浏览器开发模式：走 Vite 代理
+  // 浏览器开发模式：走 Vite 代理（支持 SSE 流式透传）
   const proxyUrl = `/__api_proxy?url=${encodeURIComponent(targetUrl)}`;
 
   const proxyHeaders = new Headers(init?.headers);

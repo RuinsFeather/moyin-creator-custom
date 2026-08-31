@@ -14,6 +14,11 @@ import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import { createProjectScopedStorage } from "@/lib/project-storage";
 import { useProjectStore } from "@/stores/project-store";
+import {
+  saveStoryboardToWorkspace as persistStoryboardFile,
+  persistReferenceImagesToWorkspace,
+  loadStoryboardFromWorkspace,
+} from "@/lib/storyboard/storyboard-file-service";
 import type {
   StoryboardDocument,
   StoryboardShot,
@@ -84,6 +89,8 @@ interface StoryboardActions {
   setStatus: (status: StoryboardDocument["status"]) => void;
   markDirty: (dirty?: boolean) => void;
   clearDocument: () => void;
+  /** 应用迁移/导入的分镜文档（覆盖当前 document 与选中状态） */
+  applyMigratedDocument: (document: StoryboardDocument) => void;
 
   // shot CRUD
   addShot: (index?: number) => void;
@@ -123,6 +130,8 @@ interface StoryboardActions {
 
   // persistence
   saveToWorkspace: () => Promise<{ jsonPath: string; mdPath?: string }>;
+  /** 从当前工作区打开已保存的 storyboard.json；无文件时返回 null */
+  loadFromWorkspace: () => Promise<StoryboardDocument | null>;
 }
 
 type StoryboardStore = StoryboardPersistedState & StoryboardActions;
@@ -184,6 +193,14 @@ export const useStoryboardStore = create<StoryboardStore>()(
       markDirty: (dirty = true) => set({ dirty }),
 
       clearDocument: () => set({ document: null, selectedShotId: null, selectedShotIds: [], versions: [] }),
+
+      applyMigratedDocument: (document) =>
+        set({
+          document,
+          selectedShotId: document.shots[0]?.id ?? null,
+          selectedShotIds: [],
+          dirty: true,
+        }),
 
       addShot: (index) =>
         set((state) => {
@@ -467,10 +484,31 @@ export const useStoryboardStore = create<StoryboardStore>()(
       saveToWorkspace: async () => {
         const state = get();
         if (!state.document) throw new Error("没有可分镜文档");
-        // 实际文件保存由 script-workspace-fs 提供，见 storyboard-file-service
-        // 这里仅标记保存状态
+        // 固化 Base64 参考图到工作区，得到含稳定引用的文档
+        const persistedDoc = await persistReferenceImagesToWorkspace(state.document);
+        // 有变化时回写稳定引用，保证 UI 与文件一致
+        if (persistedDoc !== state.document) {
+          useStoryboardStore.setState({ document: persistedDoc, dirty: true });
+        }
+        // 实际文件写入由 storyboard-file-service 完成（storyboard.json / storyboard.md）
+        const result = await persistStoryboardFile(persistedDoc, {
+          includeMarkdown: false,
+        });
         set({ dirty: false });
-        return { jsonPath: "storyboard.json" };
+        return result;
+      },
+
+      loadFromWorkspace: async () => {
+        const doc = await loadStoryboardFromWorkspace();
+        if (!doc) return null;
+        // 覆盖当前文档前，若存在旧分镜则自动快照，保证可从版本历史恢复
+        const current = get().document;
+        if (current && current.shots.length > 0) {
+          get().createVersion("打开工作区分镜前快照");
+        }
+        // 复用迁移应用逻辑：覆盖 document 与选中状态
+        get().applyMigratedDocument(doc);
+        return doc;
       },
     }),
     {

@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { getScriptWorkspaceFs } from '@/lib/script-workspace-fs';
+import { EDITABLE_FILE_EXTENSIONS, isSafeRelativePath } from '@/lib/script-workspace/safe-path';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -18,7 +19,7 @@ import {
   ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 
-const ALLOWED_EXTENSIONS = new Set(['.md', '.txt', '.markdown']);
+const ALLOWED_EXTENSIONS = EDITABLE_FILE_EXTENSIONS;
 type EntryKind = 'file' | 'directory';
 type SelectedEntry = { path: string; kind: EntryKind };
 type TreeNode = { name: string; path: string; kind: EntryKind; file?: ScriptFileEntry; children: TreeNode[] };
@@ -98,10 +99,6 @@ const SCRIPT_REFERENCE_TEMPLATE = `# 《雨停之前》
 function dirname(path: string): string { return path.split('/').slice(0, -1).join('/'); }
 function basename(path: string): string { return path.split('/').pop() ?? path; }
 function joinPath(parent: string, name: string): string { return parent ? `${parent}/${name}` : name; }
-function isSafeRelativePath(path: string): boolean {
-  return Boolean(path) && !path.startsWith('/') && !path.includes('\0')
-    && path.split('/').every((part) => part && part !== '.' && part !== '..');
-}
 function isEditableFile(path: string): boolean {
   return ALLOWED_EXTENSIONS.has(path.slice(path.lastIndexOf('.')).toLowerCase());
 }
@@ -114,7 +111,7 @@ function copyName(path: string, occupied: Set<string>): string {
 }
 
 export function ProjectExplorer() {
-  const { files, directories, workspaceRoot, activeFileId, setActiveFile, setFiles, setDirectories, setWorkspaceRoot, addAgentContextFile } = useScriptWorkspaceStore();
+  const { files, directories, workspaceRoot, activeFileId, setActiveFile, setFiles, setDirectories, setWorkspaceRoot, browseAgentContextFile } = useScriptWorkspaceStore();
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [selectedEntry, setSelectedEntry] = useState<SelectedEntry | null>(null);
   const [draggedEntry, setDraggedEntry] = useState<SelectedEntry | null>(null);
@@ -195,10 +192,15 @@ export function ProjectExplorer() {
   }, [workspaceRoot, refresh]);
 
   const handleOpenFile = useCallback((file: ScriptFileEntry) => { if (!file.editable) return toast.info('该文件不支持文本编辑'); setActiveFile(file.id); }, [setActiveFile]);
+  /**
+   * 点选文件：选中条目并把该文件带入剧本助手参考栏。
+   * 使用浏览替换语义：上一个未勾选的浏览参考会被自动移除，
+   * 已勾选（active）或手动拖入的参考保留，避免参考栏堆积。
+   */
   const selectFile = useCallback((file: ScriptFileEntry, entry: SelectedEntry) => {
     setSelectedEntry(entry);
-    addAgentContextFile({ id: file.id, name: file.name, path: file.path, source: 'workspace', active: false });
-  }, [addAgentContextFile]);
+    browseAgentContextFile({ id: file.id, name: file.name, path: file.path, source: 'workspace', active: false });
+  }, [browseAgentContextFile]);
   const handleImportFolder = useCallback(async () => {
     const workspaceFs = getScriptWorkspaceFs(); if (!workspaceFs) return toast.info('请通过 npm run dev 启动 Electron');
     const root = await workspaceFs.selectRoot(); if (!root) return; setWorkspaceRoot(root); setExpandedFolders(new Set()); setSelectedEntry(null); await refresh(root);
@@ -222,7 +224,7 @@ export function ProjectExplorer() {
 
   const renderNodes = (nodes: TreeNode[], depth = 0): React.ReactNode => nodes.map((node) => {
     const entry: SelectedEntry = { path: node.path, kind: node.kind }; const selected = selectedEntry?.path === node.path;
-    if (node.kind === 'directory') { const expanded = expandedFolders.has(node.path); return <ContextMenu key={node.path} onOpenChange={(open) => open && setSelectedEntry(entry)}><div><ContextMenuTrigger asChild><button draggable onDragStart={(event) => { setDraggedEntry(entry); event.dataTransfer.effectAllowed = 'move'; }} onDragEnd={() => { setDraggedEntry(null); setDropTarget(null); }} onDragOver={(event) => { event.preventDefault(); setDropTarget(node.path); }} onDragLeave={() => setDropTarget((current) => current === node.path ? null : current)} onDrop={(event) => { event.preventDefault(); setDropTarget(null); if (draggedEntry) void moveEntry(draggedEntry, node.path); }} onClick={() => { setSelectedEntry(entry); setExpandedFolders((previous) => { const next = new Set(previous); if (next.has(node.path)) next.delete(node.path); else next.add(node.path); return next; }); }} className={cn('flex items-center w-full py-1 text-xs text-muted-foreground hover:bg-muted/50', selected && 'bg-primary/15 text-foreground', dropTarget === node.path && 'ring-1 ring-inset ring-primary bg-primary/10')} style={{ paddingLeft: 8 + depth * 12 }}>{expanded ? <ChevronDownIcon className="h-3 w-3 mr-1" /> : <ChevronRightIcon className="h-3 w-3 mr-1" />}{expanded ? <FolderOpenIcon className="h-3.5 w-3.5 mr-1.5" /> : <FolderIcon className="h-3.5 w-3.5 mr-1.5" />}<span className="truncate">{node.name}</span></button></ContextMenuTrigger>{expanded && renderNodes(node.children, depth + 1)}</div>{commonMenu(entry)}</ContextMenu>; }
+    if (node.kind === 'directory') { const expanded = expandedFolders.has(node.path); return <ContextMenu key={node.path} onOpenChange={(open) => open && setSelectedEntry(entry)}><div><ContextMenuTrigger asChild><button draggable onDragStart={(event) => { setDraggedEntry(entry); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('application/x-moyin-script-folder', node.path); }} onDragEnd={() => { setDraggedEntry(null); setDropTarget(null); }} onDragOver={(event) => { event.preventDefault(); setDropTarget(node.path); }} onDragLeave={() => setDropTarget((current) => current === node.path ? null : current)} onDrop={(event) => { event.preventDefault(); setDropTarget(null); if (draggedEntry) void moveEntry(draggedEntry, node.path); }} onClick={() => { setSelectedEntry(entry); setExpandedFolders((previous) => { const next = new Set(previous); if (next.has(node.path)) next.delete(node.path); else next.add(node.path); return next; }); }} className={cn('flex items-center w-full py-1 text-xs text-muted-foreground hover:bg-muted/50', selected && 'bg-primary/15 text-foreground', dropTarget === node.path && 'ring-1 ring-inset ring-primary bg-primary/10')} style={{ paddingLeft: 8 + depth * 12 }}>{expanded ? <ChevronDownIcon className="h-3 w-3 mr-1" /> : <ChevronRightIcon className="h-3 w-3 mr-1" />}{expanded ? <FolderOpenIcon className="h-3.5 w-3.5 mr-1.5" /> : <FolderIcon className="h-3.5 w-3.5 mr-1.5" />}<span className="truncate">{node.name}</span></button></ContextMenuTrigger>{expanded && renderNodes(node.children, depth + 1)}</div>{commonMenu(entry)}</ContextMenu>; }
     const file = node.file!; return <ContextMenu key={node.path} onOpenChange={(open) => open && selectFile(file, entry)}><ContextMenuTrigger asChild><button draggable onDragStart={(event) => { setDraggedEntry(entry); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('application/x-moyin-script-file', file.path); }} onDragEnd={() => setDraggedEntry(null)} onClick={() => selectFile(file, entry)} onDoubleClick={() => handleOpenFile(file)} className={cn('w-full flex items-center py-1.5 text-xs hover:bg-muted/50', selected && 'bg-primary/15', activeFileId === file.id && 'text-primary', !file.editable && 'text-muted-foreground')} style={{ paddingLeft: 12 + depth * 12 }}><FileTextIcon className="h-3.5 w-3.5 mr-2" /><span className="truncate flex-1 text-left">{file.name}</span>{file.isDirty && <span className="w-2 h-2 rounded-full bg-yellow-500 mr-2" />}</button></ContextMenuTrigger>{commonMenu(entry)}</ContextMenu>;
   });
 

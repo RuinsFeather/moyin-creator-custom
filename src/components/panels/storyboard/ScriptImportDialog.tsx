@@ -31,6 +31,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Loader2, FolderOpen } from "lucide-react";
 import { toast } from "sonner";
+import { snapshotBeforeOverwrite } from "@/lib/storyboard/storyboard-script-sync";
 
 const STRATEGY_LABEL: Record<string, string> = {
   "first-import": "首次导入",
@@ -96,6 +97,13 @@ export function ScriptImportDialog() {
   const handleImport = () => {
     if (!selectedFile) return;
     const incomingHash = hashScriptContent(selectedFile.content);
+    // §14 风险3：覆盖/换新剧本前，若已有镜头则自动快照，保证人工修改可恢复
+    const hasShots = Boolean(document && document.shots.length > 0);
+    if (strategy && hasShots && (strategy.strategy === "overwrite" || strategy.strategy === "create-version")) {
+      snapshotBeforeOverwrite(
+        strategy.strategy === "overwrite" ? "覆盖现有分镜前快照" : "导入新剧本前快照",
+      );
+    }
     initDocument({
       title: selectedFile.name.replace(/\.(md|txt|markdown)$/i, "") || "分镜",
       sourceScriptPath: selectedFile.path,

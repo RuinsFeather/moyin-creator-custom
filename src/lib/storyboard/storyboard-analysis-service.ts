@@ -43,6 +43,54 @@ export interface AnalyzeResult {
 // 模块级取消机制：jobId -> 是否取消
 const cancelFlags = new Map<string, boolean>();
 
+/**
+ * 长剧本按段落分批的字符上限（§14 风险：单份剧本内容过长）。
+ * 超过该长度时服务层按段落分批分析并在返回前合并镜头，UI 仍保持一张分镜表。
+ */
+export const SCRIPT_CHUNK_CHAR_LIMIT = 12000;
+
+/**
+ * 将剧本按段落切分为不超过字符上限的若干块。
+ * 以空行（\n\n）为主的自然分段，尽量保持段落完整；单个超长段落硬切。
+ * 导出以便测试。
+ */
+export function splitScriptIntoChunks(
+  content: string,
+  limit: number = SCRIPT_CHUNK_CHAR_LIMIT,
+): string[] {
+  if (!content) return [];
+  const text = content.trim();
+  if (!text) return [];
+  if (text.length <= limit) return [text];
+
+  const paragraphs = text.split(/\n{2,}|\r\n{2,}/).map((p) => p.trim()).filter(Boolean);
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const para of paragraphs) {
+    // 单段超长：硬切
+    if (para.length > limit) {
+      if (current) {
+        chunks.push(current);
+        current = "";
+      }
+      for (let i = 0; i < para.length; i += limit) {
+        chunks.push(para.slice(i, i + limit));
+      }
+      continue;
+    }
+
+    if (current.length + para.length + 1 > limit) {
+      chunks.push(current);
+      current = para;
+    } else {
+      current = current ? `${current}\n\n${para}` : para;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
 function createId(): string {
   return globalThis.crypto?.randomUUID?.() || `sb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -265,35 +313,13 @@ export async function startStoryboardAnalysis(
 
   try {
     const systemPrompt = buildSystemPrompt();
-    const userPrompt = buildUserPrompt(scriptContent, options.context);
+    const chunks = splitScriptIntoChunks(scriptContent);
+    const totalChunks = chunks.length;
 
-    let rawText = "";
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      throwIfCancelled(jobId);
-      store.setAnalysisProgress({ progress: 10 + attempt * 5, message: `正在调用 AI 拆镜（第 ${attempt + 1} 次）…` });
-
-      rawText = await callFeatureAPI("script_analysis", systemPrompt, userPrompt, {
-        modelOverride: options.modelOverride,
-        maxTokens: 16384,
-        temperature: 0.4,
-      });
-
-      throwIfCancelled(jobId);
-
-      const parsed = parseStoryboardResponse(rawText);
-      if (!parsed.ok) {
-        if (attempt < maxRetries) continue; // 重试
-        throw new Error(parsed.error || "无法解析 AI 拆镜结果");
-      }
-
-      const validation = validateShotBatch(parsed.shots);
-      if (!validation.valid) {
-        if (attempt < maxRetries) continue; // 重试
-        throw new Error(validation.error || "AI 拆镜结果未通过校验");
-      }
-
-      // 成功：构建新镜头并应用
-      const newShots = buildShots(parsed.shots);
+    if (totalChunks <= 1) {
+      // 短剧本：单次完整分析（原有语义）
+      const userPrompt = buildUserPrompt(scriptContent, options.context);
+      const newShots = await analyzeChunk(jobId, systemPrompt, userPrompt, maxRetries, 1, 1);
       applyShots(newShots);
       store.setAnalysisProgress({
         status: "succeeded",
@@ -305,7 +331,46 @@ export async function startStoryboardAnalysis(
       return { ok: true, jobId, shotCount: newShots.length };
     }
 
-    throw new Error("拆镜失败");
+    // 长剧本：按段落分批分析并在返回前合并镜头（UI 仍保持一张分镜表）
+    const allShots: StoryboardShot[] = [];
+    for (let b = 0; b < totalChunks; b++) {
+      throwIfCancelled(jobId);
+      const chunk = chunks[b];
+      store.setAnalysisProgress({
+        progress: Math.round((b / totalChunks) * 80),
+        message: `正在分析剧本第 ${b + 1}/${totalChunks} 段…`,
+      });
+      // 每批提示词标注当前段范围，保证批次间无 集/场 层级
+      const userPrompt =
+        `当前分析的是剧本第 ${b + 1}/${totalChunks} 段，请只基于这段剧本拆镜，` +
+        `不要输出任何 "集"、"场" 层级信息，不要输出图片/首尾帧/视频提示词。\n\n` +
+        buildUserPrompt(chunk, options.context);
+      const batchShots = await analyzeChunk(
+        jobId,
+        systemPrompt,
+        userPrompt,
+        maxRetries,
+        b + 1,
+        totalChunks,
+      );
+      allShots.push(...batchShots);
+    }
+
+    // 按顺序重排镜头号（各批内部是 1..n，合并后需连续）
+    const mergedShots = allShots.map((s, i) => ({
+      ...s,
+      order: i,
+      shotNumber: String(i + 1),
+    }));
+    applyShots(mergedShots);
+    store.setAnalysisProgress({
+      status: "succeeded",
+      progress: 100,
+      message: `拆镜完成，共 ${mergedShots.length} 个镜头（${totalChunks} 段合并）`,
+      finishedAt: Date.now(),
+    });
+    store.setStatus("review");
+    return { ok: true, jobId, shotCount: mergedShots.length };
   } catch (e) {
     const cancelled = isCancelled(jobId);
     const errMsg = cancelled
@@ -345,6 +410,50 @@ function applyShots(shots: StoryboardShot[]): void {
     },
     dirty: true,
   });
+}
+
+/**
+ * 对单个分块执行一次拆镜（含解析/校验失败重试与取消检查）。
+ * 返回该块产出的 StoryboardShot[]。
+ */
+async function analyzeChunk(
+  jobId: string,
+  systemPrompt: string,
+  userPrompt: string,
+  maxRetries: number,
+  chunkIndex: number,
+  totalChunks: number,
+): Promise<StoryboardShot[]> {
+  let lastError = "";
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    throwIfCancelled(jobId);
+    if (attempt > 0) {
+      // 重试进度
+    }
+    const rawText = await callFeatureAPI("script_analysis", systemPrompt, userPrompt, {
+      maxTokens: 16384,
+      temperature: 0.4,
+    });
+    throwIfCancelled(jobId);
+
+    const parsed = parseStoryboardResponse(rawText);
+    if (!parsed.ok) {
+      lastError = parsed.error || "无法解析 AI 拆镜结果";
+      if (attempt < maxRetries) continue;
+      throw new Error(`第 ${chunkIndex}/${totalChunks} 段解析失败：${lastError}`);
+    }
+
+    const validation = validateShotBatch(parsed.shots);
+    if (!validation.valid) {
+      lastError = validation.error || "AI 拆镜结果未通过校验";
+      if (attempt < maxRetries) continue;
+      throw new Error(`第 ${chunkIndex}/${totalChunks} 段未通过校验：${lastError}`);
+    }
+
+    // 成功：构建该块镜头
+    return buildShots(parsed.shots);
+  }
+  throw new Error(`第 ${chunkIndex}/${totalChunks} 段拆镜失败：${lastError || "未知错误"}`);
 }
 
 /**

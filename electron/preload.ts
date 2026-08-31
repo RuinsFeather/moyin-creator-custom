@@ -224,5 +224,33 @@ contextBridge.exposeInMainWorld('netProxy', {
     bodyIsBase64?: boolean
     timeoutMs?: number
   }) => ipcRenderer.invoke('net:proxy-fetch', req),
+  /**
+   * 流式 fetch（SSE）：invoke 返回响应头信息，响应体 chunk 通过
+   * channel（`net:proxy-stream:<id>`）事件逐块推送。
+   * 返回的 Response body 是一个实时 ReadableStream。
+   */
+  fetchStream: (req: {
+    url: string
+    method?: string
+    headers?: Record<string, string>
+    body?: string
+    bodyIsBase64?: boolean
+    timeoutMs?: number
+  }) => ipcRenderer.invoke('net:proxy-fetch-stream', {
+    ...req,
+    channel: `net:proxy-stream:${streamSeq++}`,
+  }),
+})
+
+/** 流式请求的事件通道序号（保证每次调用 channel 唯一） */
+let streamSeq = 0
+
+/** 监听流式代理事件。返回取消监听函数。 */
+contextBridge.exposeInMainWorld('netProxyStream', {
+  on: (channel: string, cb: (event: { type: 'chunk' | 'done' | 'error'; text?: string; message?: string }) => void) => {
+    const listener = (_e: unknown, data: { type: 'chunk' | 'done' | 'error'; text?: string; message?: string }) => cb(data)
+    ipcRenderer.on(channel, listener)
+    return () => ipcRenderer.removeListener(channel, listener)
+  },
 })
 

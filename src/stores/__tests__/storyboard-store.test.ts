@@ -1,12 +1,20 @@
 // Copyright (c) 2025 hotflow2024
 // Licensed under AGPL-3.0-or-later. See LICENSE for details.
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useStoryboardStore,
   createEmptyShot,
 } from "../storyboard-store";
 import { useProjectStore } from "../project-store";
+import type { StoryboardDocument } from "@/types/storyboard";
+
+const mockLoadFromWorkspace = vi.fn();
+vi.mock("@/lib/storyboard/storyboard-file-service", () => ({
+  saveStoryboardToWorkspace: vi.fn(),
+  persistReferenceImagesToWorkspace: vi.fn(),
+  loadStoryboardFromWorkspace: (...args: unknown[]) => mockLoadFromWorkspace(...args),
+}));
 
 const projectA = "project-a";
 
@@ -19,6 +27,7 @@ describe("storyboard store", () => {
       analysisJob: null,
       importDialogOpen: false,
       dirty: false,
+      versions: [],
     });
     useProjectStore.setState({ activeProjectId: projectA });
   });
@@ -207,5 +216,61 @@ describe("storyboard store", () => {
 
     useStoryboardStore.getState().clearShotSelection();
     expect(useStoryboardStore.getState().selectedShotIds).toEqual([]);
+  });
+
+  it("loadFromWorkspace 打开已保存文档：无旧文档时不产生版本快照", async () => {
+    mockLoadFromWorkspace.mockResolvedValue({
+      id: "loaded-1",
+      projectId: projectA,
+      title: "工作区文档",
+      sourceScriptPath: "script.md",
+      version: 1,
+      status: "review",
+      shots: [],
+      createdAt: 1,
+      updatedAt: 2,
+    });
+    const loaded = await useStoryboardStore.getState().loadFromWorkspace();
+    expect(loaded?.title).toBe("工作区文档");
+    const doc = useStoryboardStore.getState().document!;
+    expect(doc.id).toBe("loaded-1");
+    expect(useStoryboardStore.getState().versions).toHaveLength(0);
+    expect(useStoryboardStore.getState().dirty).toBe(true);
+  });
+
+  it("loadFromWorkspace 有旧分镜时自动快照（覆盖前可恢复）", async () => {
+    // 先建立旧文档 + 一个镜头
+    useStoryboardStore.getState().initDocument({ title: "旧分镜" });
+    useStoryboardStore.getState().addShot();
+    const oldId = useStoryboardStore.getState().document!.id;
+
+    mockLoadFromWorkspace.mockResolvedValue({
+      id: "loaded-2",
+      projectId: projectA,
+      title: "新文档",
+      sourceScriptPath: "script.md",
+      version: 2,
+      status: "review",
+      shots: [],
+      createdAt: 1,
+      updatedAt: 2,
+    } as StoryboardDocument);
+    const loaded = await useStoryboardStore.getState().loadFromWorkspace();
+    expect(loaded?.id).toBe("loaded-2");
+    // 旧文档被版本快照记录（1 个版本）
+    expect(useStoryboardStore.getState().versions).toHaveLength(1);
+    expect(useStoryboardStore.getState().versions[0].document.id).toBe(oldId);
+    expect(useStoryboardStore.getState().versions[0].reason).toBe("打开工作区分镜前快照");
+    // 当前文档已被覆盖
+    expect(useStoryboardStore.getState().document!.id).toBe("loaded-2");
+  });
+
+  it("loadFromWorkspace 返回 null（无文件）时不改变当前文档", async () => {
+    useStoryboardStore.getState().initDocument({ title: "保留我" });
+    mockLoadFromWorkspace.mockResolvedValue(null);
+    const loaded = await useStoryboardStore.getState().loadFromWorkspace();
+    expect(loaded).toBeNull();
+    expect(useStoryboardStore.getState().document!.title).toBe("保留我");
+    expect(useStoryboardStore.getState().versions).toHaveLength(0);
   });
 });

@@ -1074,6 +1074,86 @@ ipcMain.handle('net:proxy-fetch', async (_event, req: NetProxyRequest): Promise<
   }
 })
 
+// ==================== Net Proxy：流式版本（SSE） ====================
+// net:proxy-fetch 会等待 resp.text() 完成才返回，SSE 流式响应会被整体缓冲，
+// 失去流式效果。此通道把响应 chunk 通过 webContents.send 逐块推给渲染进程，
+// 渲染端用 ReadableStream 重新拼装成 Response body。
+ipcMain.handle(
+  'net:proxy-fetch-stream',
+  async (
+    event,
+    req: NetProxyRequest & { channel?: string },
+  ): Promise<{ ok: boolean; status: number; statusText: string; headers: Record<string, string> }> => {
+    if (!req?.url || typeof req.url !== 'string') {
+      throw new Error('net:proxy-fetch-stream 缺少 url')
+    }
+    const streamChannel = req.channel || `net:proxy-fetch-stream:${Date.now()}:${Math.random().toString(36).slice(2)}`
+    const sender = event.sender
+    const controller = new AbortController()
+    const timeout = Math.max(1000, Math.min(req.timeoutMs ?? 10 * 60_000, 30 * 60_000))
+    const timer = setTimeout(() => controller.abort(), timeout)
+    // 渲染端断开/崩溃时中止上游请求
+    const onClosed = () => controller.abort()
+    sender.once('closed' as any, onClosed)
+    try {
+      const init: RequestInit = {
+        method: (req.method || 'GET').toUpperCase(),
+        headers: req.headers || {},
+        signal: controller.signal,
+      }
+      if (req.body !== undefined && init.method !== 'GET' && init.method !== 'HEAD') {
+        init.body = req.bodyIsBase64 ? Buffer.from(req.body, 'base64') : req.body
+      }
+      const resp = await net.fetch(req.url, init)
+      const headers: Record<string, string> = {}
+      resp.headers.forEach((v, k) => { headers[k] = v })
+      const result = { ok: resp.ok, status: resp.status, statusText: resp.statusText, headers }
+
+      if (!resp.body) {
+        // 无 body（或环境不支持）：发一个空的 done
+        sender.send(streamChannel, { type: 'done' })
+        return result
+      }
+      const bodyStream = resp.body
+
+      // 后台消费流，逐块转发；不等它结束 —— invoke 立即返回响应头
+      void (async () => {
+        try {
+          const reader = bodyStream.getReader()
+          const decoder = new TextDecoder()
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            if (sender.isDestroyed()) break
+            sender.send(streamChannel, {
+              type: 'chunk',
+              // Electron IPC 结构化克隆支持 Uint8Array；退化为文本更稳妥
+              text: decoder.decode(value, { stream: true }),
+            })
+          }
+          const tail = decoder.decode()
+          if (tail) sender.send(streamChannel, { type: 'chunk', text: tail })
+          if (!sender.isDestroyed()) sender.send(streamChannel, { type: 'done' })
+        } catch (error) {
+          if (!sender.isDestroyed()) {
+            sender.send(streamChannel, { type: 'error', message: error instanceof Error ? error.message : String(error) })
+          }
+        } finally {
+          clearTimeout(timer)
+          sender.removeListener('closed' as any, onClosed)
+        }
+      })()
+
+      return result
+    } catch (error) {
+      clearTimeout(timer)
+      sender.removeListener('closed' as any, onClosed)
+      if (!sender.isDestroyed()) sender.send(streamChannel, { type: 'error', message: error instanceof Error ? error.message : String(error) })
+      throw error
+    }
+  },
+)
+
 // ==================== File Storage for App Data ====================
 const getDataDir = () => {
   const dataDir = getProjectDataRoot()

@@ -23,6 +23,8 @@ import { useSClassStore } from '@/stores/sclass-store';
 import { useFreedomHistoryStore } from '@/stores/freedom-history-store';
 import { useBlueprintStore } from '@/stores/blueprint-store';
 import { useScriptWorkspaceStore } from '@/stores/script-workspace-store';
+import { useStoryboardStore } from '@/stores/storyboard-store';
+import { migrateLegacyStoryboardForActiveProject } from '@/lib/storyboard/storyboard-migration-service';
 
 /**
  * Switch to a different project. Saves current project data and loads new project data.
@@ -71,6 +73,12 @@ export async function switchProject(newProjectId: string): Promise<void> {
     await useScriptWorkspaceStore.persist.rehydrate();
   } catch (e) {
     console.warn('[ProjectSwitcher] Failed to rehydrate script workspace store:', e);
+  }
+
+  try {
+    await useStoryboardStore.persist.rehydrate();
+  } catch (e) {
+    console.warn('[ProjectSwitcher] Failed to rehydrate storyboard store:', e);
   }
 
   try {
@@ -134,6 +142,17 @@ export async function switchProject(newProjectId: string): Promise<void> {
   useScriptStore.getState().ensureProject(newProjectId);
   useDirectorStore.getState().ensureProject(newProjectId);
   useSClassStore.getState().ensureProject(newProjectId);
+
+  // 6. 旧分镜数据迁移（阶段7）：新分镜无文档时，从旧 director-store 的 splitScenes 迁移。
+  //    放在 director-store 完成 ensureProject 之后，确保能读到当前项目的旧数据。
+  try {
+    const migration = migrateLegacyStoryboardForActiveProject();
+    if (migration.migrated) {
+      console.log(`[ProjectSwitcher] ${migration.message}`);
+    }
+  } catch (e) {
+    console.warn('[ProjectSwitcher] Legacy storyboard migration failed:', e);
+  }
 
   console.log(`[ProjectSwitcher] Switch complete → ${newProjectId.substring(0, 8)}`);
 }

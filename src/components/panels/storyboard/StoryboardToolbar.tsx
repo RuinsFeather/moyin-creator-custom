@@ -14,6 +14,7 @@ import {
   Trash2,
   History,
   Save,
+  FolderOpen,
   PanelRight,
   Loader2,
   Send,
@@ -32,6 +33,8 @@ export function StoryboardToolbar({ onToggleDetail, showDetail }: Props) {
   const addShot = useStoryboardStore((s) => s.addShot);
   const deleteShots = useStoryboardStore((s) => s.deleteShots);
   const saveToWorkspace = useStoryboardStore((s) => s.saveToWorkspace);
+  const loadFromWorkspace = useStoryboardStore((s) => s.loadFromWorkspace);
+  const dirty = useStoryboardStore((s) => s.dirty);
   const document = useActiveStoryboardDocument();
   const workspaceRoot = useScriptWorkspaceStore((s) => s.workspaceRoot);
 
@@ -54,6 +57,27 @@ export function StoryboardToolbar({ onToggleDetail, showDetail }: Props) {
       toast.success("已保存到工作区");
     } catch (e) {
       toast.error((e as Error).message || "保存失败");
+    }
+  };
+
+  const handleLoad = async () => {
+    if (!workspaceRoot) {
+      toast.warning("请先在「剧本」模块打开工作区文件夹");
+      return;
+    }
+    // 有未保存修改时确认：打开会用工作区文件覆盖当前分镜（打开前自动快照，可从版本历史恢复）
+    if (document && dirty && !window.confirm("当前分镜有未保存修改，打开工作区文件将覆盖它。是否继续？")) {
+      return;
+    }
+    try {
+      const loaded = await loadFromWorkspace();
+      if (!loaded) {
+        toast.warning("工作区中未找到已保存的分镜文件（storyboard.json）");
+        return;
+      }
+      toast.success(`已打开工作区分镜「${loaded.title}」(${loaded.shots.length} 镜头)`);
+    } catch (e) {
+      toast.error((e as Error).message || "打开失败");
     }
   };
 
@@ -118,6 +142,10 @@ export function StoryboardToolbar({ onToggleDetail, showDetail }: Props) {
 
         <Button variant="ghost" size="sm" onClick={handleSave} title="保存到工作区" disabled={!document}>
           <Save className="h-4 w-4" />
+        </Button>
+
+        <Button variant="ghost" size="sm" onClick={handleLoad} title="打开工作区中已保存的分镜(storyboard.json)">
+          <FolderOpen className="h-4 w-4" />
         </Button>
 
         <Button variant="ghost" size="sm" onClick={onToggleDetail} title="折叠/展开详情面板">

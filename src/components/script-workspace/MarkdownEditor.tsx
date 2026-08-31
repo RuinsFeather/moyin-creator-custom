@@ -32,6 +32,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { getScriptWorkspaceFs } from '@/lib/script-workspace-fs';
+import { buildEditorSelection } from '@/lib/script-workspace/agent-selection';
 
 type ScriptElementType = 'scene' | 'action' | 'character' | 'parenthetical' | 'dialogue' | 'transition' | 'comment' | 'subtitle';
 
@@ -138,6 +139,7 @@ export function MarkdownEditor() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const setEditorSelection = useScriptWorkspaceStore((s) => s.setEditorSelection);
 
   const activeFile = useMemo(
     () => files.find((f) => f.id === activeFileId),
@@ -191,6 +193,18 @@ export function MarkdownEditor() {
   );
 
   const handleManualSave = useCallback(() => { void saveActiveFile(); }, [saveActiveFile]);
+
+  // ⑦ 选区/光标上报：select（含拖选/双击）+ keyup（方向键移动光标）都同步到 store
+  const reportSelection = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    setEditorSelection(buildEditorSelection(editorContent, textarea.selectionStart, textarea.selectionEnd));
+  }, [editorContent, setEditorSelection]);
+
+  // 切换文件/内容被外部替换时清空选区（偏移可能已失效）
+  useEffect(() => {
+    setEditorSelection(null);
+  }, [activeFileId, setEditorSelection]);
 
   const insertScriptElement = useCallback((type: ScriptElementType) => {
     const textarea = textareaRef.current;
@@ -345,6 +359,8 @@ export function MarkdownEditor() {
               ref={textareaRef}
               value={editorContent}
               onChange={handleChange}
+              onSelect={reportSelection}
+              onKeyUp={reportSelection}
               className="w-full h-full px-4 pt-4 pb-20 resize-none bg-transparent text-sm leading-relaxed focus:outline-none font-mono"
               placeholder="开始写作..."
               spellCheck={false}

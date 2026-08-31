@@ -226,6 +226,7 @@ export function getFeatureNotConfiguredMessage(feature: AIFeature): string {
 // ==================== 统一 API 调用入口 ====================
 
 import { callChatAPI } from '@/lib/script/script-parser';
+import { callChatAPIStream } from '@/lib/ai/chat-stream';
 
 export interface CallFeatureAPIOptions {
   /** 自定义温度，默认 0.7 */
@@ -238,6 +239,15 @@ export interface CallFeatureAPIOptions {
   configOverride?: FeatureConfig;
   /** 关闭推理模型深度思考（智谱 GLM-4.7/4.5 等），默认 true */
   disableThinking?: boolean;
+  /** 中止信号：abort 后取消底层 fetch 与 SSE 读取（用于"停止生成"） */
+  signal?: AbortSignal;
+}
+
+export interface CallFeatureAPIStreamCallbacks {
+  /** 增量文本回调（type=text 正文 / reasoning 思考过程） */
+  onText?: (delta: string, event: { type: 'text' | 'reasoning' }) => void;
+  /** 流结束（error 非空表示失败） */
+  onDone?: (result: { error?: Error }) => void;
 }
 
 /**
@@ -291,6 +301,67 @@ export async function callFeatureAPI(
     keyManager: config.keyManager,
     disableThinking,
   });
+}
+
+/**
+ * 流式版统一 AI 调用入口 —— 供剧本助手等对话场景使用。
+ *
+ * 与 callFeatureAPI 的区别：
+ * - SSE stream:true，首字延迟即返回（onText 逐块回调）
+ * - 对话场景保留深度思考能力（默认不关闭，用户可见思考过程）
+ *
+ * @returns 完整正文文本（流结束后 resolve；失败 reject）
+ */
+export async function callFeatureAPIStream(
+  feature: AIFeature,
+  systemPrompt: string,
+  userPrompt: string,
+  options?: CallFeatureAPIOptions,
+  callbacks?: CallFeatureAPIStreamCallbacks,
+): Promise<string> {
+  const config = options?.configOverride || getFeatureConfig(feature);
+
+  if (!config) {
+    const error = new Error(getFeatureNotConfiguredMessage(feature));
+    callbacks?.onDone?.({ error });
+    throw error;
+  }
+
+  const model = options?.modelOverride || config.model || config.models?.[0];
+  const baseUrl = config.baseUrl?.replace(/\/+$/, '');
+  if (!baseUrl) {
+    const error = new Error('请先在设置中配置 Base URL');
+    callbacks?.onDone?.({ error });
+    throw error;
+  }
+  if (!model) {
+    const error = new Error('请先在设置中配置模型');
+    callbacks?.onDone?.({ error });
+    throw error;
+  }
+
+  console.log(`[callFeatureAPIStream] 功能: ${feature}`);
+  console.log(`[callFeatureAPIStream] 供应商: ${config.provider.name} (${config.platform})`);
+  console.log(`[callFeatureAPIStream] 模型: ${model}`);
+
+  // 对话默认关闭深度思考（剧本助手需要快速首字响应；推理模型的
+  // reasoning 增量会以 onText(reasoning) 形式回调，UI 单独渲染）
+  const disableThinking = options?.disableThinking ?? true;
+  return await callChatAPIStream(
+    systemPrompt,
+    userPrompt,
+    {
+      apiKey: config.allApiKeys.join(','),
+      baseUrl,
+      model,
+      temperature: options?.temperature,
+      maxTokens: options?.maxTokens,
+      keyManager: config.keyManager,
+      disableThinking,
+      signal: options?.signal,
+    },
+    callbacks,
+  );
 }
 
 /**
