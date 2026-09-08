@@ -28,6 +28,7 @@ export interface ParseResult {
   shots: ParsedRawShot[];
   error?: string;
   rawText?: string;
+  errorCode?: "TRUNCATED_OUTPUT" | "INVALID_JSON";
 }
 
 /**
@@ -44,10 +45,35 @@ export function extractJsonArray(text: string): string | null {
   // 找到第一个 '[' 和最后一个 ']'
   const start = candidate.indexOf("[");
   const end = candidate.lastIndexOf("]");
-  if (start === -1 || end === -1 || end <= start) {
+  if (start !== -1 && end === -1) {
+    return candidate.slice(start);
+  }
+  if (start === -1 || end <= start) {
     return null;
   }
   return candidate.slice(start, end + 1);
+}
+
+function looksTruncatedJson(json: string): boolean {
+  let objectDepth = 0;
+  let arrayDepth = 0;
+  let inString = false;
+  let escaped = false;
+  for (const char of json) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === "{") objectDepth++;
+    else if (char === "}") objectDepth--;
+    else if (char === "[") arrayDepth++;
+    else if (char === "]") arrayDepth--;
+    if (objectDepth < 0 || arrayDepth < 0) return false;
+  }
+  return inString || objectDepth > 0 || arrayDepth > 0;
 }
 
 /**
@@ -62,6 +88,16 @@ export function parseStoryboardResponse(text: string): ParseResult {
     return { ok: false, shots: [], error: "未能在 AI 返回中提取到镜头数组", rawText: text };
   }
 
+  if (looksTruncatedJson(jsonStr)) {
+    return {
+      ok: false,
+      shots: [],
+      error: "模型输出在 JSON 完成前被截断，请缩小剧本片段后重试",
+      errorCode: "TRUNCATED_OUTPUT",
+      rawText: jsonStr,
+    };
+  }
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(jsonStr);
@@ -70,6 +106,7 @@ export function parseStoryboardResponse(text: string): ParseResult {
       ok: false,
       shots: [],
       error: `JSON 解析失败：${(e as Error).message}`,
+      errorCode: "INVALID_JSON",
       rawText: jsonStr,
     };
   }

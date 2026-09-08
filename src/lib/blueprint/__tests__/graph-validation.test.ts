@@ -82,8 +82,8 @@ describe('graph-validation: validateBlueprintGraph', () => {
   describe('valid graph', () => {
     it('returns empty diagnostics for a simple valid text→image→output pipeline', () => {
       const nodes = [
-        makeNode('t1', 'text-input', { text: 'A cat' }),
-        makeNode('g1', 'image-generator', { model: 'test-model' }),
+        makeNode('t1', 'text-box', { text: 'A cat' }),
+        makeNode('g1', 'image-box', { mode: 'generate', generation: { model: 'test-model' } }),
         makeNode('o1', 'output', { acceptedTypes: ['image'] }),
       ];
       const edges = [
@@ -107,8 +107,8 @@ describe('graph-validation: validateBlueprintGraph', () => {
   describe('duplicate node IDs', () => {
     it('flags nodes with the same ID (second occurrence)', () => {
       const nodes = [
-        makeNode('dup', 'text-input'),
-        makeNode('dup', 'text-input'),
+        makeNode('dup', 'text-box'),
+        makeNode('dup', 'text-box'),
       ];
       const project = makeProject(nodes);
 
@@ -124,7 +124,7 @@ describe('graph-validation: validateBlueprintGraph', () => {
 
   describe('invalid node type', () => {
     it('flags a node with an unknown type', () => {
-      const node = makeNode('n1', 'text-input');
+      const node = makeNode('n1', 'text-box');
       // Force an invalid type
       (node.data as { nodeType: string }).nodeType = 'unknown-type';
       const project = makeProject([node]);
@@ -140,7 +140,7 @@ describe('graph-validation: validateBlueprintGraph', () => {
 
   describe('missing edge source/target', () => {
     it('flags edge with missing source node', () => {
-      const nodes = [makeNode('t1', 'text-input')];
+      const nodes = [makeNode('t1', 'text-box')];
       const edges = [makeEdge('e1', 'nonexistent', 't1', 'text', 'prompt', 'text')];
       const project = makeProject(nodes, edges);
 
@@ -150,7 +150,7 @@ describe('graph-validation: validateBlueprintGraph', () => {
     });
 
     it('flags edge with missing target node', () => {
-      const nodes = [makeNode('t1', 'text-input')];
+      const nodes = [makeNode('t1', 'text-box')];
       const edges = [makeEdge('e1', 't1', 'nonexistent', 'text', 'prompt', 'text')];
       const project = makeProject(nodes, edges);
 
@@ -164,7 +164,7 @@ describe('graph-validation: validateBlueprintGraph', () => {
 
   describe('self-loop', () => {
     it('flags an edge where source === target', () => {
-      const nodes = [makeNode('t1', 'text-input')];
+      const nodes = [makeNode('t1', 'text-box')];
       const edges = [makeEdge('e1', 't1', 't1', 'text', 'prompt', 'text')];
       const project = makeProject(nodes, edges);
 
@@ -180,8 +180,8 @@ describe('graph-validation: validateBlueprintGraph', () => {
   describe('duplicate edges', () => {
     it('warns about edges with identical source+handle → target+handle', () => {
       const nodes = [
-        makeNode('t1', 'text-input'),
-        makeNode('g1', 'image-generator'),
+        makeNode('t1', 'text-box'),
+        makeNode('g1', 'image-box'),
       ];
       const edges = [
         makeEdge('e1', 't1', 'g1', 'text', 'prompt', 'text'),
@@ -197,8 +197,8 @@ describe('graph-validation: validateBlueprintGraph', () => {
 
     it('allows edges from same source to different target ports', () => {
       const nodes = [
-        makeNode('i1', 'image-reference'),
-        makeNode('g1', 'image-generator'),
+        makeNode('i1', 'image-box'),
+        makeNode('g1', 'image-box'),
       ];
       const edges = [
         makeEdge('e1', 'i1', 'g1', 'image', 'prompt', 'image'),
@@ -217,8 +217,8 @@ describe('graph-validation: validateBlueprintGraph', () => {
   describe('cycle detection', () => {
     it('detects a two-node cycle', () => {
       const nodes = [
-        makeNode('a', 'text-input'),
-        makeNode('b', 'text-input'),
+        makeNode('a', 'text-box'),
+        makeNode('b', 'text-box'),
       ];
       // Force a cycle by connecting a→b and b→a
       const edges = [
@@ -235,9 +235,9 @@ describe('graph-validation: validateBlueprintGraph', () => {
 
     it('detects a three-node cycle', () => {
       const nodes = [
-        makeNode('a', 'text-input'),
-        makeNode('b', 'text-input'),
-        makeNode('c', 'text-input'),
+        makeNode('a', 'text-box'),
+        makeNode('b', 'text-box'),
+        makeNode('c', 'text-box'),
       ];
       const edges = [
         makeEdge('e1', 'a', 'b', 'text', 'prompt', 'text'),
@@ -253,8 +253,8 @@ describe('graph-validation: validateBlueprintGraph', () => {
 
     it('does not flag an acyclic graph', () => {
       const nodes = [
-        makeNode('a', 'text-input'),
-        makeNode('b', 'image-generator'),
+        makeNode('a', 'text-box'),
+        makeNode('b', 'image-box'),
         makeNode('c', 'output', { acceptedTypes: ['image'] }),
       ];
       const edges = [
@@ -274,8 +274,8 @@ describe('graph-validation: validateBlueprintGraph', () => {
   describe('invalid port', () => {
     it('flags edge with unknown source handle', () => {
       const nodes = [
-        makeNode('t1', 'text-input'),
-        makeNode('g1', 'image-generator'),
+        makeNode('t1', 'text-box'),
+        makeNode('g1', 'image-box'),
       ];
       const edges = [makeEdge('e1', 't1', 'g1', 'nonexistent', 'prompt', 'text')];
       const project = makeProject(nodes, edges);
@@ -288,8 +288,8 @@ describe('graph-validation: validateBlueprintGraph', () => {
 
     it('flags edge with unknown target handle', () => {
       const nodes = [
-        makeNode('t1', 'text-input'),
-        makeNode('g1', 'image-generator'),
+        makeNode('t1', 'text-box'),
+        makeNode('g1', 'image-box'),
       ];
       const edges = [makeEdge('e1', 't1', 'g1', 'text', 'nonexistent', 'text')];
       const project = makeProject(nodes, edges);
@@ -307,8 +307,8 @@ describe('graph-validation: validateBlueprintGraph', () => {
     it('flags edge where source port does not support the edge data type', () => {
       // image-reference outputs 'image', but image-generator prompt port expects 'text'|'context'
       const nodes = [
-        makeNode('i1', 'image-reference'),
-        makeNode('g1', 'image-generator'),
+        makeNode('i1', 'image-box'),
+        makeNode('g1', 'image-box'),
       ];
       const edges = [
         makeEdge('e1', 'i1', 'g1', 'image', 'prompt', 'image'),
@@ -325,8 +325,8 @@ describe('graph-validation: validateBlueprintGraph', () => {
 
     it('allows compatible text connection', () => {
       const nodes = [
-        makeNode('t1', 'text-input', { text: 'prompt' }),
-        makeNode('g1', 'image-generator'),
+        makeNode('t1', 'text-box', { text: 'prompt' }),
+        makeNode('g1', 'image-box'),
       ];
       const edges = [
         makeEdge('e1', 't1', 'g1', 'text', 'prompt', 'text'),
@@ -358,7 +358,7 @@ describe('graph-validation: validateBlueprintGraph', () => {
 
     it('does not flag output node when required input is connected', () => {
       const nodes = [
-        makeNode('g1', 'image-generator'),
+        makeNode('g1', 'image-box'),
         makeNode('o1', 'output', { acceptedTypes: ['image'] }),
       ];
       const edges = [
@@ -377,9 +377,9 @@ describe('graph-validation: validateBlueprintGraph', () => {
   // ── Generator missing prompt ───────────────────────────────────
 
   describe('generator missing prompt', () => {
-    it('warns when image-generator has no inline prompt and no upstream text', () => {
+    it('warns when image-box in generate mode has no inline prompt and no upstream text', () => {
       const nodes = [
-        makeNode('g1', 'image-generator'),
+        makeNode('g1', 'image-box', { mode: 'generate', generation: {} }),
         makeNode('o1', 'output', { acceptedTypes: ['image'] }),
       ];
       const edges = [
@@ -398,7 +398,7 @@ describe('graph-validation: validateBlueprintGraph', () => {
 
     it('does not warn when generator has inline prompt', () => {
       const nodes = [
-        makeNode('g1', 'image-generator', { prompt: 'A beautiful cat' }),
+        makeNode('g1', 'image-box', { mode: 'generate', generation: { prompt: 'A beautiful cat' } }),
         makeNode('o1', 'output', { acceptedTypes: ['image'] }),
       ];
       const edges = [
@@ -415,8 +415,8 @@ describe('graph-validation: validateBlueprintGraph', () => {
 
     it('does not warn when generator has upstream text input', () => {
       const nodes = [
-        makeNode('t1', 'text-input', { text: 'A cat' }),
-        makeNode('g1', 'image-generator'),
+        makeNode('t1', 'text-box', { text: 'A cat' }),
+        makeNode('g1', 'image-box', { mode: 'generate', generation: {} }),
         makeNode('o1', 'output', { acceptedTypes: ['image'] }),
       ];
       const edges = [
@@ -435,7 +435,7 @@ describe('graph-validation: validateBlueprintGraph', () => {
     it('does not warn when generator has upstream context input', () => {
       const nodes = [
         makeNode('s1', 'script-import'),
-        makeNode('g1', 'image-generator'),
+        makeNode('g1', 'image-box', { mode: 'generate', generation: {} }),
         makeNode('o1', 'output', { acceptedTypes: ['image'] }),
       ];
       const edges = [
@@ -469,7 +469,7 @@ describe('graph-validation: validateBlueprintGraph', () => {
 
     it('does not warn when output node has an upstream connection', () => {
       const nodes = [
-        makeNode('g1', 'image-generator', { prompt: 'cat' }),
+        makeNode('g1', 'image-box', { mode: 'generate', generation: { prompt: 'cat' } }),
         makeNode('o1', 'output', { acceptedTypes: ['image'] }),
       ];
       const edges = [
@@ -490,9 +490,9 @@ describe('graph-validation: validateBlueprintGraph', () => {
   describe('combined diagnostics', () => {
     it('reports all errors in a complex graph with multiple issues', () => {
       const nodes = [
-        makeNode('dup', 'text-input'),
-        makeNode('dup', 'text-input'),       // duplicate ID
-        makeNode('g1', 'image-generator'),    // no prompt
+        makeNode('dup', 'text-box'),
+        makeNode('dup', 'text-box'),       // duplicate ID
+        makeNode('g1', 'image-box', { mode: 'generate', generation: {} }),    // no prompt
         makeNode('o1', 'output', { acceptedTypes: ['image'] }), // no upstream
       ];
       const edges: BlueprintEdge[] = [];
@@ -518,8 +518,8 @@ describe('graph-validation: validateBlueprintGraph', () => {
   describe('convenience wrappers', () => {
     it('isBlueprintGraphValid returns true for a valid graph', () => {
       const nodes = [
-        makeNode('t1', 'text-input', { text: 'cat' }),
-        makeNode('g1', 'image-generator'),
+        makeNode('t1', 'text-box', { text: 'cat' }),
+        makeNode('g1', 'image-box'),
         makeNode('o1', 'output', { acceptedTypes: ['image'] }),
       ];
       const edges = [
@@ -533,8 +533,8 @@ describe('graph-validation: validateBlueprintGraph', () => {
 
     it('isBlueprintGraphValid returns false when errors exist', () => {
       const nodes = [
-        makeNode('dup', 'text-input'),
-        makeNode('dup', 'text-input'),
+        makeNode('dup', 'text-box'),
+        makeNode('dup', 'text-box'),
       ];
       const project = makeProject(nodes);
 
@@ -543,9 +543,9 @@ describe('graph-validation: validateBlueprintGraph', () => {
 
     it('getBlueprintErrors returns only errors', () => {
       const nodes = [
-        makeNode('dup', 'text-input'),
-        makeNode('dup', 'text-input'),
-        makeNode('g1', 'image-generator'), // warning: missing prompt
+        makeNode('dup', 'text-box'),
+        makeNode('dup', 'text-box'),
+        makeNode('g1', 'image-box', { mode: 'generate', generation: {} }), // warning: missing prompt
       ];
       const project = makeProject(nodes);
 
@@ -556,7 +556,7 @@ describe('graph-validation: validateBlueprintGraph', () => {
 
     it('getBlueprintWarnings returns only warnings', () => {
       const nodes = [
-        makeNode('g1', 'image-generator'), // warning: missing prompt
+        makeNode('g1', 'image-box', { mode: 'generate', generation: {} }), // warning: missing prompt
         makeNode('o1', 'output', { acceptedTypes: ['image'] }), // warning: no upstream + missing required
       ];
       const project = makeProject(nodes);

@@ -10,6 +10,7 @@
  * elements with Tailwind classes work reliably inside node cards.
  */
 
+import { Loader2, StopCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 // ── Node Section ──────────────────────────────────────────────────────────
@@ -209,12 +210,92 @@ export function NodeProgress({
   progress: number;
   className?: string;
 }) {
+  // 引擎按 0–100 上报（NodeProgressUpdater）；兼容历史 0–1 数据。
+  const percent = normalizeProgressPercent(progress);
   return (
     <div className={cn('h-1 w-full overflow-hidden rounded-full bg-muted', className)}>
       <div
         className="h-full bg-info transition-all"
-        style={{ width: `${Math.round(progress * 100)}%` }}
+        style={{ width: `${percent}%` }}
       />
+    </div>
+  );
+}
+
+// ── Running Overlay (progress + cancel, aligned with Studio style) ────────
+
+/**
+ * 归一化进度为 0–100 百分比。
+ * 引擎 `NodeProgressUpdater` 按 0–100 上报；历史数据/测试可能存 0–1，
+ * >1 的值按 0–100 刻度处理，避免显示 1000%。
+ */
+function normalizeProgressPercent(progress: number): number {
+  if (!Number.isFinite(progress) || progress <= 0) return 0;
+  if (progress <= 1) return Math.round(progress * 100);
+  return Math.round(Math.min(100, progress));
+}
+
+/**
+ * 运行中状态叠加层：覆盖在节点卡片上方，参考「自由」页图片/视频工作室
+ * 的生成中样式 —— 居中 spinner + 进度百分比 + 底部进度条 + 取消按钮。
+ *
+ * - 点击「取消」调用 onCancel（最终走 store.cancelRun → abort 中止任务）。
+ * - 覆盖层本身带 nodrag，避免拖拽节点时误触。
+ * - progress 接受 0–100（引擎刻度）或 0–1（历史数据）。
+ */
+export function NodeRunningOverlay({
+  progress,
+  onCancel,
+  label = '生成中',
+  testId,
+}: {
+  progress: number;
+  onCancel: () => void;
+  label?: string;
+  testId?: string;
+}) {
+  const percent = normalizeProgressPercent(progress);
+  return (
+    <div
+      data-testid={testId}
+      className={cn(
+        'nodrag nowheel absolute inset-0 z-10 flex flex-col items-center justify-center gap-2',
+        'rounded-lg border-2 border-info/60 bg-background/90 backdrop-blur-[2px]',
+      )}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+    >
+      {/* Spinner + percent */}
+      <div className="flex items-center gap-2">
+        <Loader2 className="h-5 w-5 animate-spin text-primary" />
+        <span className="text-[11px] font-medium text-foreground">
+          {label}… {percent}%
+        </span>
+      </div>
+
+      {/* Progress bar */}
+      <div className="h-1.5 w-[80%] overflow-hidden rounded-full bg-muted">
+        <div
+          className="h-full rounded-full bg-primary transition-all"
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+
+      {/* Cancel button */}
+      <button
+        type="button"
+        className={cn(
+          'inline-flex h-6 items-center gap-1 rounded-md border border-input bg-background px-2',
+          'text-[10px] text-foreground transition-colors hover:bg-muted',
+        )}
+        onClick={(e) => {
+          e.stopPropagation();
+          onCancel();
+        }}
+      >
+        <StopCircle className="h-3 w-3" />
+        取消任务
+      </button>
     </div>
   );
 }

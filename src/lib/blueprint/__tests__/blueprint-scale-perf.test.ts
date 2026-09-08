@@ -44,12 +44,12 @@ vi.mock('@/lib/freedom/freedom-api', () => ({
 function makeNode(id: string): BlueprintNode {
   return {
     id,
-    type: 'video-generator',
+    type: 'video-box',
     position: { x: 0, y: 0 },
     data: {
-      nodeType: 'video-generator',
+      nodeType: 'video-box',
       label: id,
-      config: { prompt: `prompt ${id}`, model: 'perf-model' },
+      config: { mode: 'generate', generation: { prompt: `prompt ${id}`, model: 'perf-model' } },
     },
   } as BlueprintNode;
 }

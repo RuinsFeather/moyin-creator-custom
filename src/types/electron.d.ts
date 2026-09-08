@@ -47,6 +47,13 @@ declare global {
       move: (rootPath: string, sourcePath: string, targetPath: string) => Promise<boolean>;
       copy: (rootPath: string, sourcePath: string, targetPath: string) => Promise<boolean>;
       reveal: (rootPath: string, relativePath: string) => Promise<boolean>;
+      /** 将 Base64 图片以二进制写入工作区（参考图上传）；旧 preload 可能缺失 */
+      writeImage?: (rootPath: string, relativePath: string, base64Data: string) => Promise<{ mtime: number; size: number }>;
+      writeBinary?: (rootPath: string, relativePath: string, base64Data: string) => Promise<{ mtime: number; size: number }>;
+      readBinary?: (rootPath: string, relativePath: string, mimeType?: string) => Promise<string>;
+      copyExternalFile?: (sourcePath: string, rootPath: string, relativePath: string) => Promise<{ mtime: number; size: number }>;
+      /** 读取工作区二进制图片为 data URL（用于显示）；旧 preload 可能缺失 */
+      readImage?: (rootPath: string, relativePath: string) => Promise<string>;
     };
     storageManager?: {
       getPaths: () => Promise<{ basePath: string; projectPath: string; mediaPath: string; cachePath: string }>;

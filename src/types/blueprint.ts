@@ -34,13 +34,22 @@ export { BLUEPRINT_SCHEMA_VERSION } from '@/lib/blueprint/schema-version';
  * ─────────────────────────────────────────────────────────────────
  */
 export type BlueprintNodeType =
+  | 'text-box'
+  | 'image-box'
+  | 'video-box'
+  | 'script-import'
+  | 'output';
+
+/**
+ * Legacy node types retained only for migration input (v1→v2).
+ * These must NOT appear in new code or persisted v2 data.
+ */
+export type LegacyBlueprintNodeType =
   | 'text-input'
   | 'image-reference'
   | 'video-reference'
-  | 'script-import'
   | 'image-generator'
-  | 'video-generator'
-  | 'output';
+  | 'video-generator';
 
 export type BlueprintDataType =
   | 'text'
@@ -64,19 +73,10 @@ export interface BlueprintPortDefinition {
  * Handles must be persisted explicitly on edges; an omitted handle is invalid.
  */
 export const BLUEPRINT_NODE_PORTS = {
-  'text-input': [
+  'text-box': [
     { id: 'text', direction: 'output', dataTypes: ['text'] },
   ],
-  'image-reference': [
-    { id: 'image', direction: 'output', dataTypes: ['image'] },
-  ],
-  'video-reference': [
-    { id: 'video', direction: 'output', dataTypes: ['video'] },
-  ],
-  'script-import': [
-    { id: 'context', direction: 'output', dataTypes: ['context'] },
-  ],
-  'image-generator': [
+  'image-box': [
     {
       id: 'prompt',
       direction: 'input',
@@ -91,7 +91,7 @@ export const BLUEPRINT_NODE_PORTS = {
     },
     { id: 'image', direction: 'output', dataTypes: ['image'] },
   ],
-  'video-generator': [
+  'video-box': [
     {
       id: 'prompt',
       direction: 'input',
@@ -105,6 +105,9 @@ export const BLUEPRINT_NODE_PORTS = {
       multiple: true,
     },
     { id: 'video', direction: 'output', dataTypes: ['video'] },
+  ],
+  'script-import': [
+    { id: 'context', direction: 'output', dataTypes: ['context'] },
   ],
   output: [
     {
@@ -248,10 +251,40 @@ export interface BlueprintVideoReference extends BlueprintMediaRef {
 export interface BlueprintVideoGeneratorConfig extends BlueprintVideoGeneratorOptions {
   prompt?: string;
   referenceMediaRefs?: BlueprintVideoReference[];
+  /** Role assignments for edge-connected references (keyed by edge ID). */
+  edgeReferenceRoles?: Record<string, FreedomVideoUploadRole>;
+  /** Web-search tool toggle (drawer boolean; executor maps to `tools`). */
+  webSearch?: boolean;
 }
 
 export interface OutputNodeConfig {
   acceptedTypes: Array<'image' | 'video' | 'audio'>;
+}
+
+// ── v2 Box config types ─────────────────────────────────────────────────
+
+export interface TextBoxConfig {
+  text: string;
+  language?: string;
+  role?: string;
+  /** Skill names loaded from the AI assist panel (§5.3). */
+  skillRefs?: string[];
+}
+
+export interface ImageBoxConfig {
+  /** Current content — latest import or generation result. */
+  media: BlueprintMediaRef[];
+  /** When present, window is a "generation-type" window. */
+  generation?: BlueprintImageGeneratorConfig;
+  /** Manually added reference images from the drawer. */
+  referenceImageRefs?: BlueprintMediaRef[];
+}
+
+export interface VideoBoxConfig {
+  /** Current content — latest import or generation result. */
+  media: BlueprintMediaRef[];
+  /** When present, window is a "generation-type" window. */
+  generation?: BlueprintVideoGeneratorConfig;
 }
 
 export type BlueprintNodeConfig =
@@ -260,7 +293,10 @@ export type BlueprintNodeConfig =
   | ScriptImportNodeConfig
   | BlueprintImageGeneratorConfig
   | BlueprintVideoGeneratorConfig
-  | OutputNodeConfig;
+  | OutputNodeConfig
+  | TextBoxConfig
+  | ImageBoxConfig
+  | VideoBoxConfig;
 
 /** React Flow node data. The index signature satisfies its Record constraint. */
 export interface BlueprintNodeData {

@@ -21,7 +21,7 @@ import { type AIFeature, useAPIConfigStore } from '@/stores/api-config-store';
 import { useMediaStore } from '@/stores/media-store';
 import { useProjectStore } from '@/stores/project-store';
 import { corsFetch } from '@/lib/cors-fetch';
-import { saveVideoToLocal } from '@/lib/image-storage';
+import { saveVideoToLocal, readImageAsBase64 } from '@/lib/image-storage';
 import { toast } from 'sonner';
 import { sanitizeErrorMessage } from '@/lib/blueprint/error-utils';
 import {
@@ -2878,6 +2878,38 @@ async function toUploadHttpUrl(file: FreedomVideoUploadFile): Promise<string> {
 
   // 1) 已经是 http(s) URL，直接复用
   if (file.dataUrl && /^https?:\/\//i.test(file.dataUrl)) return file.dataUrl;
+
+  // 1.5) local-image:// 协议路径（蓝图画布参考图 / 图片窗口直通）
+  //      先用 Electron IPC 读成 base64 dataURL，再走图床上传
+  if (file.dataUrl && file.dataUrl.startsWith('local-image://')) {
+    const base64 = await readImageAsBase64(file.dataUrl);
+    if (base64) {
+      return uploadBase64Image(base64);
+    }
+    throw new Error(`无法读取本地参考图片（${file.dataUrl}），请检查文件是否存在或重新添加该参考图`);
+  }
+
+  // 1.6) blob: 对象 URL（旧版画布存量的本地导入素材）
+  //      会话内有效：直接 fetch 成 blob 再转 data URL 上传；
+  //      会话已失效（重载后）时给出明确提示。
+  if (file.dataUrl && file.dataUrl.startsWith('blob:')) {
+    try {
+      const resp = await fetch(file.dataUrl);
+      if (resp.ok) {
+        const blob = await resp.blob();
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.onerror = () => reject(new Error('读取本地文件失败'));
+          reader.readAsDataURL(blob);
+        });
+        return uploadBase64Image(dataUrl);
+      }
+    } catch {
+      // fall through to explicit error below
+    }
+    throw new Error('本地参考素材已失效（页面重载后 blob 临时链接不可用），请在窗口中重新添加该素材');
+  }
 
   // 2) 有本地路径 + 配置了对象存储（R2/S3） → 走主进程上传，拿回 HTTP URL
   //    这是视频/音频等大文件的主路径；图片若也配置了 R2，同样走这条路（更稳定）

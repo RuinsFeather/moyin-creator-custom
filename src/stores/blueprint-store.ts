@@ -46,6 +46,7 @@ import {
   type ScriptToBlueprintResult,
 } from '@/lib/blueprint/script-to-blueprint';
 import { getStaleDownstreamNodes } from '@/lib/blueprint/input-merge';
+import { topologicalSort } from '@/lib/blueprint/dag-traversal';
 import type { Shot } from '@/types/script';
 
 export type BlueprintRunMode = 'node' | 'downstream' | 'all';
@@ -61,13 +62,13 @@ export interface BlueprintRunRequest {
 export interface BlueprintStoreState extends PersistedBlueprintState {
   selectedNodeId: string | null;
   selectedEdgeId: string | null;
+  /** 双击图片/视频窗口时打开的配置抽屉节点 ID（运行时状态，不持久化、不进撤销历史） */
+  drawerNodeId: string | null;
   currentRun: BlueprintRunRequest | null;
   executionLock: boolean;
   abortController: AbortController | null;
   errorSummary: string[];
   recoveryAbortController: AbortController | null;
-  /** 新手模式：隐藏视频生成器等高级节点和复杂端口 */
-  beginnerMode: boolean;
 }
 
 export interface BlueprintStoreActions {
@@ -78,8 +79,11 @@ export interface BlueprintStoreActions {
   archiveBlueprint: (blueprintId: string, archived?: boolean) => void;
   deleteBlueprint: (blueprintId: string) => void;
   setActiveBlueprint: (blueprintId: string | null) => void;
+  loadSavedBlueprint: (blueprint: BlueprintProject) => void;
   selectNode: (nodeId: string | null) => void;
   selectEdge: (edgeId: string | null) => void;
+  /** 打开（或关闭，传 null）指定节点的配置抽屉。 */
+  openDrawer: (nodeId: string | null) => void;
   addNode: (node: BlueprintNode) => void;
   /**
    * 在蓝图中心附近（已存在节点下方）添加一个节点并选中。
@@ -109,15 +113,18 @@ export interface BlueprintStoreActions {
   cancelRun: () => void;
   resetRuntimeState: () => void;
   /**
-   * Scan active blueprint for video-generator nodes with pending tasks
+   * Scan active blueprint for video-generator/video-box nodes with pending tasks
    * (status=running + task ref present) and resume polling.
    * Returns true if recovery was started, false if skipped.
    */
   recoverVideoTasks: () => Promise<boolean>;
   /** Abort an in-flight recovery. */
   cancelRecovery: () => void;
-  /** 切换新手模式 */
-  toggleBeginnerMode: () => void;
+  /**
+   * 按拓扑分层自动布局当前活跃蓝图的节点：x = 层级 * 400，层内节点 y 递增。
+   * 不引入 dagre/elk，复用已有的 topologicalSort（§P4-2 / P1-8 更多菜单项）。
+   */
+  autoLayoutNodes: () => void;
   /**
    * Import script shots into a blueprint. Creates a new blueprint or
    * replaces an existing one's content with converted shot nodes.
@@ -149,12 +156,12 @@ const runtimeInitialState: Omit<
 > = {
   selectedNodeId: null,
   selectedEdgeId: null,
+  drawerNodeId: null,
   currentRun: null,
   executionLock: false,
   abortController: null,
   errorSummary: [],
   recoveryAbortController: null,
-  beginnerMode: true,
 };
 
 function cloneSerializable<T>(value: T): T {
@@ -276,6 +283,7 @@ export const useBlueprintStore = create<BlueprintStore>()(
           activeBlueprintId: blueprint.id,
           selectedNodeId: null,
           selectedEdgeId: null,
+          drawerNodeId: null,
         }));
         return blueprint;
       },
@@ -299,6 +307,7 @@ export const useBlueprintStore = create<BlueprintStore>()(
           activeBlueprintId: duplicate.id,
           selectedNodeId: null,
           selectedEdgeId: null,
+          drawerNodeId: null,
         }));
         return duplicate;
       },
@@ -363,6 +372,7 @@ export const useBlueprintStore = create<BlueprintStore>()(
                 : state.activeBlueprintId,
             selectedNodeId: null,
             selectedEdgeId: null,
+            drawerNodeId: null,
           };
         });
       },
@@ -380,11 +390,25 @@ export const useBlueprintStore = create<BlueprintStore>()(
           activeBlueprintId: validId,
           selectedNodeId: null,
           selectedEdgeId: null,
+          drawerNodeId: null,
         });
+      },
+
+      loadSavedBlueprint: (blueprint) => {
+        const projectId = get().activeProjectId;
+        const loaded = { ...blueprint, projectId, updatedAt: Date.now() };
+        set((state) => ({
+          blueprints: [loaded, ...state.blueprints.filter((item) => item.id !== loaded.id)],
+          activeBlueprintId: loaded.id,
+          selectedNodeId: null,
+          selectedEdgeId: null,
+          drawerNodeId: null,
+        }));
       },
 
       selectNode: (nodeId) => set({ selectedNodeId: nodeId, selectedEdgeId: null }),
       selectEdge: (edgeId) => set({ selectedEdgeId: edgeId, selectedNodeId: null }),
+      openDrawer: (nodeId) => set({ drawerNodeId: nodeId }),
 
       addNode: (node) => {
         set((state) =>
@@ -455,8 +479,11 @@ export const useBlueprintStore = create<BlueprintStore>()(
                 // Also mark the changed node itself as stale
                 staleIds.add(nodeId);
                 const staleSet = staleIds;
+                // 跳过 running / queued 节点，避免正在执行时被标 stale 而中断任务
+                const safeToStale = (status: string | undefined) =>
+                  status === 'completed';
                 nodes = updatedNodes.map((n) =>
-                  staleSet.has(n.id) && n.data.execution?.status === 'completed'
+                  staleSet.has(n.id) && safeToStale(n.data.execution?.status)
                     ? {
                         ...n,
                         data: {
@@ -490,6 +517,7 @@ export const useBlueprintStore = create<BlueprintStore>()(
             updatedAt: Date.now(),
           })),
           selectedNodeId: state.selectedNodeId === nodeId ? null : state.selectedNodeId,
+          drawerNodeId: state.drawerNodeId === nodeId ? null : state.drawerNodeId,
         }));
       },
 
@@ -697,9 +725,10 @@ export const useBlueprintStore = create<BlueprintStore>()(
         );
         if (!activeBlueprint) return false;
 
-        // Find video-generator nodes with pending tasks
+        // Find video-generator/video-box nodes with pending tasks
         const recoverable = activeBlueprint.nodes.filter((node) => {
-          if (node.data.nodeType !== 'video-generator') return false;
+          const nt = node.data.nodeType as string;
+          if (nt !== 'video-generator' && nt !== 'video-box') return false;
           const exec = node.data.execution;
           return exec?.status === 'running' && exec.task;
         });
@@ -788,8 +817,34 @@ export const useBlueprintStore = create<BlueprintStore>()(
         state.recoveryAbortController?.abort();
       },
 
-      toggleBeginnerMode: () => {
-        set((s) => ({ beginnerMode: !s.beginnerMode }));
+      autoLayoutNodes: () => {
+        set((state) =>
+          updateActiveBlueprint(state, (blueprint) => {
+            const { levels } = topologicalSort(blueprint.nodes, blueprint.edges);
+            if (levels.length === 0) return blueprint;
+
+            const LEVEL_GAP_X = 400;
+            const NODE_GAP_Y = 200;
+            const positionById = new Map<string, { x: number; y: number }>();
+            levels.forEach((level, levelIndex) => {
+              level.nodeIds.forEach((nodeId, indexInLevel) => {
+                positionById.set(nodeId, {
+                  x: levelIndex * LEVEL_GAP_X,
+                  y: indexInLevel * NODE_GAP_Y,
+                });
+              });
+            });
+
+            return {
+              ...blueprint,
+              nodes: blueprint.nodes.map((node) => {
+                const position = positionById.get(node.id);
+                return position ? { ...node, position } : node;
+              }),
+              updatedAt: Date.now(),
+            };
+          }),
+        );
       },
 
       importFromScript: (options, target = 'new') => {
@@ -817,6 +872,7 @@ export const useBlueprintStore = create<BlueprintStore>()(
             activeBlueprintId: existingBlueprintId,
             selectedNodeId: null,
             selectedEdgeId: null,
+            drawerNodeId: null,
           }));
         } else {
           // Create new blueprint
@@ -825,6 +881,7 @@ export const useBlueprintStore = create<BlueprintStore>()(
             activeBlueprintId: result.blueprint.id,
             selectedNodeId: null,
             selectedEdgeId: null,
+            drawerNodeId: null,
           }));
         }
 

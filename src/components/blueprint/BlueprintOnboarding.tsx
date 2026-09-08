@@ -4,8 +4,8 @@
 //
 // Blueprint Onboarding Tutorial (§11.3)
 //
-// First-use guide showing the minimal workflow:
-//   text input → image generator → output
+// First-use guide showing the minimal workflow (P1-12, 三步引导):
+//   add a text box → connect it to an image box → click generate
 //
 // Features:
 //   - Step-by-step overlay with highlights
@@ -47,35 +47,20 @@ interface TutorialStep {
 
 const TUTORIAL_STEPS: TutorialStep[] = [
   {
-    title: '欢迎使用蓝图编辑器',
-    description: '蓝图是一个可视化的 AI 内容生成流水线。通过连接不同的节点，你可以定义从文本到图片、视频的完整生成流程。',
-    icon: '🎬',
-  },
-  {
-    title: '第一步：添加文本输入',
-    description: '点击工具栏的「＋ 添加节点」按钮，选择「文本输入」节点。在这里填写你的创意提示词。',
+    title: '第一步：添加文本框',
+    description: '点击工具栏的「＋ 添加窗口」按钮，选择「文本框」。在这里填写你的创意提示词。',
     icon: '📝',
     highlight: '[data-testid="add-node-menu"]',
   },
   {
-    title: '第二步：添加图片生成器',
-    description: '添加一个「图片生成器」节点。它会根据上游的文本提示词，调用 AI 生成图片。',
+    title: '第二步：连到图片框',
+    description: '添加一个「图片框」，并从文本框拖拽连线到图片框的输入端口，建立数据流。',
     icon: '🎨',
   },
   {
-    title: '第三步：连接节点',
-    description: '从文本节点的输出端口拖拽连线到图片生成器的输入端口，建立数据流。',
-    icon: '🔗',
-  },
-  {
-    title: '第四步：运行生成',
-    description: '选中图片生成器节点，点击工具栏的「▶ 选中」按钮运行。引擎会自动执行上游的文本节点，然后生成图片。',
+    title: '第三步：点生成',
+    description: '点击图片框上的生成按钮，引擎会自动执行上游的文本框，然后生成图片。',
     icon: '▶️',
-  },
-  {
-    title: '开始创作！',
-    description: '你还可以添加「输出」节点来保存结果，或添加更多生成器构建复杂流水线。随时点击「▶▶ 全部」运行整条链路。',
-    icon: '🚀',
   },
 ];
 
@@ -103,12 +88,11 @@ export const BlueprintOnboarding = memo(function BlueprintOnboarding() {
     if (step > 0) setStep((s) => s - 1);
   }, [step]);
 
-  // Auto-hide if no active project or not in beginner mode (§11.3.2)
+  // Auto-hide if no active project is open (P1-12: no longer depends on beginnerMode)
   const activeProjectId = useBlueprintStore((s) => s.activeProjectId);
-  const beginnerMode = useBlueprintStore((s) => s.beginnerMode);
   useEffect(() => {
-    if (!activeProjectId || !beginnerMode) setVisible(false);
-  }, [activeProjectId, beginnerMode]);
+    if (!activeProjectId) setVisible(false);
+  }, [activeProjectId]);
 
   if (!visible) return null;
 

@@ -40,8 +40,8 @@ describe('convertDirectorToBlueprint', () => {
     });
 
     expect(result.sceneCount).toBe(2);
-    expect(result.nodeCount).toBe(8); // 4 nodes per scene
-    expect(result.edgeCount).toBe(6); // 3 edges per scene
+    expect(result.nodeCount).toBe(6); // 3 nodes per scene
+    expect(result.edgeCount).toBe(4); // 2 edges per scene
     expect(result.includedSceneIds).toEqual([0, 1]);
   });
 
@@ -116,9 +116,9 @@ describe('convertDirectorToBlueprint', () => {
       scenes,
     });
 
-    // The text-input node should use the Chinese prompt
+    // The text-box node should use the Chinese prompt
     const textNode = result.blueprint.nodes.find(
-      (n) => n.data.nodeType === 'text-input',
+      (n) => n.data.nodeType === 'text-box',
     );
     expect(textNode).toBeDefined();
     expect((textNode!.data.config as { text: string }).text).toBe('中文提示词');
@@ -135,12 +135,12 @@ describe('convertDirectorToBlueprint', () => {
     });
 
     const textNode = result.blueprint.nodes.find(
-      (n) => n.data.nodeType === 'text-input',
+      (n) => n.data.nodeType === 'text-box',
     );
     expect((textNode!.data.config as { text: string }).text).toBe('English prompt');
   });
 
-  it('creates text-input + script-import nodes when prompt is empty (no generator)', () => {
+  it('creates text-box + script-import nodes when prompt is empty (no generator)', () => {
     const scenes = [makeScene(0, {
       imagePrompt: '',
       imagePromptZh: '',
@@ -154,13 +154,13 @@ describe('convertDirectorToBlueprint', () => {
       scenes,
     });
 
-    // text-input (always) + script-import (always) = 2 nodes, no generator/output
+    // text-box (always) + script-import (always) = 2 nodes, no generator/output
     expect(result.nodeCount).toBe(2);
     expect(result.edgeCount).toBe(0);
     const nodeTypes = result.blueprint.nodes.map((n) => n.data.nodeType);
-    expect(nodeTypes).toContain('text-input');
+    expect(nodeTypes).toContain('text-box');
     expect(nodeTypes).toContain('script-import');
-    expect(nodeTypes).not.toContain('image-generator');
+    expect(nodeTypes).not.toContain('image-box');
     expect(nodeTypes).not.toContain('output');
   });
 
@@ -235,7 +235,7 @@ describe('previewDirectorToBlueprint', () => {
     expect(preview.sceneCount).toBe(2);
     expect(preview.hasPrompts).toBe(2);
     expect(preview.missingPrompts).toBe(0);
-    expect(preview.nodeCount).toBe(8); // 4 per scene with prompt
+    expect(preview.nodeCount).toBe(6); // 3 per scene with prompt
   });
 
   it('counts missing prompts correctly', () => {
@@ -257,7 +257,7 @@ describe('previewDirectorToBlueprint', () => {
 
     expect(preview.hasPrompts).toBe(1);
     expect(preview.missingPrompts).toBe(1);
-    expect(preview.nodeCount).toBe(6); // 4 (with prompt) + 2 (without prompt: text-input + script-import)
+    expect(preview.nodeCount).toBe(5); // 3 (with prompt) + 2 (without prompt: text-box + script-import)
   });
 
   it('filters by selectedSceneIds', () => {

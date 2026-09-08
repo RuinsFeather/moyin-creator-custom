@@ -8,7 +8,7 @@
  *   storyboard.json  —— 权威结构化数据（蓝图消费）
  *   storyboard.md    —— 可选，便于人工查看
  *
- * 参考图只保存稳定 assetId 或 local-image:// 引用，不保存临时 Base64。
+ * 参考图只保存稳定 assetId 或 workspace-image:// 引用，不保存临时 Base64。
  *
  * 同时支持从工作区 storyboard.json 重新打开分镜文档（loadStoryboardFromWorkspace）。
  */
@@ -24,8 +24,10 @@ import type {
 
 export const STORYBOARD_JSON_FILE = "storyboard.json";
 export const STORYBOARD_MD_FILE = "storyboard.md";
-/** 上传的 Base64 参考图落盘目录（工作区相对路径） */
-export const STORYBOARD_REFS_DIR = "storyboard-refs";
+/** 上传的参考图落盘目录（工作区相对路径） */
+export const STORYBOARD_REFS_DIR = "reference";
+/** 参考图在工作区内的稳定引用协议前缀（区别于应用媒体目录的 local-image://） */
+export const WORKSPACE_IMAGE_PREFIX = "workspace-image://";
 
 /** data URL -> 文件扩展名（按 MIME 推断，默认 .png） */
 export function dataUrlExt(dataUrl: string): string {
@@ -40,15 +42,25 @@ export function dataUrlExt(dataUrl: string): string {
   }
 }
 
-/** 该参考图是否为工作区内稳定引用（local-image:// 或已是 assetId） */
+/** 该参考图是否为工作区内稳定引用（workspace-image:// 或已是 assetId） */
 export function isStableReferenceUrl(url: string | undefined): boolean {
   if (!url) return false;
   return !url.startsWith("data:");
 }
 
 /**
- * 将文档中 upload 类型的 Base64 参考图固化到工作区，
- * 并把引用替换为 stable local-image:// URL（§14 风险：参考图失效）。
+ * 将 workspace-image://<relPath> 引用解析为工作区相对路径。
+ * 非 workspace-image:// 引用返回 null。
+ */
+export function workspaceImagePath(url: string | undefined): string | null {
+  if (!url || !url.startsWith(WORKSPACE_IMAGE_PREFIX)) return null;
+  const rel = url.slice(WORKSPACE_IMAGE_PREFIX.length);
+  return rel ? decodeURIComponent(rel) : null;
+}
+
+/**
+ * 将文档中 upload 类型的 Base64 参考图以二进制固化到工作区 reference/ 目录，
+ * 并把引用替换为稳定的 workspace-image:// URL（§14 风险：参考图失效）。
  * 只处理 sourceType === "upload" 且 localUrl 为 data: 的图片；已稳定引用跳过。
  *
  * @returns 更新后的文档（复制，不修改入参）。
@@ -71,12 +83,10 @@ export async function persistReferenceImagesToWorkspace(
   }
   if (pending.length === 0) return doc;
 
-  // 确保目录存在
-  try {
-    await fs.createDirectory(root, STORYBOARD_REFS_DIR);
-  } catch {
-    // 已存在目录时报错可忽略
-  }
+  // 二进制写入通道不可用（旧 preload/HMR 过渡）时回退：显式建目录 + 文本写入
+  const writeImage = fs.writeImage;
+  if (!writeImage && !fs.writeFile) return doc;
+  const fallbackWrite = !writeImage;
 
   const updated = {
     ...doc,
@@ -91,15 +101,26 @@ export async function persistReferenceImagesToWorkspace(
     const [, base64] = item.url.split(",");
     if (!base64) continue;
     try {
-      await fs.writeFile(root, relPath, base64);
+      if (fallbackWrite) {
+        try {
+          await fs.createDirectory(root, STORYBOARD_REFS_DIR);
+        } catch {
+          // 已存在目录时报错可忽略
+        }
+        await fs.writeFile!(root, relPath, base64);
+      } else {
+        // 二进制写入（writeImage 内部负责 mkdir -p reference/）
+        await writeImage!(root, relPath, base64);
+      }
     } catch {
       continue; // 单张失败不阻塞整个保存
     }
     const shot = updated.shots.find((s) => s.id === item.shotId);
     const img = shot?.referenceImages.find((i) => i.id === item.imageId);
     if (img) {
-      img.localUrl = `local-image://${relPath}`;
-      img.thumbnailUrl = `local-image://${relPath}`;
+      const stableUrl = `${WORKSPACE_IMAGE_PREFIX}${relPath}`;
+      img.localUrl = stableUrl;
+      img.thumbnailUrl = stableUrl;
     }
   }
 
@@ -150,8 +171,8 @@ export function renderStoryboardMarkdown(doc: StoryboardDocument): string {
  * 保存分镜文档到当前工作区。返回实际写入的两个路径。
  * 若工作区 FS 不可用则抛出错误。
  *
- * 保存前会把 upload 类型的 Base64 参考图固化到 storyboard-refs/ 目录，
- * 并以稳定 local-image:// 引用替换（§14 风险：参考图失效）。
+ * 保存前会把 upload 类型的 Base64 参考图固化到 reference/ 目录，
+ * 并以稳定 workspace-image:// 引用替换（§14 风险：参考图失效）。
  */
 export async function saveStoryboardToWorkspace(
   doc: StoryboardDocument,
@@ -212,22 +233,40 @@ function normalizeReferences(raw: Partial<StoryboardReferences> | undefined): St
   };
 }
 
+/**
+ * 旧格式参考图引用迁移：
+ * local-image://storyboard-refs/<file> → workspace-image://reference/<file>
+ * （旧版写入的目录前缀；文件名保持不变，读取时按新前缀解析）
+ */
+function migrateLegacyReferenceUrl(url: string | undefined): string | undefined {
+  if (!url) return url;
+  if (url.startsWith("local-image://storyboard-refs/")) {
+    return `${WORKSPACE_IMAGE_PREFIX}reference/${url.slice("local-image://storyboard-refs/".length)}`;
+  }
+  return url;
+}
+
 function normalizeReferenceImages(
   raw: Array<Partial<StoryboardReferenceImage>> | undefined,
 ): StoryboardReferenceImage[] {
   if (!Array.isArray(raw)) return [];
   return raw
     .filter((img) => img && typeof img === "object")
-    .map((img) => ({
-      id: typeof img.id === "string" && img.id ? img.id : makeId(),
-      sourceType: img.sourceType || "upload",
-      assetId: typeof img.assetId === "string" ? img.assetId : undefined,
-      relatedReferenceId:
-        typeof img.relatedReferenceId === "string" ? img.relatedReferenceId : undefined,
-      localUrl: typeof img.localUrl === "string" ? img.localUrl : undefined,
-      thumbnailUrl: typeof img.thumbnailUrl === "string" ? img.thumbnailUrl : undefined,
-      label: typeof img.label === "string" ? img.label : undefined,
-    }));
+    .map((img) => {
+      const localUrl = migrateLegacyReferenceUrl(
+        typeof img.localUrl === "string" ? img.localUrl : undefined,
+      );
+      return {
+        id: typeof img.id === "string" && img.id ? img.id : makeId(),
+        sourceType: img.sourceType || "upload",
+        assetId: typeof img.assetId === "string" ? img.assetId : undefined,
+        relatedReferenceId:
+          typeof img.relatedReferenceId === "string" ? img.relatedReferenceId : undefined,
+        localUrl,
+        thumbnailUrl: localUrl ?? (typeof img.thumbnailUrl === "string" ? img.thumbnailUrl : undefined),
+        label: typeof img.label === "string" ? img.label : undefined,
+      };
+    });
 }
 
 /**

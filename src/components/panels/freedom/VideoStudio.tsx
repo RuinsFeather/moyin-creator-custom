@@ -6,8 +6,6 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { PromptTextarea, type PromptTextareaRef } from './PromptTextarea';
 import { Label } from '@/components/ui/label';
-import { Slider } from '@/components/ui/slider';
-import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Progress } from '@/components/ui/progress';
 import { Switch } from '@/components/ui/switch';
@@ -18,17 +16,13 @@ import { useFreedomHistoryStore } from '@/stores/freedom-history-store';
 import { useProjectStore } from '@/stores/project-store';
 import { useAPIConfigStore } from '@/stores/api-config-store';
 import { ModelSelector } from './ModelSelector';
+import { GenParamControls } from './shared/GenParamControls';
 import { GenerationHistory } from './GenerationHistory';
 import { ActiveTaskCard, formatElapsed } from './ActiveTaskCard';
 import { generateFreedomVideo, resumeFreedomVideoTask, FreedomCancelledError, FreedomNetworkInterruptedError, type FreedomVideoUploadFile, type FreedomVideoUploadRole } from '@/lib/freedom/freedom-api';
 import { useFreedomTaskStore, type PersistedFreedomTask } from '@/stores/freedom-task-store';
 import { inFlightVideoTaskIds, setVideoStudioMounted } from '@/lib/freedom/video-task-recovery';
 import { VolcAssetPanel, type VolcAssetItem } from './VolcAssetPanel';
-import {
-  getAspectRatiosForT2VModel,
-  getDurationsForModel,
-  getResolutionsForModel,
-} from '@/lib/freedom/model-registry';
 import { resolveVeoUploadCapability, type VeoUploadCapability } from '@/lib/freedom/veo-capability';
 import {
   resolveSeedanceCapability,
@@ -53,6 +47,14 @@ const RESOLUTION_OPTIONS = [
   { value: '1080p', label: '1080p', desc: 'FHD 全高清' },
   { value: '4k', label: '4K', desc: 'H.265 超高清' },
 ] as const;
+
+const ASPECT_RATIO_DESCRIPTIONS: Record<string, string> = Object.fromEntries(
+  ASPECT_RATIO_OPTIONS.map((o) => [o.value, o.desc]),
+);
+
+const RESOLUTION_DESCRIPTIONS: Record<string, string> = Object.fromEntries(
+  RESOLUTION_OPTIONS.map((o) => [o.value, o.desc]),
+);
 
 // 「进程内已有活跃轮询链」的守卫改为从共享模块导入：App 启动时的全局恢复
 // 与本组件的恢复逻辑必须共用同一份，否则同一任务会被起两条链。
@@ -529,9 +531,6 @@ export function VideoStudio() {
     [selectedVideoModel],
   );
 
-  const aspectRatios = useMemo(() => getAspectRatiosForT2VModel(capabilityModelId), [capabilityModelId]);
-  const durations = useMemo(() => getDurationsForModel(capabilityModelId), [capabilityModelId]);
-  const resolutions = useMemo(() => getResolutionsForModel(capabilityModelId), [capabilityModelId]);
   const veoCapability = useMemo(
     () => resolveVeoUploadCapability(selectedVideoModel, endpointTypes),
     [selectedVideoModel, endpointTypes],
@@ -1346,81 +1345,24 @@ export function VideoStudio() {
               </div>
             </div>
 
-            {/* ========== 宽高比（始终显示） ========== */}
-            <div className="space-y-2">
-              <Label className="text-sm font-medium">宽高比</Label>
-              <div className="flex flex-wrap gap-1.5">
-                {(aspectRatios.length > 0 ? aspectRatios : ASPECT_RATIO_OPTIONS.map((o) => o.value)).map((ratio) => {
-                  const meta = ASPECT_RATIO_OPTIONS.find((o) => o.value === ratio);
-                  return (
-                    <Button
-                      key={ratio}
-                      variant={videoAspectRatio === ratio ? 'default' : 'outline'}
-                      size="sm"
-                      className="h-7 text-xs px-2.5"
-                      onClick={() => setVideoAspectRatio(ratio)}
-                      title={meta?.desc}
-                    >
-                      {ratio}
-                    </Button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* ========== 分辨率（始终显示） ========== */}
-            <div className="space-y-2">
-              <Label className="text-sm font-medium">分辨率</Label>
-              <div className="flex flex-wrap gap-1.5">
-                {(resolutions.length > 0 ? resolutions : RESOLUTION_OPTIONS.map((o) => o.value)).map((r) => {
-                  const meta = RESOLUTION_OPTIONS.find((o) => o.value === String(r));
-                  return (
-                    <Button
-                      key={r}
-                      variant={videoResolution === String(r) ? 'default' : 'outline'}
-                      size="sm"
-                      className="h-7 text-xs px-2.5"
-                      onClick={() => setVideoResolution(String(r))}
-                      title={meta?.desc}
-                    >
-                      {String(r)}{meta ? ` ${meta.desc}` : ''}
-                    </Button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* ========== 视频时长（滑动条 + 输入框） ========== */}
-            <div className="space-y-2">
-              <Label className="text-sm font-medium">视频时长 (秒)</Label>
-              <div className="flex items-center gap-3">
-                <span className="text-[11px] text-muted-foreground shrink-0">4s</span>
-                <Slider
-                  min={isSeedance ? seedanceCapability.minDuration : 4}
-                  max={isSeedance ? seedanceCapability.maxDuration : 15}
-                  step={1}
-                  value={[Math.max(isSeedance ? seedanceCapability.minDuration : 4, Math.min(isSeedance ? seedanceCapability.maxDuration : 15, videoDuration))]}
-                  onValueChange={([v]) => setVideoDuration(v)}
-                  className="flex-1"
-                />
-                <span className="text-[11px] text-muted-foreground shrink-0">{isSeedance ? seedanceCapability.maxDuration : 15}s</span>
-                <Input
-                  type="number"
-                  min={isSeedance ? seedanceCapability.minDuration : 4}
-                  max={isSeedance ? seedanceCapability.maxDuration : 15}
-                  value={videoDuration}
-                  onChange={(e) => {
-                    const v = parseInt(e.target.value, 10);
-                    if (!Number.isNaN(v)) {
-                      const min = isSeedance ? seedanceCapability.minDuration : 4;
-                      const max = isSeedance ? seedanceCapability.maxDuration : 15;
-                      setVideoDuration(Math.max(min, Math.min(max, v)));
-                    }
-                  }}
-                  className="w-14 h-7 text-xs text-center px-1 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                />
-              </div>
-            </div>
+            {/* ========== 宽高比 / 分辨率 / 视频时长 (shared GenParamControls) ========== */}
+            <GenParamControls
+              kind="video"
+              model={selectedVideoModel}
+              capabilityModelId={capabilityModelId}
+              aspectRatio={videoAspectRatio}
+              onAspectRatioChange={setVideoAspectRatio}
+              resolution={videoResolution}
+              onResolutionChange={setVideoResolution}
+              duration={videoDuration}
+              onDurationChange={setVideoDuration}
+              durationMin={isSeedance ? seedanceCapability.minDuration : 4}
+              durationMax={isSeedance ? seedanceCapability.maxDuration : 15}
+              groupClassName="space-y-5"
+              aspectRatioDescriptions={ASPECT_RATIO_DESCRIPTIONS}
+              resolutionDescriptions={RESOLUTION_DESCRIPTIONS}
+              resolutionLabelWithDescription
+            />
 
             {/* ========== 图生视频模式：子模式 + 上传 ========== */}
             {videoFeatureMode === 'image-to-video' && (

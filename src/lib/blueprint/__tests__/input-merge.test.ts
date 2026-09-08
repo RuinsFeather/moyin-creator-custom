@@ -333,6 +333,30 @@ describe('input-merge', () => {
       expect(files[0].dataUrl).toBe('http://local-thumb.png');
     });
 
+    it('treats a single Volc asset as a reference instead of a first frame', () => {
+      const edges = [makeEdge('e1', 'a', TARGET, 'reference-media')];
+      const upstreams = new Map<string, NodeExecutorOutput>();
+      upstreams.set('a', {
+        data: {
+          url: 'local-image://volc-assets/thumbnail.png',
+          mimeType: 'image/png',
+          assetId: 'Asset-2026-single',
+          volcAssetUri: 'Asset://Asset-2026-single',
+        },
+        summary: 'asset ref',
+      } as NodeExecutorOutput);
+
+      const files = collectVideoUploadFiles(TARGET, edges, upstreams);
+
+      expect(files).toHaveLength(1);
+      expect(files[0]).toMatchObject({
+        role: 'reference',
+        dataUrl: 'local-image://volc-assets/thumbnail.png',
+        assetType: 'image',
+        volcAssetUri: 'Asset://Asset-2026-single',
+      });
+    });
+
     it('passes through volcAssetUri from config-level referenceMediaRefs (P1-1)', () => {
       const edges: BlueprintEdge[] = [];
       const upstreams = new Map<string, NodeExecutorOutput>();
@@ -373,8 +397,8 @@ describe('input-merge', () => {
   describe('getStaleDownstreamNodes', () => {
     it('returns all transitive downstream nodes', () => {
       const nodes = [
-        makeNode('a', 'text-input'),
-        makeNode('b', 'image-generator'),
+        makeNode('a', 'text-box'),
+        makeNode('b', 'image-box'),
         makeNode('c', 'output'),
       ];
       const edges = [
@@ -387,7 +411,7 @@ describe('input-merge', () => {
 
     it('returns empty set for a leaf node', () => {
       const nodes = [
-        makeNode('a', 'text-input'),
+        makeNode('a', 'text-box'),
         makeNode('b', 'output'),
       ];
       const edges = [makeEdge('e1', 'a', 'b')];
@@ -397,9 +421,9 @@ describe('input-merge', () => {
 
     it('handles diamond graph (a→b,a→c,b→d,c→d)', () => {
       const nodes = [
-        makeNode('a', 'text-input'),
-        makeNode('b', 'image-generator'),
-        makeNode('c', 'image-generator'),
+        makeNode('a', 'text-box'),
+        makeNode('b', 'image-box'),
+        makeNode('c', 'image-box'),
         makeNode('d', 'output'),
       ];
       const edges = [
@@ -414,7 +438,7 @@ describe('input-merge', () => {
 
     it('stale propagation ignores nodes not in the node list', () => {
       const nodes = [
-        makeNode('a', 'text-input'),
+        makeNode('a', 'text-box'),
         makeNode('b', 'output'),
       ];
       // Edge to a non-existent node 'z'

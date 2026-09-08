@@ -32,12 +32,10 @@ import { validateLegacyDirectorSourceRefs, BLUEPRINT_DIAGNOSTIC_CODES } from '..
 // ── Allowed node types ────────────────────────────────────────────────────
 
 const ALLOWED_NODE_TYPES: readonly BlueprintNodeType[] = [
-  'text-input',
-  'image-reference',
-  'video-reference',
+  'text-box',
+  'image-box',
+  'video-box',
   'script-import',
-  'image-generator',
-  'video-generator',
   'output',
 ];
 
@@ -101,11 +99,11 @@ describe('Generation Chain Boundary (§9.3)', () => {
 
   describe('Generator executors use Freedom API exclusively', () => {
     it('image-generator executor is registered', () => {
-      expect(NODE_EXECUTORS['image-generator']).toBeDefined();
+      expect(NODE_EXECUTORS['image-box']).toBeDefined();
     });
 
     it('video-generator executor is registered', () => {
-      expect(NODE_EXECUTORS['video-generator']).toBeDefined();
+      expect(NODE_EXECUTORS['video-box']).toBeDefined();
     });
 
     it('no Director or S-Class generator executors are registered', () => {
@@ -118,7 +116,7 @@ describe('Generation Chain Boundary (§9.3)', () => {
 
   describe('Port definitions enforce clean boundary', () => {
     it('image-generator ports are self-contained (prompt + reference-images → image)', () => {
-      const ports = BLUEPRINT_NODE_PORTS['image-generator'];
+      const ports = BLUEPRINT_NODE_PORTS['image-box'];
       const inputPorts = ports.filter((p) => p.direction === 'input');
       const outputPorts = ports.filter((p) => p.direction === 'output');
 
@@ -127,7 +125,7 @@ describe('Generation Chain Boundary (§9.3)', () => {
     });
 
     it('video-generator ports are self-contained (prompt + reference-media → video)', () => {
-      const ports = BLUEPRINT_NODE_PORTS['video-generator'];
+      const ports = BLUEPRINT_NODE_PORTS['video-box'];
       const inputPorts = ports.filter((p) => p.direction === 'input');
       const outputPorts = ports.filter((p) => p.direction === 'output');
 
@@ -260,10 +258,10 @@ describe('Generation Chain Boundary (§9.3)', () => {
         version: 1,
         nodes: [{
           id: 'n1',
-          type: 'text-input' as const,
+          type: 'text-box' as const,
           position: { x: 0, y: 0 },
           data: {
-            nodeType: 'text-input' as const,
+            nodeType: 'text-box' as const,
             label: 'test',
             config: { text: 'hello' },
             sourceRef: { kind: 'shot' as const, id: 'shot-1' },

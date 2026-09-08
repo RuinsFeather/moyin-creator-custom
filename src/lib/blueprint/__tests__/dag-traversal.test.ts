@@ -18,7 +18,7 @@ import {
 
 // ── Test helpers ──────────────────────────────────────────────────────────
 
-function makeNode(id: string, nodeType: BlueprintNode['data']['nodeType'] = 'text-input'): BlueprintNode {
+function makeNode(id: string, nodeType: BlueprintNode['data']['nodeType'] = 'text-box'): BlueprintNode {
   return {
     id,
     type: nodeType,

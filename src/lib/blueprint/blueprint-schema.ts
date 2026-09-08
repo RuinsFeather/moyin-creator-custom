@@ -9,24 +9,41 @@ import {
   type BlueprintNode,
   type BlueprintPortDefinition,
   type BlueprintNodeType,
+  type LegacyBlueprintNodeType,
   type BlueprintProject,
   type BlueprintSourceRef,
 } from '@/types/blueprint';
 
 export const BLUEPRINT_NODE_TYPES = [
-  'text-input',
-  'image-reference',
-  'video-reference',
+  'text-box',
+  'image-box',
+  'video-box',
   'script-import',
-  'image-generator',
-  'video-generator',
   'output',
 ] as const satisfies readonly BlueprintNodeType[];
 
+/**
+ * Legacy node types retained for migration input only.
+ * These must NOT appear in new v2 data.
+ */
+export const LEGACY_BLUEPRINT_NODE_TYPES = [
+  'text-input',
+  'image-reference',
+  'video-reference',
+  'image-generator',
+  'video-generator',
+] as const;
+
 const blueprintNodeTypeSet = new Set<string>(BLUEPRINT_NODE_TYPES);
+const legacyNodeTypeSet = new Set<string>(LEGACY_BLUEPRINT_NODE_TYPES);
 
 export function isBlueprintNodeType(value: unknown): value is BlueprintNodeType {
   return typeof value === 'string' && blueprintNodeTypeSet.has(value);
+}
+
+/** Check if a string is a legacy (v1) node type. Used during migration. */
+export function isLegacyBlueprintNodeType(value: unknown): value is LegacyBlueprintNodeType {
+  return typeof value === 'string' && legacyNodeTypeSet.has(value);
 }
 
 export function getBlueprintPort(

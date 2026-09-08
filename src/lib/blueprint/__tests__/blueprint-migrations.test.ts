@@ -297,12 +297,12 @@ describe('migrateBlueprintDocument', () => {
 // ─── migrateBlueprintNode ───────────────────────────────────────
 
 describe('migrateBlueprintNode', () => {
-  it('returns a default text-input node for null input', () => {
+  it('returns a default text-box node for null input', () => {
     const node = migrateBlueprintNode(null);
     expect(node.id).toBe('unknown');
-    expect(node.type).toBe('text-input');
+    expect(node.type).toBe('text-box');
     expect(node.position).toEqual({ x: 0, y: 0 });
-    expect(node.data.nodeType).toBe('text-input');
+    expect(node.data.nodeType).toBe('text-box');
   });
 
   it('preserves valid node data', () => {
@@ -318,7 +318,7 @@ describe('migrateBlueprintNode', () => {
     };
     const node = migrateBlueprintNode(input);
     expect(node.id).toBe('n1');
-    expect(node.type).toBe('image-generator');
+    expect(node.type).toBe('image-box');
     expect(node.position).toEqual({ x: 50, y: 100 });
     expect(node.data.label).toBe('Generate Image');
   });
@@ -331,8 +331,8 @@ describe('migrateBlueprintNode', () => {
       data: { nodeType: 'director-scene', label: 'Scene', config: {} },
     };
     const node = migrateBlueprintNode(input);
-    expect(node.type).toBe('text-input');
-    expect(node.data.nodeType).toBe('text-input');
+    expect(node.type).toBe('text-box');
+    expect(node.data.nodeType).toBe('text-box');
   });
 
   it('normalizes data.nodeType when missing', () => {
@@ -354,7 +354,7 @@ describe('migrateBlueprintNode', () => {
       data: { nodeType: 'text-input', config: {} },
     };
     const node = migrateBlueprintNode(input);
-    expect(node.data.label).toBe('text-input');
+    expect(node.data.label).toBe('text-box');
   });
 
   it('normalizes data.config when missing', () => {
@@ -433,8 +433,8 @@ describe('migrateBlueprintNode', () => {
       data: {},
     };
     const node = migrateBlueprintNode(input);
-    expect(node.data.nodeType).toBe('image-generator');
-    expect(node.data.label).toBe('image-generator');
+    expect(node.data.nodeType).toBe('image-box');
+    expect(node.data.label).toBe('image-box');
     expect(node.data.config).toBeDefined();
   });
 
@@ -535,7 +535,7 @@ describe('migrateBlueprintEdge', () => {
 
 describe('migration idempotency', () => {
   it('running migration twice produces the same result', () => {
-    const input: PersistedBlueprintState = {
+    const input = {
       schemaVersion: 1,
       activeProjectId: 'proj-1',
       activeBlueprintId: 'bp-1',
@@ -560,7 +560,7 @@ describe('migration idempotency', () => {
           updatedAt: 2000,
         },
       ],
-    };
+    } as unknown as PersistedBlueprintState;
 
     const first = migrateBlueprintState(input, 1);
     const second = migrateBlueprintState(first, first.schemaVersion);
@@ -577,5 +577,163 @@ describe('migration idempotency', () => {
     };
     const result = migrateBlueprintState(input, BLUEPRINT_SCHEMA_VERSION);
     expect(result).toEqual(input);
+  });
+});
+
+// ─── v1→v2 Type Migration ──────────────────────────────────────
+
+describe('v1→v2 type migration', () => {
+  it('maps text-input → text-box with config preserved', () => {
+    const input = {
+      id: 'n1',
+      type: 'text-input',
+      position: { x: 10, y: 20 },
+      data: { nodeType: 'text-input', label: 'Prompt', config: { text: 'hello' } },
+    };
+    const node = migrateBlueprintNode(input);
+    expect(node.type).toBe('text-box');
+    expect(node.data.nodeType).toBe('text-box');
+    expect((node.data.config as { text: string }).text).toBe('hello');
+  });
+
+  it('maps image-reference → image-box (upload mode)', () => {
+    const media = [{ url: 'https://example.com/img.png', mediaId: 'm1' }];
+    const input = {
+      id: 'n1',
+      type: 'image-reference',
+      position: { x: 0, y: 0 },
+      data: { nodeType: 'image-reference', label: 'Ref', config: { media } },
+    };
+    const node = migrateBlueprintNode(input);
+    expect(node.type).toBe('image-box');
+    expect(node.data.nodeType).toBe('image-box');
+    const config = node.data.config as { mode: string; media: unknown[] };
+    expect(config.mode).toBe('upload');
+    expect(config.media).toEqual(media);
+  });
+
+  it('maps image-generator → image-box (generate mode) with generation config', () => {
+    const input = {
+      id: 'n1',
+      type: 'image-generator',
+      position: { x: 0, y: 0 },
+      data: {
+        nodeType: 'image-generator',
+        label: 'Gen',
+        config: { prompt: 'a cat', model: 'flux' },
+      },
+    };
+    const node = migrateBlueprintNode(input);
+    expect(node.type).toBe('image-box');
+    expect(node.data.nodeType).toBe('image-box');
+    const config = node.data.config as { mode: string; generation: { prompt: string; model: string } };
+    expect(config.mode).toBe('generate');
+    expect(config.generation.prompt).toBe('a cat');
+    expect(config.generation.model).toBe('flux');
+  });
+
+  it('maps video-reference → video-box (upload mode)', () => {
+    const media = [{ url: 'https://example.com/vid.mp4', mediaId: 'v1' }];
+    const input = {
+      id: 'n1',
+      type: 'video-reference',
+      position: { x: 0, y: 0 },
+      data: { nodeType: 'video-reference', label: 'VRef', config: { media } },
+    };
+    const node = migrateBlueprintNode(input);
+    expect(node.type).toBe('video-box');
+    expect(node.data.nodeType).toBe('video-box');
+    const config = node.data.config as { mode: string; media: unknown[] };
+    expect(config.mode).toBe('upload');
+    expect(config.media).toEqual(media);
+  });
+
+  it('maps video-generator → video-box (generate mode) with generation config', () => {
+    const input = {
+      id: 'n1',
+      type: 'video-generator',
+      position: { x: 0, y: 0 },
+      data: {
+        nodeType: 'video-generator',
+        label: 'VGen',
+        config: { prompt: 'sunset', model: 'kling' },
+      },
+    };
+    const node = migrateBlueprintNode(input);
+    expect(node.type).toBe('video-box');
+    expect(node.data.nodeType).toBe('video-box');
+    const config = node.data.config as { mode: string; generation: { prompt: string; model: string } };
+    expect(config.mode).toBe('generate');
+    expect(config.generation.prompt).toBe('sunset');
+    expect(config.generation.model).toBe('kling');
+  });
+
+  it('preserves script-import and output types unchanged', () => {
+    const scriptInput = {
+      id: 'n1',
+      type: 'script-import',
+      position: { x: 0, y: 0 },
+      data: { nodeType: 'script-import', label: 'Script', config: { selectedShotIds: ['s1'], mode: 'snapshot' } },
+    };
+    const outputInput = {
+      id: 'n2',
+      type: 'output',
+      position: { x: 0, y: 0 },
+      data: { nodeType: 'output', label: 'Out', config: { acceptedTypes: ['image'] } },
+    };
+    expect(migrateBlueprintNode(scriptInput).type).toBe('script-import');
+    expect(migrateBlueprintNode(outputInput).type).toBe('output');
+  });
+
+  it('preserves execution state during migration', () => {
+    const input = {
+      id: 'n1',
+      type: 'image-generator',
+      position: { x: 0, y: 0 },
+      data: {
+        nodeType: 'image-generator',
+        label: 'Gen',
+        config: { prompt: 'test' },
+        execution: { status: 'completed', output: [{ url: 'https://example.com/out.png' }] },
+      },
+    };
+    const node = migrateBlueprintNode(input);
+    expect(node.type).toBe('image-box');
+    expect((node.data as Record<string, unknown>).execution).toBeDefined();
+    expect(((node.data as Record<string, unknown>).execution as { status: string }).status).toBe('completed');
+  });
+
+  it('migrates a full blueprint with mixed legacy and v2 nodes', () => {
+    const input = {
+      activeProjectId: 'proj-1',
+      activeBlueprintId: 'bp-1',
+      blueprints: [
+        {
+          id: 'bp-1',
+          projectId: 'proj-1',
+          name: 'Mixed',
+          version: 1,
+          nodes: [
+            { id: 'n1', type: 'text-input', position: { x: 0, y: 0 }, data: { nodeType: 'text-input', label: 'A', config: { text: 'hi' } } },
+            { id: 'n2', type: 'image-generator', position: { x: 320, y: 0 }, data: { nodeType: 'image-generator', label: 'B', config: { prompt: 'cat' } } },
+            { id: 'n3', type: 'output', position: { x: 640, y: 0 }, data: { nodeType: 'output', label: 'C', config: { acceptedTypes: ['image'] } } },
+          ],
+          edges: [
+            { id: 'e1', source: 'n1', target: 'n2', type: 'blueprint', data: { dataType: 'text' } },
+            { id: 'e2', source: 'n2', target: 'n3', type: 'blueprint', data: { dataType: 'image' } },
+          ],
+          viewport: { x: 0, y: 0, zoom: 1 },
+          status: 'draft',
+          createdAt: 1000,
+          updatedAt: 2000,
+        },
+      ],
+    };
+    const result = migrateBlueprintState(input, 1);
+    const nodes = result.blueprints[0].nodes;
+    expect(nodes[0].type).toBe('text-box');
+    expect(nodes[1].type).toBe('image-box');
+    expect(nodes[2].type).toBe('output');
+    expect(result.blueprints[0].edges).toHaveLength(2);
   });
 });

@@ -39,7 +39,7 @@ vi.mock('@/lib/freedom/freedom-api', () => ({
 
 function makeNode(
   id: string,
-  nodeType: BlueprintNode['data']['nodeType'] = 'text-input',
+  nodeType: BlueprintNode['data']['nodeType'] = 'text-box',
   config: Record<string, unknown> = {},
 ): BlueprintNode {
   return {
@@ -123,7 +123,7 @@ describe('execution-engine: skip completed nodes', () => {
 
   it('skips a completed non-stale node and returns existing output', async () => {
     const existingOutput = { url: 'text://from-previous-run', mimeType: 'text/plain' };
-    const n1 = makeNode('n1', 'text-input', { text: 'hello' });
+    const n1 = makeNode('n1', 'text-box', { text: 'hello' });
     n1.data.execution = {
       status: 'completed',
       output: existingOutput,
@@ -152,7 +152,7 @@ describe('execution-engine: skip completed nodes', () => {
   });
 
   it('does NOT skip a stale node (re-executes it)', async () => {
-    const n1 = makeNode('n1', 'text-input', { text: 'hello' });
+    const n1 = makeNode('n1', 'text-box', { text: 'hello' });
     n1.data.execution = {
       status: 'stale',
       output: { url: 'text://old', mimeType: 'text/plain' },
@@ -176,7 +176,7 @@ describe('execution-engine: skip completed nodes', () => {
   });
 
   it('does NOT skip a failed node (re-executes it)', async () => {
-    const n1 = makeNode('n1', 'text-input', { text: 'hello' });
+    const n1 = makeNode('n1', 'text-box', { text: 'hello' });
     n1.data.execution = {
       status: 'failed',
       error: 'previous error',
@@ -199,7 +199,7 @@ describe('execution-engine: skip completed nodes', () => {
   });
 
   it('does NOT skip completed node without output', async () => {
-    const n1 = makeNode('n1', 'text-input', { text: 'hello' });
+    const n1 = makeNode('n1', 'text-box', { text: 'hello' });
     n1.data.execution = {
       status: 'completed',
       // no output
@@ -232,14 +232,14 @@ describe('execution-engine: stale propagation behavior', () => {
 
   it('skips completed upstream but re-runs stale downstream', async () => {
     // n1 (completed) → n2 (stale) → n3 (completed)
-    const n1 = makeNode('n1', 'text-input', { text: 'hello' });
+    const n1 = makeNode('n1', 'text-box', { text: 'hello' });
     n1.data.execution = {
       status: 'completed',
       output: { url: 'text://n1-output', mimeType: 'text/plain' },
       startedAt: 1000,
       completedAt: 2000,
     };
-    const n2 = makeNode('n2', 'text-input', { text: 'world' });
+    const n2 = makeNode('n2', 'text-box', { text: 'world' });
     n2.data.execution = {
       status: 'stale',
       output: { url: 'text://n2-old', mimeType: 'text/plain' },
@@ -277,7 +277,7 @@ describe('execution-engine: stale propagation behavior', () => {
   });
 
   it('mode=node only runs target node and skips completed upstream', async () => {
-    const n1 = makeNode('n1', 'text-input', { text: 'hello' });
+    const n1 = makeNode('n1', 'text-box', { text: 'hello' });
     n1.data.execution = {
       status: 'completed',
       output: { url: 'text://n1-done', mimeType: 'text/plain' },

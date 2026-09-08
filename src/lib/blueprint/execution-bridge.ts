@@ -22,13 +22,37 @@ import {
   selectActiveBlueprint,
   type BlueprintRunMode,
 } from '@/stores/blueprint-store';
-import type { BlueprintNode } from '@/types/blueprint';
+import type {
+  BlueprintNode,
+  BlueprintNodeType,
+  LegacyBlueprintNodeType,
+} from '@/types/blueprint';
 import { runBlueprintWithMetrics } from './execution-engine';
 
 // ── Types ────────────────────────────────────────────────────────────────
 
-/** Node types that incur a cost when executed. */
-const PAID_NODE_TYPES = new Set(['image-generator', 'video-generator']);
+/**
+ * Whether executing this node incurs a cost (§5.2).
+ *
+ * - Legacy generator nodes are always paid.
+ * - v2 image-box / video-box are paid only when a `generation` config
+ *   is present (pure import/reference windows are free).
+ */
+export function isPaidNode(node: BlueprintNode): boolean {
+  // Legacy types only appear in pre-migration data; widen the union for them.
+  const nodeType = node.data.nodeType as
+    | BlueprintNodeType
+    | LegacyBlueprintNodeType;
+  if (nodeType === 'image-generator' || nodeType === 'video-generator') {
+    return true;
+  }
+  if (nodeType === 'image-box' || nodeType === 'video-box') {
+    return Boolean(
+      (node.data.config as { generation?: unknown } | undefined)?.generation,
+    );
+  }
+  return false;
+}
 
 /** Options for `executeBlueprintRun`. */
 export interface ExecuteBlueprintRunOptions {
@@ -73,7 +97,7 @@ export async function executeBlueprintRun(
   // ── 3. Compute target nodes for paid-task confirmation ───────
   if (options?.confirmPaidTask) {
     const targetNodes = computeTargetNodes(blueprint, mode, nodeId);
-    const paidNodes = targetNodes.filter((n) => PAID_NODE_TYPES.has(n.data.nodeType));
+    const paidNodes = targetNodes.filter((n) => isPaidNode(n));
 
     if (paidNodes.length > 0) {
       const confirmed = await options.confirmPaidTask(paidNodes);

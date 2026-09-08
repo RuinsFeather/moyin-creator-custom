@@ -37,6 +37,8 @@ export interface AIAssistRequest {
   language?: string;
   /** Conversation history for multi-turn */
   history?: AIAssistMessage[];
+  /** Loaded skill names (§5.3) — skill bodies are appended to the system prompt */
+  skillRefs?: string[];
 }
 
 export interface AIAssistResult {
@@ -112,6 +114,41 @@ export function parseAIResponse(raw: string): AIAssistResult {
   return { response: raw.trim() };
 }
 
+// ── Skill augmentation (§5.3) ────────────────────────────────────────────
+
+/** Max total length of appended skill bodies (chars). Oversized skills are truncated. */
+const MAX_SKILL_CHARS = 8000;
+
+/** Max skill bodies to load per request (defensive cap). */
+const MAX_SKILL_COUNT = 5;
+
+/**
+ * Load referenced skills from the skill library and render them as an
+ * additional system-prompt block. Missing skills are skipped silently —
+ * a removed skill must not break the assist request.
+ */
+async function buildSkillBlock(skillRefs: string[]): Promise<string> {
+  const { getSkillContent } = await import('@/lib/skills/skill-library');
+  const parts: string[] = [];
+  let total = 0;
+  for (const name of skillRefs.slice(0, MAX_SKILL_COUNT)) {
+    let content: string | null = null;
+    try {
+      content = await getSkillContent(name);
+    } catch {
+      content = null;
+    }
+    if (!content) continue;
+    const remaining = MAX_SKILL_CHARS - total;
+    if (remaining <= 0) break;
+    const body = content.length > remaining ? content.slice(0, remaining) : content;
+    parts.push(`# 参考技能：${name}\n\n${body}`);
+    total += body.length;
+  }
+  if (!parts.length) return '';
+  return `\n\n以下是你需要遵循的技能规范（按顺序应用）：\n\n${parts.join('\n\n---\n\n')}`;
+}
+
 // ── Main assist function ─────────────────────────────────────────────────
 
 /**
@@ -131,7 +168,10 @@ export async function requestAIAssist(req: AIAssistRequest): Promise<AIAssistRes
   const role = req.role ?? 'prompt';
   const language = req.language ?? 'auto';
 
-  const systemPrompt = buildSystemPrompt(role, language);
+  let systemPrompt = buildSystemPrompt(role, language);
+  if (req.skillRefs?.length) {
+    systemPrompt += await buildSkillBlock(req.skillRefs);
+  }
 
   // Build user message with context
   let userMessage = '';

@@ -14,7 +14,7 @@
  * This module ONLY reads SplitScene data fields. It does NOT import
  * Director store actions, Director generation hooks, or Director's
  * parameter/state chain. All generated blueprint nodes use Freedom
- * API-compatible executors (image-generator / video-generator).
+ * API-compatible executors (image-box / video-box).
  *
  * ── Source Reference Strategy ──────────────────────────────────
  * Nodes created by this adapter use `kind: 'director-scene'` in
@@ -35,7 +35,6 @@ import type {
   BlueprintImageGeneratorConfig,
   TextInputNodeConfig,
   ScriptImportNodeConfig,
-  OutputNodeConfig,
 } from '@/types/blueprint';
 import { BLUEPRINT_SCHEMA_VERSION } from '@/types/blueprint';
 import { generateUUID } from '@/lib/utils';
@@ -224,15 +223,15 @@ export function convertDirectorToBlueprint(
     const sourceRef = makeDirectorSourceRef(scene, sourceVersion);
     const sceneLabel = scene.sceneName || `分镜 ${scene.id}`;
 
-    // 1. Text-input node for the prompt
+    // 1. Text-box node for the prompt
     const textInputId = generateUUID();
     const textConfig: TextInputNodeConfig = { text: prompt };
     nodes.push({
       id: textInputId,
-      type: 'text-input',
+      type: 'text-box',
       position: { x: 0, y: yOffset },
       data: {
-        nodeType: 'text-input',
+        nodeType: 'text-box',
         label: `${sceneLabel} 提示词`,
         config: textConfig,
         sourceRef,
@@ -258,41 +257,27 @@ export function convertDirectorToBlueprint(
     });
 
     if (prompt) {
-      // 3. Image-generator node
+      // 3. Image-box node (generate mode)
       const generatorId = generateUUID();
       const genConfig: BlueprintImageGeneratorConfig = {
         prompt: '',
       };
       nodes.push({
         id: generatorId,
-        type: 'image-generator',
+        type: 'image-box',
         position: { x: X_SPACING, y: yOffset },
         data: {
-          nodeType: 'image-generator',
+          nodeType: 'image-box',
           label: `${sceneLabel} 生成`,
-          config: genConfig,
+          config: {
+            media: [],
+            generation: genConfig,
+          },
           sourceRef,
         },
       });
 
-      // 4. Output node
-      const outputId = generateUUID();
-      const outConfig: OutputNodeConfig = {
-        acceptedTypes: ['image'],
-      };
-      nodes.push({
-        id: outputId,
-        type: 'output',
-        position: { x: X_SPACING * 2, y: yOffset },
-        data: {
-          nodeType: 'output',
-          label: `${sceneLabel} 输出`,
-          config: outConfig,
-          sourceRef,
-        },
-      });
-
-      // Edges: text-input → image-generator (prompt port)
+      // Edges: text-box → image-box (prompt port)
       edges.push({
         id: generateUUID(),
         source: textInputId,
@@ -303,7 +288,7 @@ export function convertDirectorToBlueprint(
         data: { dataType: 'text' },
       });
 
-      // Edges: script-import → image-generator (prompt port, for context)
+      // Edges: script-import → image-box (prompt port, for context)
       edges.push({
         id: generateUUID(),
         source: scriptImportId,
@@ -312,17 +297,6 @@ export function convertDirectorToBlueprint(
         targetHandle: 'prompt',
         type: 'blueprint',
         data: { dataType: 'context' },
-      });
-
-      // Edges: image-generator → output
-      edges.push({
-        id: generateUUID(),
-        source: generatorId,
-        target: outputId,
-        sourceHandle: 'image',
-        targetHandle: 'media',
-        type: 'blueprint',
-        data: { dataType: 'image' },
       });
     }
 
@@ -391,9 +365,9 @@ export function previewDirectorToBlueprint(
     }
   }
 
-  // Each scene with prompt: 4 nodes (text-input + script-import + image-generator + output)
-  // Each scene without prompt: 2 nodes (text-input + script-import)
-  const nodeCount = hasPrompts * 4 + missingPrompts * 2;
+  // Each scene with prompt: 3 nodes (text-box + script-import + image-box)
+  // Each scene without prompt: 2 nodes (text-box + script-import)
+  const nodeCount = hasPrompts * 3 + missingPrompts * 2;
   const diagnostics = generateDirectorConversionDiagnostics(
     scenes,
     targetScenes.map((s) => s.id),

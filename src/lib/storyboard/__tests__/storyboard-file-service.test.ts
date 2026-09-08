@@ -32,6 +32,43 @@ beforeEach(() => {
   mockedGetFs.mockReturnValue({ writeFile: mockWriteFile, readFile: mockReadFile } as any);
 });
 
+/** 基础文档骨架（参考图往返测试用） */
+function docBase(): StoryboardDocument {
+  return {
+    id: "doc-9",
+    projectId: "p-9",
+    title: "参考图往返",
+    sourceScriptPath: "script.md",
+    version: 1,
+    status: "review",
+    shots: [],
+    createdAt: 1,
+    updatedAt: 2,
+  };
+}
+
+function baseShot() {
+  return {
+    order: 0,
+    shotNumber: "1",
+    content: {
+      summary: "s",
+      scene: "室内",
+      action: "走",
+      dialogue: "",
+      shotSize: "中景",
+      cameraMovement: "固定",
+    },
+    references: { characters: [], costumes: [], scenes: [] },
+    notes: "",
+    referenceImages: [],
+    origin: "manual" as const,
+    reviewStatus: "pending" as const,
+    createdAt: 1,
+    updatedAt: 2,
+  };
+}
+
 describe("script-importer", () => {
   it("produces a stable hash for identical content", () => {
     const a = hashScriptContent("林夏推门进入咖啡馆。");
@@ -247,6 +284,59 @@ describe("storyboard-file-service (工作区打开)", () => {
   it("未选择工作区根目录时抛出错误", async () => {
     useScriptWorkspaceStore.getState().setWorkspaceRoot(null);
     await expect(loadStoryboardFromWorkspace()).rejects.toThrow(/根目录/);
+  });
+
+  it("保存后重新加载：workspace-image:// 参考图引用原样保留（可显示）", async () => {
+    const docWithRef: StoryboardDocument = {
+      ...docBase(),
+      shots: [
+        {
+          ...baseShot(),
+          id: "shot-1",
+          referenceImages: [
+            {
+              id: "img-1",
+              sourceType: "upload",
+              localUrl: "workspace-image://reference/shot-1-img-1.png",
+              thumbnailUrl: "workspace-image://reference/shot-1-img-1.png",
+              label: "参考.png",
+            },
+          ],
+        },
+      ],
+    };
+    mockReadFile.mockResolvedValue(JSON.stringify(docWithRef));
+    const loaded = await loadStoryboardFromWorkspace();
+    expect(loaded).not.toBeNull();
+    const img = loaded!.shots[0].referenceImages[0];
+    expect(img.localUrl).toBe("workspace-image://reference/shot-1-img-1.png");
+    expect(img.label).toBe("参考.png");
+  });
+
+  it("旧格式 local-image://storyboard-refs/ 引用自动迁移为 workspace-image://reference/", async () => {
+    const legacyDoc = {
+      ...docBase(),
+      shots: [
+        {
+          ...baseShot(),
+          id: "shot-1",
+          referenceImages: [
+            {
+              id: "img-1",
+              sourceType: "upload",
+              localUrl: "local-image://storyboard-refs/shot-1-img-1.png",
+              thumbnailUrl: "local-image://storyboard-refs/shot-1-img-1.png",
+            },
+          ],
+        },
+      ],
+    };
+    mockReadFile.mockResolvedValue(JSON.stringify(legacyDoc));
+    const loaded = await loadStoryboardFromWorkspace();
+    expect(loaded).not.toBeNull();
+    const img = loaded!.shots[0].referenceImages[0];
+    expect(img.localUrl).toBe("workspace-image://reference/shot-1-img-1.png");
+    expect(img.thumbnailUrl).toBe("workspace-image://reference/shot-1-img-1.png");
   });
 });
 

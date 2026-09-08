@@ -323,6 +323,31 @@ describe("splitScriptIntoChunks", () => {
 
 // ---------- 长剧本分批分析（§14 风险：单份剧本内容过长） ----------
 describe("长剧本分批分析", () => {
+  it("单块输出被截断时自动二分并合并子块镜头", async () => {
+    seedDocument();
+    const content = ["甲".repeat(1800), "乙".repeat(1800)].join("\n\n");
+    mockCallFeatureAPI
+      .mockResolvedValueOnce('[{"content":{"summary":"未完成"}}')
+      .mockImplementation((_feature: unknown, _sp: string, userPrompt: string) =>
+        Promise.resolve(JSON.stringify([{
+          content: {
+            summary: userPrompt.includes("甲甲甲") ? "左半段" : "右半段",
+            scene: "室内",
+            action: "走",
+            dialogue: "",
+            shotSize: "中景",
+            cameraMovement: "固定",
+          },
+        }])),
+      );
+
+    const result = await startStoryboardAnalysis(content, { maxRetries: 0 });
+    expect(result.ok).toBe(true);
+    expect(mockCallFeatureAPI).toHaveBeenCalledTimes(3);
+    expect(useStoryboardStore.getState().document!.shots.map((shot) => shot.content.summary))
+      .toEqual(["左半段", "右半段"]);
+  });
+
   it("超长剧本按段落分批调用 AI，合并后镜头号连续", async () => {
     seedDocument();
     // 构造两批内容（每批各自产生 1 个镜头）
@@ -356,16 +381,18 @@ describe("长剧本分批分析", () => {
       { maxRetries: 0 },
     );
     expect(result.ok).toBe(true);
-    expect(result.shotCount).toBe(2);
+    expect(result.shotCount).toBe(chunks.length);
 
-    // AI 被调用 2 次（2 批）
-    expect(mockCallFeatureAPI).toHaveBeenCalledTimes(2);
+    // AI 调用次数与实际分块数一致
+    expect(mockCallFeatureAPI).toHaveBeenCalledTimes(chunks.length);
 
     const shots = useStoryboardStore.getState().document!.shots;
-    expect(shots).toHaveLength(2);
+    expect(shots).toHaveLength(chunks.length);
     // 合并后镜头号连续、order 连续
-    expect(shots.map((s) => s.shotNumber)).toEqual(["1", "2"]);
-    expect(shots.map((s) => s.order)).toEqual([0, 1]);
+    expect(shots.map((s) => s.shotNumber)).toEqual(
+      chunks.map((_, i) => String(i + 1)),
+    );
+    expect(shots.map((s) => s.order)).toEqual(chunks.map((_, i) => i));
     // 每批提示词都带分段标注，且不含集/场层级要求
     const prompt1 = mockCallFeatureAPI.mock.calls[0][2] as string;
     const prompt2 = mockCallFeatureAPI.mock.calls[1][2] as string;

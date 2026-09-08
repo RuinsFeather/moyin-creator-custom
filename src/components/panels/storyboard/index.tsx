@@ -69,7 +69,7 @@ export function StoryboardPanel() {
   };
 
   return (
-    <div className="h-full flex flex-col bg-background">
+    <div className="h-full min-h-0 flex flex-col overflow-hidden bg-background">
       <StoryboardToolbar onToggleDetail={() => setShowDetail((v) => !v)} showDetail={showDetail} />
 
       {analysisJob && analysisJob.status === "running" && <AnalysisProgress job={analysisJob} />}
@@ -91,8 +91,8 @@ export function StoryboardPanel() {
         </div>
       )}
 
-      <div className="flex-1 min-h-0 flex">
-        <div className="flex-1 min-w-0 flex flex-col">
+      <div className="flex-1 min-h-0 flex overflow-hidden">
+        <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
           {!document || document.shots.length === 0 ? (
             <EmptyState
               hasDocument={Boolean(document)}
@@ -104,7 +104,7 @@ export function StoryboardPanel() {
         </div>
 
         {showDetail && document && (
-          <div className="w-80 border-l border-border flex flex-col">
+          <div className="w-80 min-w-0 min-h-0 shrink-0 border-l border-border flex flex-col overflow-hidden">
             <StoryboardDetailPanel />
           </div>
         )}

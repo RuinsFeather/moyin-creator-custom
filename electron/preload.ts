@@ -74,6 +74,16 @@ contextBridge.exposeInMainWorld('scriptWorkspaceFs', {
     ipcRenderer.invoke('script-workspace:copy', rootPath, sourcePath, targetPath),
   reveal: (rootPath: string, relativePath: string) =>
     ipcRenderer.invoke('script-workspace:reveal', rootPath, relativePath),
+  writeImage: (rootPath: string, relativePath: string, base64Data: string) =>
+    ipcRenderer.invoke('script-workspace:write-image', rootPath, relativePath, base64Data),
+  writeBinary: (rootPath: string, relativePath: string, base64Data: string) =>
+    ipcRenderer.invoke('script-workspace:write-binary', rootPath, relativePath, base64Data),
+  readBinary: (rootPath: string, relativePath: string, mimeType?: string) =>
+    ipcRenderer.invoke('script-workspace:read-binary', rootPath, relativePath, mimeType),
+  copyExternalFile: (sourcePath: string, rootPath: string, relativePath: string) =>
+    ipcRenderer.invoke('script-workspace:copy-external-file', sourcePath, rootPath, relativePath),
+  readImage: (rootPath: string, relativePath: string) =>
+    ipcRenderer.invoke('script-workspace:read-image', rootPath, relativePath),
 })
 // Storage manager API for paths, cache, import/export
 contextBridge.exposeInMainWorld('storageManager', {

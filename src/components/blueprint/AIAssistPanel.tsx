@@ -17,6 +17,11 @@ import {
   type AIAssistMessage,
   type AIAssistResult,
 } from '@/lib/blueprint/ai-assist';
+import {
+  listSkills,
+  subscribeSkills,
+  type SkillInfo,
+} from '@/lib/skills/skill-library';
 import { generateUUID } from '@/lib/utils';
 
 // ── Props ────────────────────────────────────────────────────────────────
@@ -28,6 +33,10 @@ interface AIAssistPanelProps {
   role?: string;
   /** Language (zh/en/ja/auto) */
   language?: string;
+  /** Currently loaded skill names (§5.3) */
+  skillRefs?: string[];
+  /** Called when the user toggles a skill chip */
+  onSkillRefsChange?: (refs: string[]) => void;
   /** Called when user accepts an AI-proposed text replacement */
   onApplyText: (newText: string) => void;
   /** Called when user closes the panel */
@@ -40,6 +49,8 @@ export const AIAssistPanel = memo(function AIAssistPanel({
   currentText,
   role,
   language,
+  skillRefs,
+  onSkillRefsChange,
   onApplyText,
   onClose,
 }: AIAssistPanelProps) {
@@ -47,12 +58,33 @@ export const AIAssistPanel = memo(function AIAssistPanel({
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [availableSkills, setAvailableSkills] = useState<SkillInfo[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
+  // Load available skills (built-in + custom dir) once and keep in sync
+  useEffect(() => {
+    let disposed = false;
+    const load = async () => {
+      try {
+        const skills = await listSkills();
+        if (!disposed) setAvailableSkills(skills);
+      } catch {
+        if (!disposed) setAvailableSkills([]);
+      }
+    };
+    void load();
+    return subscribeSkills((skills) => {
+      if (!disposed) setAvailableSkills(skills);
+    });
+  }, []);
+
   // Auto-scroll to bottom on new messages
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const end = messagesEndRef.current;
+    if (typeof end?.scrollIntoView === 'function') {
+      end.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [messages]);
 
   // Focus input on mount
@@ -83,6 +115,7 @@ export const AIAssistPanel = memo(function AIAssistPanel({
         role,
         language,
         history: messages,
+        skillRefs: skillRefs?.length ? skillRefs : undefined,
       });
 
       const assistantMsg: AIAssistMessage = {
@@ -100,7 +133,19 @@ export const AIAssistPanel = memo(function AIAssistPanel({
     } finally {
       setIsLoading(false);
     }
-  }, [input, isLoading, currentText, role, language, messages]);
+  }, [input, isLoading, currentText, role, language, messages, skillRefs]);
+
+  const handleToggleSkill = useCallback(
+    (name: string) => {
+      if (!onSkillRefsChange) return;
+      const current = skillRefs ?? [];
+      const next = current.includes(name)
+        ? current.filter((n) => n !== name)
+        : [...current, name];
+      onSkillRefsChange(next);
+    },
+    [onSkillRefsChange, skillRefs],
+  );
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -162,6 +207,38 @@ export const AIAssistPanel = memo(function AIAssistPanel({
           </button>
         </div>
       </div>
+
+      {/* Skill chips (§5.3 装载技能) */}
+      {availableSkills.length > 0 && onSkillRefsChange && (
+        <div
+          data-testid="skill-chips"
+          className="shrink-0 border-b border-border px-2 py-1.5"
+        >
+          <div className="mb-1 text-[9px] text-muted-foreground">装载技能</div>
+          <div className="flex max-h-16 flex-wrap gap-1 overflow-y-auto">
+            {availableSkills.map((skill) => {
+              const active = skillRefs?.includes(skill.name) ?? false;
+              return (
+                <button
+                  key={skill.name}
+                  data-testid={`skill-chip-${skill.name}`}
+                  onClick={() => handleToggleSkill(skill.name)}
+                  title={skill.description || skill.name}
+                  aria-pressed={active}
+                  className={`rounded-full border px-2 py-0.5 text-[10px] transition-colors ${
+                    active
+                      ? 'border-primary bg-primary/15 text-primary'
+                      : 'border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground'
+                  }`}
+                >
+                  {active ? '✓ ' : ''}
+                  {skill.name}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-2 space-y-2" style={{ minHeight: 0 }}>

@@ -10,6 +10,8 @@ import {
   type BlueprintPortDefinition,
   type BlueprintImageGeneratorConfig,
   type BlueprintVideoGeneratorConfig,
+  type ImageBoxConfig,
+  type VideoBoxConfig,
 } from '@/types/blueprint';
 import { isBlueprintNodeType } from './blueprint-schema';
 
@@ -56,16 +58,20 @@ function getInputPorts(
   );
 }
 
-/** Check whether a generator node has an inline prompt configured. */
+/** Check whether a box node has an inline prompt configured. */
 function hasInlinePrompt(node: BlueprintNode): boolean {
   const { nodeType, config } = node.data;
-  if (nodeType === 'image-generator') {
-    const c = config as BlueprintImageGeneratorConfig;
-    return typeof c.prompt === 'string' && c.prompt.trim().length > 0;
+  if (nodeType === 'image-box') {
+    const c = config as ImageBoxConfig;
+    if (!c.generation) return false;
+    const gen = c.generation as BlueprintImageGeneratorConfig;
+    return typeof gen.prompt === 'string' && gen.prompt.trim().length > 0;
   }
-  if (nodeType === 'video-generator') {
-    const c = config as BlueprintVideoGeneratorConfig;
-    return typeof c.prompt === 'string' && c.prompt.trim().length > 0;
+  if (nodeType === 'video-box') {
+    const c = config as VideoBoxConfig;
+    if (!c.generation) return false;
+    const gen = c.generation as BlueprintVideoGeneratorConfig;
+    return typeof gen.prompt === 'string' && gen.prompt.trim().length > 0;
   }
   return false;
 }
@@ -356,11 +362,15 @@ export function validateBlueprintGraph(
 
   // ── Generator node prompt check ──────────────────────────────────
 
-  const generatorNodeTypes = new Set(['image-generator', 'video-generator']);
+  const generatorNodeTypes = new Set(['image-box', 'video-box']);
 
   for (const node of nodes) {
     if (cycleNodes.has(node.id)) continue;
     if (!generatorNodeTypes.has(node.data.nodeType)) continue;
+
+    // Only check nodes in generate mode
+    const boxConfig = node.data.config as Record<string, unknown>;
+    if (boxConfig.mode !== 'generate') continue;
 
     // Prompt check
     if (!hasInlinePrompt(node) && !hasUpstreamTextInput(node.id, edges, nodeMap)) {
@@ -373,8 +383,9 @@ export function validateBlueprintGraph(
     }
 
     // Model check — generator needs a model to route to the correct provider
-    const config = node.data.config as Record<string, unknown>;
-    if (!config.model || typeof config.model !== 'string' || config.model.trim().length === 0) {
+    const generation = boxConfig.generation as Record<string, unknown> | undefined;
+    const model = generation?.model;
+    if (!model || typeof model !== 'string' || model.trim().length === 0) {
       diagnostics.push({
         code: codes.generatorMissingModel,
         severity: 'warning',

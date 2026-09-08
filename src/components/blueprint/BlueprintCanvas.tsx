@@ -2,7 +2,7 @@
 // Licensed under AGPL-3.0-or-later. See LICENSE for details.
 // Commercial licensing available. See COMMERCIAL_LICENSE.md.
 
-import { useCallback, useMemo, useRef } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -13,6 +13,8 @@ import {
   type OnEdgesChange,
   type IsValidConnection,
   type NodeMouseHandler,
+  type OnConnectStart,
+  type OnConnectEnd,
   BackgroundVariant,
   type ColorMode,
 } from '@xyflow/react';
@@ -28,8 +30,9 @@ import {
   type BlueprintEdge,
 } from '@/types/blueprint';
 import { canConnectBlueprintPorts } from '@/lib/blueprint/blueprint-schema';
-import { generateUUID } from '@/lib/utils';
-import { blueprintNodeTypes } from './nodes';
+import { generateUUID, cn } from '@/lib/utils';
+import { blueprintNodeTypes } from './boxes';
+import { CanvasContextMenu } from './CanvasContextMenu';
 
 /** Find the port data types for a given node type + handle ID. */
 function getPortDataTypes(
@@ -50,9 +53,21 @@ function getPortDataTypes(
  * - Dispatches changes back through store actions (`applyNodesChange`, `applyEdgesChange`, `addEdge`).
  * - Validates connections before allowing them (port types, self-loops, duplicates).
  * - Node components are memoized to minimize re-renders.
+ * - P1-6: Right-click context menu for creating boxes at cursor position.
+ * - P1-7: onConnectStart/End port highlighting, double-click to add text box.
  */
 export function BlueprintCanvas() {
   const containerRef = useRef<HTMLDivElement>(null);
+  
+  // ── Context menu state ──────────────────────────────────────────────────
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  
+  // ── Connection highlighting state ───────────────────────────────────────
+  const [connectingFrom, setConnectingFrom] = useState<{
+    nodeId: string;
+    handleId: string;
+    handleType: 'source' | 'target';
+  } | null>(null);
 
   // ── Store selectors (fine-grained to avoid unnecessary re-renders) ──────
   const activeBlueprintId = useBlueprintStore((s) => s.activeBlueprintId);
@@ -60,8 +75,10 @@ export function BlueprintCanvas() {
   const applyNodesChange = useBlueprintStore((s) => s.applyNodesChange);
   const applyEdgesChange = useBlueprintStore((s) => s.applyEdgesChange);
   const addEdge = useBlueprintStore((s) => s.addEdge);
+  const addNode = useBlueprintStore((s) => s.addNode);
   const selectNode = useBlueprintStore((s) => s.selectNode);
   const selectEdge = useBlueprintStore((s) => s.selectEdge);
+  const openDrawer = useBlueprintStore((s) => s.openDrawer);
   const updateViewport = useBlueprintStore((s) => s.updateViewport);
 
   // ── Derive active blueprint data ────────────────────────────────────────
@@ -177,17 +194,45 @@ export function BlueprintCanvas() {
   );
 
   const onNodeClick: NodeMouseHandler = useCallback(
-    (_event, node) => {
+    (event, node) => {
+      event.stopPropagation();
       selectNode(node.id);
       selectEdge(null);
     },
     [selectNode, selectEdge],
   );
 
-  const onPaneClick = useCallback(() => {
+  // 双击图片/视频窗口展开配置抽屉；双击文本窗口不触发（保持原有行为）。
+  const onNodeDoubleClick: NodeMouseHandler = useCallback(
+    (_event, node) => {
+      const nodeType = node.data?.nodeType;
+      if (nodeType === 'image-box' || nodeType === 'video-box') {
+        openDrawer(node.id);
+      }
+    },
+    [openDrawer],
+  );
+
+  const onPaneClick = useCallback((event: React.MouseEvent) => {
+    const target = event.target as HTMLElement;
+    if (target.closest('.react-flow__node') || target.closest('.react-flow__edge')) return;
     selectNode(null);
     selectEdge(null);
-  }, [selectNode, selectEdge]);
+    // 点击空白处同时收起抽屉
+    openDrawer(null);
+  }, [selectNode, selectEdge, openDrawer]);
+
+  const handleCanvasPointerDownCapture = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (!contextMenu) return;
+      const target = event.target as Node;
+      const menu = document.querySelector('[data-testid="canvas-context-menu"]');
+      if (!menu?.contains(target)) {
+        setContextMenu(null);
+      }
+    },
+    [contextMenu],
+  );
 
   const onEdgeClick = useCallback(
     (_event: React.MouseEvent, edge: { id: string }) => {
@@ -202,6 +247,62 @@ export function BlueprintCanvas() {
       updateViewport(vp);
     },
     [updateViewport],
+  );
+
+  // ── P1-6: Right-click context menu ──────────────────────────────────────
+  const onPaneContextMenu = useCallback((event: React.MouseEvent | MouseEvent) => {
+    event.preventDefault();
+    setContextMenu({ x: event.clientX, y: event.clientY });
+  }, []);
+
+  const handleCloseContextMenu = useCallback(() => {
+    setContextMenu(null);
+  }, []);
+
+  // ── P1-7: onConnectStart/End for port highlighting ─────────────────────
+  const onConnectStart: OnConnectStart = useCallback((_event, params) => {
+    if (params.nodeId && params.handleId && params.handleType) {
+      setConnectingFrom({
+        nodeId: params.nodeId,
+        handleId: params.handleId,
+        handleType: params.handleType,
+      });
+    }
+  }, []);
+
+  const onConnectEnd: OnConnectEnd = useCallback(() => {
+    setConnectingFrom(null);
+  }, []);
+
+  // ── P1-7: Double-click pane to add text box ────────────────────────────
+  const onPaneDoubleClick = useCallback(
+    (event: React.MouseEvent) => {
+      if (!containerRef.current) return;
+
+      // Calculate flow position from screen coordinates
+      const bounds = containerRef.current.getBoundingClientRect();
+      const x = event.clientX - bounds.left;
+      const y = event.clientY - bounds.top;
+
+      // Manual viewport transform (since useReactFlow screenToFlowPosition 
+      // is only available inside ReactFlowProvider children, and we're at
+      // the ReactFlow component level itself)
+      const flowX = (x - viewport.x) / viewport.zoom;
+      const flowY = (y - viewport.y) / viewport.zoom;
+
+      const id = generateUUID();
+      addNode({
+        id,
+        type: 'text-box',
+        position: { x: flowX, y: flowY },
+        data: {
+          nodeType: 'text-box',
+          label: '文本',
+          config: { text: '', language: '', role: '', skillRefs: [] },
+        },
+      } as BlueprintNode);
+    },
+    [viewport, addNode],
   );
 
   // ── Memoize default viewport to avoid re-applying on every render ───────
@@ -230,8 +331,27 @@ export function BlueprintCanvas() {
     );
   }
 
+  // Double-click on the pane (not on a node/edge) adds a text box.
+  const handleContainerDoubleClick = useCallback(
+    (event: React.MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.closest('.react-flow__pane') && !target.closest('.react-flow__node')) {
+        onPaneDoubleClick(event);
+      }
+    },
+    [onPaneDoubleClick],
+  );
+
   return (
-    <div ref={containerRef} className="h-full w-full">
+    <div
+      ref={containerRef}
+      className={cn(
+        'h-full w-full',
+        connectingFrom && 'blueprint-canvas-connecting',
+      )}
+      onPointerDownCapture={handleCanvasPointerDownCapture}
+      onDoubleClick={handleContainerDoubleClick}
+    >
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -239,10 +359,14 @@ export function BlueprintCanvas() {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+        onConnectStart={onConnectStart}
+        onConnectEnd={onConnectEnd}
         isValidConnection={isValidConnection}
         onNodeClick={onNodeClick}
+        onNodeDoubleClick={onNodeDoubleClick}
         onEdgeClick={onEdgeClick}
         onPaneClick={onPaneClick}
+        onPaneContextMenu={onPaneContextMenu}
         onViewportChange={onViewportChange}
         defaultViewport={defaultViewport}
         fitView
@@ -267,6 +391,13 @@ export function BlueprintCanvas() {
           className="!bg-panel"
         />
       </ReactFlow>
+      {contextMenu && (
+        <CanvasContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={handleCloseContextMenu}
+        />
+      )}
     </div>
   );
 }

@@ -29,8 +29,8 @@ export function StoryboardDetailPanel() {
   }
 
   return (
-    <ScrollArea className="flex-1 min-h-0">
-      <div className="p-3 flex flex-col gap-3">
+    <ScrollArea className="flex-1 min-h-0 w-full">
+      <div className="min-w-0 p-3 flex flex-col gap-3">
         <div className="flex items-center justify-between">
           <h4 className="text-xs font-medium">镜头 {shot.shotNumber}</h4>
           <Badge variant="outline" className="text-[10px]">{shot.origin}</Badge>

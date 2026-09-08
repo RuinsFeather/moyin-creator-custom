@@ -19,6 +19,10 @@ extraResources:
     to: demo-data
     filter:
       - "**/*"
+  - from: skill
+    to: skill
+    filter:
+      - "**/*"
 
 asar: true
 asarUnpack:

@@ -1903,6 +1903,87 @@ function getDemoDataPath(): string {
 }
 
 /**
+ * Get the path to the bundled built-in skill directory (§5.3).
+ * - Dev mode: {APP_ROOT}/skill/ (repo root, mirrors demo-data handling)
+ * - Production: {resourcesPath}/skill/ (via electron-builder extraResources)
+ */
+function getSkillPath(): string {
+  if (VITE_DEV_SERVER_URL) {
+    return path.join(process.env.APP_ROOT!, 'skill')
+  }
+  return path.join(process.resourcesPath, 'skill')
+}
+
+/** Parse YAML-ish frontmatter (--- delimited) from a markdown string. */
+function parseSkillFrontmatter(content: string): { name?: string; description?: string } {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
+  if (!match) return {}
+  const result: { name?: string; description?: string } = {}
+  for (const line of match[1].split(/\r?\n/)) {
+    const kv = line.match(/^(\w[\w-]*)\s*:\s*(.*)$/)
+    if (!kv) continue
+    const key = kv[1]
+    // Strip surrounding quotes ("..." or '...')
+    const value = kv[2].trim().replace(/^["'](.*)["']$/s, '$1').trim()
+    if (key === 'name' && value) result.name = value
+    if (key === 'description' && value) result.description = value
+  }
+  return result
+}
+
+/**
+ * List skills in a directory as [{name, description, filePath, content}].
+ * Reuses the fs:readMarkdownFolder walking rules (recursive md/≤500KB,
+ * skip hidden dirs / node_modules / symlinks). A missing directory yields [].
+ */
+async function listSkillsInDir(dirPath: string): Promise<
+  Array<{ name: string; description?: string; filePath: string; content: string }>
+> {
+  const maxFiles = 100
+  const maxFileSize = 500 * 1024
+  const allowedExts = new Set(['.md', '.markdown'])
+
+  const skills: Array<{ name: string; description?: string; filePath: string; content: string }> = []
+  if (!fs.existsSync(dirPath) || !fs.statSync(dirPath).isDirectory()) {
+    return skills
+  }
+
+  async function walkDir(dir: string) {
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true })
+    for (const entry of entries) {
+      if (skills.length >= maxFiles) break
+      const fullPath = path.join(dir, entry.name)
+      if (entry.isSymbolicLink()) continue
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+        await walkDir(fullPath)
+      } else if (entry.isFile()) {
+        const ext = path.extname(entry.name).toLowerCase()
+        if (!allowedExts.has(ext)) continue
+        try {
+          const stat = await fs.promises.stat(fullPath)
+          if (stat.size > maxFileSize) continue
+          const content = await fs.promises.readFile(fullPath, 'utf-8')
+          const fm = parseSkillFrontmatter(content)
+          const fallbackName = entry.name.replace(/\.(md|markdown)$/i, '')
+          skills.push({
+            name: fm.name || fallbackName,
+            description: fm.description,
+            filePath: fullPath,
+            content,
+          })
+        } catch {
+          // Skip unreadable files
+        }
+      }
+    }
+  }
+
+  await walkDir(dirPath)
+  return skills
+}
+
+/**
  * Recursively copy a directory.
  * Uses fs.cpSync which is available in Node 16.7+.
  */
@@ -2136,6 +2217,36 @@ app.whenReady().then(() => {
     }
   })
 
+  // ==================== Skill Library (§5.3) ====================
+
+  // List built-in skills from the bundled skill directory.
+  // Returns [{name, description, filePath, content}] (frontmatter parsed);
+  // a missing directory degrades to an empty list.
+  ipcMain.handle('skills:list', async () => {
+    try {
+      const skills = await listSkillsInDir(getSkillPath())
+      return { skills }
+    } catch (error) {
+      console.error('Failed to list skills:', error)
+      return { error: String(error) }
+    }
+  })
+
+  // List user-added skills from a custom directory (merged with built-ins
+  // on the renderer side, deduped by name).
+  ipcMain.handle('skills:listCustom', async (_event, dirPath: string) => {
+    try {
+      if (!dirPath || typeof dirPath !== 'string') {
+        return { error: '无效的技能目录' }
+      }
+      const skills = await listSkillsInDir(dirPath)
+      return { skills }
+    } catch (error) {
+      console.error('Failed to list custom skills:', error)
+      return { error: String(error) }
+    }
+  })
+
   const resolveScriptWorkspacePath = (rootPath: string, relativePath = '') => {
     const root = path.resolve(rootPath)
     const target = path.resolve(root, relativePath)
@@ -2264,6 +2375,69 @@ app.whenReady().then(() => {
     const target = resolveScriptWorkspacePath(rootPath, relativePath)
     shell.showItemInFolder(target)
     return true
+  })
+
+  // 将 Base64 图片以二进制写入工作区（参考图上传）。返回可显示、可持久化的
+  // workspace-image:// 引用（renderer 端 LocalImage/协议处理会解析该前缀）。
+  ipcMain.handle('script-workspace:write-image', async (_event, rootPath: string, relativePath: string, base64Data: string) => {
+    const target = resolveScriptWorkspacePath(rootPath, relativePath)
+    await fs.promises.mkdir(path.dirname(target), { recursive: true })
+    const buffer = Buffer.from(base64Data, 'base64')
+    if (buffer.length === 0) {
+      throw new Error('写入的图片数据为空')
+    }
+    await fs.promises.writeFile(target, buffer)
+    return { mtime: (await fs.promises.stat(target)).mtimeMs, size: buffer.length }
+  })
+
+  ipcMain.handle('script-workspace:write-binary', async (_event, rootPath: string, relativePath: string, base64Data: string) => {
+    const target = resolveScriptWorkspacePath(rootPath, relativePath)
+    await fs.promises.mkdir(path.dirname(target), { recursive: true })
+    const buffer = Buffer.from(base64Data, 'base64')
+    if (buffer.length === 0) throw new Error('写入的媒体数据为空')
+    await fs.promises.writeFile(target, buffer)
+    const stat = await fs.promises.stat(target)
+    return { mtime: stat.mtimeMs, size: stat.size }
+  })
+
+  ipcMain.handle('script-workspace:copy-external-file', async (_event, sourcePath: string, rootPath: string, relativePath: string) => {
+    const source = path.resolve(sourcePath)
+    const target = resolveScriptWorkspacePath(rootPath, relativePath)
+    const stat = await fs.promises.stat(source)
+    if (!stat.isFile()) throw new Error('源媒体不是文件')
+    await fs.promises.mkdir(path.dirname(target), { recursive: true })
+    await fs.promises.copyFile(source, target)
+    const result = await fs.promises.stat(target)
+    return { mtime: result.mtimeMs, size: result.size }
+  })
+
+  ipcMain.handle('script-workspace:read-binary', async (_event, rootPath: string, relativePath: string, mimeType?: string) => {
+    const target = resolveScriptWorkspacePath(rootPath, relativePath)
+    const stat = await fs.promises.stat(target)
+    if (!stat.isFile()) throw new Error('目标不是文件')
+    if (stat.size > 100 * 1024 * 1024) throw new Error('媒体超过 100MB，无法读取')
+    const data = await fs.promises.readFile(target)
+    return `data:${mimeType || 'application/octet-stream'};base64,${data.toString('base64')}`
+  })
+
+  // 读取工作区二进制图片为 data URL（用于 <img> 显示；非 Electron 环境无此通道）
+  ipcMain.handle('script-workspace:read-image', async (_event, rootPath: string, relativePath: string) => {
+    const target = resolveScriptWorkspacePath(rootPath, relativePath)
+    const stat = await fs.promises.stat(target)
+    if (!stat.isFile()) throw new Error('目标不是文件')
+    if (stat.size > 10 * 1024 * 1024) throw new Error('图片超过 10MB，无法读取')
+    const data = await fs.promises.readFile(target)
+    const ext = path.extname(target).toLowerCase()
+    const mimeTypes: Record<string, string> = {
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+      '.bmp': 'image/bmp',
+      '.svg': 'image/svg+xml',
+    }
+    return `data:${mimeTypes[ext] || 'application/octet-stream'};base64,${data.toString('base64')}`
   })
 
   createWindow()

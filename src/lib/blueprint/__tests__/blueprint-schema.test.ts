@@ -19,7 +19,7 @@ import {
 
 describe('blueprint schema', () => {
   it('recognizes only registered node types', () => {
-    expect(BLUEPRINT_NODE_TYPES).toContain('image-generator');
+    expect(BLUEPRINT_NODE_TYPES).toContain('image-box');
     expect(isBlueprintNodeType('output')).toBe(true);
     expect(isBlueprintNodeType('unknown')).toBe(false);
   });
@@ -42,27 +42,27 @@ describe('blueprint schema', () => {
   it('accepts only compatible explicit node ports', () => {
     expect(
       canConnectBlueprintPorts(
-        'text-input',
+        'text-box',
         'text',
-        'image-generator',
+        'image-box',
         'prompt',
         'text',
       ),
     ).toBe(true);
     expect(
       canConnectBlueprintPorts(
-        'image-reference',
+        'image-box',
         'image',
-        'image-generator',
+        'image-box',
         'prompt',
         'image',
       ),
     ).toBe(false);
     expect(
       canConnectBlueprintPorts(
-        'text-input',
+        'text-box',
         'missing',
-        'image-generator',
+        'image-box',
         'prompt',
         'text',
       ),

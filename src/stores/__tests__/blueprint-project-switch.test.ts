@@ -36,10 +36,10 @@ const PROJECT_B = 'project-b';
 function textNode(id: string): BlueprintNode {
   return {
     id,
-    type: 'text-input',
+    type: 'text-box',
     position: { x: 100, y: 200 },
     data: {
-      nodeType: 'text-input',
+      nodeType: 'text-box',
       label: `Text ${id}`,
       config: { text: `Hello ${id}` },
     },
@@ -124,6 +124,7 @@ describe('6.3 项目切换验收', () => {
       blueprints: [],
       selectedNodeId: null,
       selectedEdgeId: null,
+      drawerNodeId: null,
       currentRun: null,
       executionLock: false,
       abortController: null,
@@ -317,6 +318,7 @@ describe('6.3 项目切换验收', () => {
       // Runtime defaults are re-initialized
       selectedNodeId: null,
       selectedEdgeId: null,
+      drawerNodeId: null,
       currentRun: null,
       executionLock: false,
       abortController: null,

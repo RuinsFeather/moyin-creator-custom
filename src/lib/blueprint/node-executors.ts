@@ -38,6 +38,9 @@ import type {
   BlueprintImageGeneratorConfig,
   BlueprintVideoGeneratorConfig,
   OutputNodeConfig,
+  TextBoxConfig,
+  ImageBoxConfig,
+  VideoBoxConfig,
 } from '@/types/blueprint';
 import {
   collectReferenceImageRefs,
@@ -51,6 +54,7 @@ import {
   type FreedomVideoParams,
   type FreedomVideoUploadFile,
 } from '@/lib/freedom/freedom-api';
+import { validateSeedanceReferenceCounts } from '@/lib/video/seedance-capability';
 
 /** Context passed to every node executor. */
 export interface NodeExecutionContext {
@@ -337,14 +341,256 @@ async function executeOutput(
   };
 }
 
+// ── v2 Box executor adapters ─────────────────────────────────────────────
+
+/**
+ * text-box executor: outputs config.text directly (same as legacy text-input).
+ */
+async function executeTextBox(
+  ctx: NodeExecutionContext,
+): Promise<NodeExecutorOutput> {
+  throwIfAborted(ctx.signal);
+  const cfg = ctx.config as TextBoxConfig;
+  const text = cfg.text ?? '';
+  ctx.onProgress?.(100);
+  return {
+    data: text,
+    summary: `text-box (${text.length} chars)`,
+  };
+}
+
+/**
+ * image-box executor: delegates based on generation presence.
+ * - no generation: pass through media[] (import/reference window)
+ * - has generation: delegate to executeImageGenerator logic
+ */
+async function executeImageBox(
+  ctx: NodeExecutionContext,
+): Promise<NodeExecutorOutput> {
+  throwIfAborted(ctx.signal);
+  const cfg = ctx.config as ImageBoxConfig;
+
+  if (!cfg.generation) {
+    const media = cfg.media ?? [];
+    ctx.onProgress?.(100);
+    return {
+      data: media,
+      summary: `image-box/media (${media.length} refs)`,
+    };
+  }
+
+  // generation window: delegate to shared generator logic.
+  // Manual references (ImageBoxConfig.referenceImageRefs) merge after
+  // upstream edge references — "connected (by order) → manual".
+  return executeImageGeneratorFromConfig(ctx, cfg.generation, cfg.referenceImageRefs);
+}
+
+/**
+ * video-box executor: delegates based on generation presence.
+ * - no generation: pass through media[] (import/reference window)
+ * - has generation: delegate to executeVideoGenerator logic
+ */
+async function executeVideoBox(
+  ctx: NodeExecutionContext,
+): Promise<NodeExecutorOutput> {
+  throwIfAborted(ctx.signal);
+  const cfg = ctx.config as VideoBoxConfig;
+
+  if (!cfg.generation) {
+    const media = cfg.media ?? [];
+    ctx.onProgress?.(100);
+    return {
+      data: media,
+      summary: `video-box/media (${media.length} refs)`,
+    };
+  }
+
+  // generation window: delegate to shared generator logic
+  return executeVideoGeneratorFromConfig(ctx, cfg.generation);
+}
+
+// ── Shared generator logic (extracted for adapter reuse) ─────────────────
+
+/**
+ * Core image generation logic, shared between legacy image-generator
+ * and v2 image-box (generate mode).
+ *
+ * `configRefs` carries the box-level manual references
+ * (`ImageBoxConfig.referenceImageRefs`); they are appended after
+ * upstream edge references and capped together at 10.
+ */
+async function executeImageGeneratorFromConfig(
+  ctx: NodeExecutionContext,
+  genConfig: BlueprintImageGeneratorConfig,
+  configRefs?: BlueprintMediaRef[],
+): Promise<NodeExecutorOutput> {
+  throwIfAborted(ctx.signal);
+  const upstreamPrompt = mergePromptText(ctx.node.id, ctx.edges, ctx.upstreamOutputs);
+  const prompt = upstreamPrompt || genConfig.prompt?.trim() || '';
+
+  if (!prompt) {
+    throw new Error('图片生成器缺少 prompt');
+  }
+
+  const refImages = collectReferenceImageRefs(
+    ctx.node.id,
+    ctx.edges,
+    ctx.upstreamOutputs,
+    10,
+    configRefs,
+  );
+
+  // 优先使用 volcAssetUri（火山引擎已上传素材直接引用，避免重新上传）；
+  // 无 volcAssetUri 时降级为 url（http URL / local-image:// / data URL）。
+  const referenceImageUrls = refImages
+    .filter((r) => r.volcAssetUri || r.url)
+    .map((r) => r.volcAssetUri ?? r.url!);
+
+  ctx.onProgress?.(10);
+  throwIfAborted(ctx.signal);
+
+  const imageParams: FreedomImageParams = {
+    prompt,
+    projectId: ctx.projectId,
+    model: genConfig.model,
+    aspectRatio: genConfig.aspectRatio,
+    resolution: genConfig.resolution,
+    width: genConfig.width,
+    height: genConfig.height,
+    negativePrompt: genConfig.negativePrompt,
+    referenceImages: referenceImageUrls.length > 0 ? referenceImageUrls : undefined,
+    extraParams: genConfig.extraParams as Record<string, unknown> | undefined,
+    signal: ctx.signal,
+    onProgress: (info) => {
+      const phaseOffset = info.phase === 'submitting' ? 10
+        : info.phase === 'processing' ? 30
+        : info.phase === 'finalizing' ? 80
+        : 95;
+      ctx.onProgress?.(Math.min(95, phaseOffset + (info.percent || 0) * 0.2));
+    },
+  };
+
+  const result = await generateFreedomImage(imageParams);
+  throwIfAborted(ctx.signal);
+
+  const mediaRef: BlueprintMediaRef = {
+    url: result.url,
+    mediaId: result.mediaId,
+    mimeType: 'image/png',
+    dedupeKey: `img-${ctx.node.id}-${result.taskId ?? Date.now()}`,
+    taskId: result.taskId,
+  };
+  ctx.onProgress?.(100);
+
+  return {
+    data: mediaRef,
+    summary: `image-box/generate (model=${genConfig.model ?? 'default'}, refs=${refImages.length})`,
+  };
+}
+
+/**
+ * Core video generation logic, shared between legacy video-generator
+ * and v2 video-box (generate mode).
+ *
+ * Studio-parity parameter mapping (§5.1):
+ *   - `genConfig.webSearch` (drawer boolean) → FreedomVideoParams.tools
+ *     `[{ type: 'web_search' }]` (mirrors VideoStudio).
+ *   - `genConfig.edgeReferenceRoles` (keyed by edge ID) → per-edge role
+ *     overrides for upstream references, merged inside
+ *     `collectVideoUploadFiles`.
+ *   - Seedance reference-count capability check before submit.
+ */
+async function executeVideoGeneratorFromConfig(
+  ctx: NodeExecutionContext,
+  genConfig: BlueprintVideoGeneratorConfig,
+): Promise<NodeExecutorOutput> {
+  throwIfAborted(ctx.signal);
+  const upstreamPrompt = mergePromptText(ctx.node.id, ctx.edges, ctx.upstreamOutputs);
+  const prompt = upstreamPrompt || genConfig.prompt?.trim() || '';
+
+  if (!prompt) {
+    throw new Error('视频生成器缺少 prompt');
+  }
+
+  ctx.onProgress?.(10);
+  throwIfAborted(ctx.signal);
+
+  const resolvedUploads = collectVideoUploadFiles(
+    ctx.node.id,
+    ctx.edges,
+    ctx.upstreamOutputs,
+    genConfig.referenceMediaRefs,
+    genConfig.edgeReferenceRoles,
+  );
+  const uploadFiles: FreedomVideoUploadFile[] = resolvedUploads;
+
+  // Seedance capability check: reference counts (studio parity).
+  {
+    const images = uploadFiles.filter((f) => f.assetType !== 'video' && f.assetType !== 'audio').length;
+    const videos = uploadFiles.filter((f) => f.assetType === 'video').length;
+    const audios = uploadFiles.filter((f) => f.assetType === 'audio').length;
+    const countError = validateSeedanceReferenceCounts(genConfig.model, { images, videos, audios });
+    if (countError) {
+      throw new Error(countError);
+    }
+  }
+
+  const videoParams: FreedomVideoParams = {
+    prompt,
+    projectId: ctx.projectId,
+    model: genConfig.model,
+    aspectRatio: genConfig.aspectRatio,
+    duration: genConfig.duration,
+    resolution: genConfig.resolution,
+    generateAudio: genConfig.generateAudio,
+    watermark: genConfig.watermark,
+    uploadFiles: uploadFiles.length > 0 ? uploadFiles : undefined,
+    // Drawer stores a `webSearch` boolean; the API expects a tools array.
+    tools: genConfig.webSearch ? [{ type: 'web_search' as const }] : undefined,
+    signal: ctx.signal,
+    onTaskCreated: (info) => {
+      const taskRef: BlueprintTaskRef = {
+        taskId: info.taskId,
+        route: info.route,
+        pollUrl: info.pollUrl,
+        model: info.model,
+        serverTaskId: info.taskId,
+      };
+      ctx.onUpdateNode?.({ task: taskRef });
+    },
+  };
+
+  const result = await generateFreedomVideo(videoParams);
+  throwIfAborted(ctx.signal);
+
+  const mediaRef: BlueprintMediaRef = {
+    url: result.url,
+    mediaId: result.mediaId,
+    mimeType: 'video/mp4',
+    dedupeKey: `vid-${ctx.node.id}-${result.taskId ?? Date.now()}`,
+    taskId: result.taskId,
+  };
+  ctx.onProgress?.(100);
+
+  return {
+    data: mediaRef,
+    summary: `video-box/generate (model=${genConfig.model ?? 'default'}, refs=${uploadFiles.length})`,
+  };
+}
+
 // ── Executor registry ────────────────────────────────────────────────────
 
 export const NODE_EXECUTORS: Record<string, NodeExecutor> = {
+  // v2 box types
+  'text-box': executeTextBox,
+  'image-box': executeImageBox,
+  'video-box': executeVideoBox,
+  'script-import': executeScriptImport,
+  output: executeOutput,
+  // Legacy types retained for migration compatibility
   'text-input': executeTextInput,
   'image-reference': executeImageReference,
   'video-reference': executeVideoReference,
-  'script-import': executeScriptImport,
   'image-generator': executeImageGenerator,
   'video-generator': executeVideoGenerator,
-  output: executeOutput,
 };

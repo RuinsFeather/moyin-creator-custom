@@ -37,7 +37,7 @@ vi.mock('@/lib/freedom/freedom-api', () => ({
 
 function makeNode(
   id: string,
-  nodeType: BlueprintNode['data']['nodeType'] = 'text-input',
+  nodeType: BlueprintNode['data']['nodeType'] = 'text-box',
   config: Record<string, unknown> = {},
 ): BlueprintNode {
   return {
@@ -133,8 +133,8 @@ describe('execution-engine', () => {
   describe('graph validation before execution', () => {
     it('returns errors immediately for an invalid graph', async () => {
       // Duplicate node IDs
-      const a1 = makeNode('a', 'text-input');
-      const a2 = makeNode('a', 'image-generator');
+      const a1 = makeNode('a', 'text-box');
+      const a2 = makeNode('a', 'image-box');
       const project = makeProject([a1, a2]);
 
       const result = await runBlueprint({
@@ -149,8 +149,8 @@ describe('execution-engine', () => {
     });
 
     it('returns errors for a graph with a cycle', async () => {
-      const a = makeNode('a', 'text-input');
-      const b = makeNode('b', 'text-input');
+      const a = makeNode('a', 'text-box');
+      const b = makeNode('b', 'text-box');
       const project = makeProject([a, b], [
         makeEdge('e1', 'a', 'b'),
         makeEdge('e2', 'b', 'a'),
@@ -190,7 +190,7 @@ describe('execution-engine', () => {
 
   describe('single node execution', () => {
     it('executes a single text-input node successfully', async () => {
-      const node = makeNode('a', 'text-input', { text: 'hello' });
+      const node = makeNode('a', 'text-box', { text: 'hello' });
       const project = makeProject([node]);
 
       const result = await runBlueprint({
@@ -209,8 +209,8 @@ describe('execution-engine', () => {
       expect(statuses).toEqual(['queued', 'running', 'completed']);
     });
 
-    it('executes an image-reference node', async () => {
-      const node = makeNode('a', 'image-reference', { media: [] });
+    it('executes an image-box upload node', async () => {
+      const node = makeNode('a', 'image-box', { mode: 'upload', media: [] });
       const project = makeProject([node]);
 
       const result = await runBlueprint({
@@ -245,8 +245,8 @@ describe('execution-engine', () => {
 
   describe('linear chain execution', () => {
     it('executes a→b→c in correct order', async () => {
-      const a = makeNode('a', 'text-input', { text: 'hello' });
-      const b = makeNode('b', 'text-input', { text: 'world' });
+      const a = makeNode('a', 'text-box', { text: 'hello' });
+      const b = makeNode('b', 'text-box', { text: 'world' });
       const c = makeNode('c', 'output', { acceptedTypes: ['image'] });
       const project = makeProject(
         [a, b, c],
@@ -270,9 +270,9 @@ describe('execution-engine', () => {
 
   describe('parallel execution', () => {
     it('executes independent nodes in the same level', async () => {
-      const a = makeNode('a', 'text-input', { text: 'a' });
-      const b = makeNode('b', 'text-input', { text: 'b' });
-      const c = makeNode('c', 'text-input', { text: 'c' });
+      const a = makeNode('a', 'text-box', { text: 'a' });
+      const b = makeNode('b', 'text-box', { text: 'b' });
+      const c = makeNode('c', 'text-box', { text: 'c' });
       // a, b, c are all independent
       const project = makeProject([a, b, c]);
 
@@ -290,7 +290,7 @@ describe('execution-engine', () => {
 
     it('respects concurrency limit', async () => {
       const nodes = Array.from({ length: 10 }, (_, i) =>
-        makeNode('n' + i, 'text-input', { text: 'node ' + i }),
+        makeNode('n' + i, 'text-box', { text: 'node ' + i }),
       );
       const project = makeProject(nodes);
 
@@ -310,10 +310,8 @@ describe('execution-engine', () => {
   describe('error handling', () => {
     it('fails a node and blocks its downstream nodes', async () => {
       // Image generator without a prompt will fail
-      const a = makeNode('a', 'text-input', { text: 'hello' });
-      const gen = makeNode('gen', 'image-generator', {
-        /* no prompt */
-      });
+      const a = makeNode('a', 'text-box', { text: 'hello' });
+      const gen = makeNode('gen', 'image-box', { generation: { prompt: '' } });
       const out = makeNode('out', 'output', { acceptedTypes: ['image'] });
       const project = makeProject(
         [a, gen, out],
@@ -337,8 +335,8 @@ describe('execution-engine', () => {
     });
 
     it('blocks transitive downstream of a failed node', async () => {
-      const gen = makeNode('gen', 'image-generator', {});
-      const b = makeNode('b', 'text-input', { text: 'x' });
+      const gen = makeNode('gen', 'image-box', { generation: { prompt: '' } });
+      const b = makeNode('b', 'text-box', { text: 'x' });
       const c = makeNode('c', 'output', { acceptedTypes: ['image'] });
       // gen→b→c (gen fails, b and c should be blocked)
       const project = makeProject(
@@ -360,8 +358,8 @@ describe('execution-engine', () => {
 
     it('allows unrelated branches to continue when one fails', async () => {
       // a (ok) → out1, gen (fail) → out2
-      const a = makeNode('a', 'text-input', { text: 'ok' });
-      const gen = makeNode('gen', 'image-generator', {});
+      const a = makeNode('a', 'text-box', { text: 'ok' });
+      const gen = makeNode('gen', 'image-box', { generation: { prompt: '' } });
       const out1 = makeNode('out1', 'output', { acceptedTypes: ['image'] });
       const out2 = makeNode('out2', 'output', { acceptedTypes: ['image'] });
       const project = makeProject(
@@ -389,7 +387,7 @@ describe('execution-engine', () => {
   describe('cancellation', () => {
     it('aborts when signal is already aborted', async () => {
       const nodes = Array.from({ length: 5 }, (_, i) =>
-        makeNode('n' + i, 'text-input', { text: 'x' }),
+        makeNode('n' + i, 'text-box', { text: 'x' }),
       );
       const project = makeProject(nodes);
       const controller = new AbortController();
@@ -410,9 +408,9 @@ describe('execution-engine', () => {
   // ── Run modes ─────────────────────────────────────────────────
 
   describe('run modes', () => {
-    const a = makeNode('a', 'text-input', { text: 'a' });
-    const b = makeNode('b', 'text-input', { text: 'b' });
-    const c = makeNode('c', 'text-input', { text: 'c' });
+    const a = makeNode('a', 'text-box', { text: 'a' });
+    const b = makeNode('b', 'text-box', { text: 'b' });
+    const c = makeNode('c', 'text-box', { text: 'c' });
     // a→b→c
     const chainProject = makeProject(
       [a, b, c],
@@ -492,7 +490,7 @@ describe('execution-engine', () => {
 
   describe('runId', () => {
     it('generates a unique runId for each run', async () => {
-      const project = makeProject([makeNode('a', 'text-input', { text: 'x' })]);
+      const project = makeProject([makeNode('a', 'text-box', { text: 'x' })]);
 
       const r1 = await runBlueprint({
         project,
@@ -515,7 +513,7 @@ describe('execution-engine', () => {
 
   describe('elapsed time', () => {
     it('records a non-negative elapsed time', async () => {
-      const project = makeProject([makeNode('a', 'text-input', { text: 'x' })]);
+      const project = makeProject([makeNode('a', 'text-box', { text: 'x' })]);
 
       const result = await runBlueprint({
         project,
@@ -531,8 +529,8 @@ describe('execution-engine', () => {
 
   describe('progress callback', () => {
     it('calls onProgress for each node', async () => {
-      const a = makeNode('a', 'text-input', { text: 'x' });
-      const b = makeNode('b', 'text-input', { text: 'y' });
+      const a = makeNode('a', 'text-box', { text: 'x' });
+      const b = makeNode('b', 'text-box', { text: 'y' });
       const project = makeProject([a, b]);
 
       const progressCalls: Array<{ nodeId: string; progress: number }> = [];
@@ -557,9 +555,9 @@ describe('execution-engine', () => {
 
   describe('diamond graph', () => {
     it('executes a diamond correctly (a→b,a→c,b→d,c→d)', async () => {
-      const a = makeNode('a', 'text-input', { text: 'root' });
-      const b = makeNode('b', 'text-input', { text: 'left' });
-      const c = makeNode('c', 'text-input', { text: 'right' });
+      const a = makeNode('a', 'text-box', { text: 'root' });
+      const b = makeNode('b', 'text-box', { text: 'left' });
+      const c = makeNode('c', 'text-box', { text: 'right' });
       const d = makeNode('d', 'output', { acceptedTypes: ['image'] });
       const project = makeProject(
         [a, b, c, d],
@@ -589,8 +587,8 @@ describe('execution-engine', () => {
 
   describe('no duplicate execution', () => {
     it('each node is executed exactly once', async () => {
-      const a = makeNode('a', 'text-input', { text: 'x' });
-      const b = makeNode('b', 'text-input', { text: 'y' });
+      const a = makeNode('a', 'text-box', { text: 'x' });
+      const b = makeNode('b', 'text-box', { text: 'y' });
       const c = makeNode('c', 'output', { acceptedTypes: ['image'] });
       const project = makeProject(
         [a, b, c],
@@ -624,8 +622,8 @@ describe('execution-engine', () => {
   describe('collectNodeInputSummary', () => {
     it('returns summaries of upstream outputs', () => {
       const nodeMap = new Map<string, BlueprintNode>();
-      nodeMap.set('a', makeNode('a', 'text-input', { text: 'x' }));
-      nodeMap.set('b', makeNode('b', 'image-generator'));
+      nodeMap.set('a', makeNode('a', 'text-box', { text: 'x' }));
+      nodeMap.set('b', makeNode('b', 'image-box'));
 
       const upstreamMap = new Map<string, string[]>();
       upstreamMap.set('a', []);
@@ -637,13 +635,13 @@ describe('execution-engine', () => {
       const summary = collectNodeInputSummary('b', upstreamMap, nodeMap, outputs);
 
       expect(summary).toEqual({
-        'text-input (a)': 'text (5 chars)',
+        'text-box (a)': 'text (5 chars)',
       });
     });
 
     it('returns empty for a root node', () => {
       const nodeMap = new Map<string, BlueprintNode>();
-      nodeMap.set('a', makeNode('a', 'text-input'));
+      nodeMap.set('a', makeNode('a', 'text-box'));
 
       const upstreamMap = new Map<string, string[]>();
       upstreamMap.set('a', []);
@@ -659,10 +657,10 @@ describe('execution-engine', () => {
 
   describe('9.1 image-generator integration', () => {
     it('executes text-input → image-generator → output pipeline', async () => {
-      const textNode = makeNode('txt', 'text-input', { text: 'A cat' });
-      const genNode = makeNode('gen', 'image-generator', {
-        prompt: 'Generate a cat',
-        model: 'flux-v1',
+      const textNode = makeNode('txt', 'text-box', { text: 'A cat' });
+      const genNode = makeNode('gen', 'image-box', {
+        mode: 'generate',
+        generation: { prompt: 'Generate a cat', model: 'flux-v1' },
       });
       const outNode = makeNode('out', 'output', { acceptedTypes: ['image'] });
       const project = makeProject(
@@ -687,9 +685,9 @@ describe('execution-engine', () => {
     });
 
     it('writes image-generator output to node execution state', async () => {
-      const genNode = makeNode('gen', 'image-generator', {
-        prompt: 'A landscape',
-        model: 'test-model',
+      const genNode = makeNode('gen', 'image-box', {
+        mode: 'generate',
+        generation: { prompt: 'A landscape', model: 'test-model' },
       });
       const project = makeProject([genNode]);
 
@@ -718,9 +716,9 @@ describe('execution-engine', () => {
     });
 
     it('passes blueprint projectId through to node executor', async () => {
-      const genNode = makeNode('gen', 'image-generator', {
-        prompt: 'Test project',
-        model: 'test-model',
+      const genNode = makeNode('gen', 'image-box', {
+        mode: 'generate',
+        generation: { prompt: 'Test project', model: 'test-model' },
       });
       const project = makeProject([genNode]);
       project.projectId = 'specific-proj-id';

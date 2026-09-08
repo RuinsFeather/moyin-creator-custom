@@ -107,10 +107,10 @@ export function composeStoryboardToBlueprint(
 
   const node: BlueprintNode = {
     id: generateUUID(),
-    type: "text-input",
+    type: "text-box",
     position: { x: 0, y: 0 }, // 由 store 中心放置
     data: {
-      nodeType: "text-input",
+      nodeType: "text-box",
       label: `分镜 ${ordered.length} 镜`,
       config: { text },
       sourceRef,

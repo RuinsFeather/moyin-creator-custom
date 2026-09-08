@@ -7,8 +7,8 @@ import { ReactFlowProvider } from '@xyflow/react';
 import { useBlueprintStore } from '@/stores/blueprint-store';
 import { BlueprintCanvas } from './BlueprintCanvas';
 import { BlueprintToolbar } from './BlueprintToolbar';
-import { PropertiesPanel } from './PropertiesPanel';
 import { ExecutionMetricsPanel } from './ExecutionMetricsPanel';
+import { BoxConfigDrawer } from './BoxConfigDrawer';
 import { undo, redo } from '@/lib/blueprint/undo-redo';
 import { BlueprintOnboarding } from './BlueprintOnboarding';
 
@@ -26,8 +26,21 @@ export function BlueprintView() {
   const activeProjectId = useBlueprintStore((s) => s.activeProjectId);
   const createBlueprint = useBlueprintStore((s) => s.createBlueprint);
   const setActiveBlueprint = useBlueprintStore((s) => s.setActiveBlueprint);
+  const drawerNodeId = useBlueprintStore((s) => s.drawerNodeId);
+  const openDrawer = useBlueprintStore((s) => s.openDrawer);
 
   const activeBlueprint = blueprints.find((b) => b.id === activeBlueprintId) ?? null;
+
+  // Only generated-media windows use the configuration drawer. Text windows
+  // keep their AI/Skill assistant attached locally to the node.
+  // 抽屉由双击（drawerNodeId）驱动，单击选中（selectedNodeId）不再影响抽屉。
+  const drawerNode = drawerNodeId
+    ? (activeBlueprint?.nodes.find((n) => n.id === drawerNodeId) ?? null)
+    : null;
+  const drawerOpen =
+    drawerNode != null &&
+    (drawerNode.data.nodeType === 'image-box' ||
+      drawerNode.data.nodeType === 'video-box');
   const projectBlueprints = blueprints.filter(
     (b) => b.projectId === activeProjectId && b.status !== 'archived',
   );
@@ -134,20 +147,24 @@ export function BlueprintView() {
           </div>
         </div>
 
-        {/* Toolbar + Canvas + PropertiesPanel */}
-        <div className="flex min-h-0 flex-1">
-          <div className="flex min-w-0 flex-1 flex-col">
-            <BlueprintToolbar />
-            <div className="relative flex-1 overflow-hidden">
-              <BlueprintCanvas />
-              {metricsOpen && (
-                <div className="absolute right-2 top-2 z-10 w-64 rounded-lg border border-border bg-panel/95 p-2 shadow-lg backdrop-blur">
-                  <ExecutionMetricsPanel />
-                </div>
-              )}
-            </div>
+        {/* Toolbar + Canvas (full width, P1-10: PropertiesPanel retired; a BoxConfigDrawer
+            may replace it in P2, gated by selectedNodeId below) */}
+        <div className="flex min-h-0 flex-1 flex-col">
+          <BlueprintToolbar
+            metricsOpen={metricsOpen}
+            onToggleMetrics={() => setMetricsOpen((v) => !v)}
+          />
+          <div className="relative flex-1 overflow-hidden">
+            <BlueprintCanvas />
+            {drawerOpen && drawerNode && (
+              <BoxConfigDrawer key={drawerNode.id} node={drawerNode} onClose={() => openDrawer(null)} />
+            )}
+            {metricsOpen && (
+              <div className="absolute right-2 top-2 z-10 w-64 rounded-lg border border-border bg-panel/95 p-2 shadow-lg backdrop-blur">
+                <ExecutionMetricsPanel />
+              </div>
+            )}
           </div>
-          <PropertiesPanel />
         </div>
       </div>
       <BlueprintOnboarding />

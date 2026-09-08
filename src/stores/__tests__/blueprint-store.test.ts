@@ -26,10 +26,10 @@ const projectA = 'project-a';
 function textNode(id: string): BlueprintNode {
   return {
     id,
-    type: 'text-input',
+    type: 'text-box',
     position: { x: 0, y: 0 },
     data: {
-      nodeType: 'text-input',
+      nodeType: 'text-box',
       label: id,
       config: { text: id },
     },
@@ -70,6 +70,7 @@ describe('blueprint store', () => {
       blueprints: [],
       selectedNodeId: null,
       selectedEdgeId: null,
+      drawerNodeId: null,
       currentRun: null,
       executionLock: false,
       abortController: null,
@@ -96,6 +97,70 @@ describe('blueprint store', () => {
     expect(current?.edges).toHaveLength(1);
     expect(current?.viewport).toEqual({ x: 10, y: 20, zoom: 1.5 });
     expect(state.selectedNodeId).toBe(source.id);
+  });
+
+  it('addNodeInCenter places the node and auto-selects it (P3-8)', () => {
+    useBlueprintStore.getState().setActiveProjectId(projectA);
+    const blueprint = useBlueprintStore.getState().createBlueprint('蓝图 B');
+
+    // Pre-select something else to verify the auto-select overrides it
+    useBlueprintStore.getState().selectNode('some-other-node');
+    expect(useBlueprintStore.getState().selectedNodeId).toBe('some-other-node');
+
+    const node = textNode('center-node');
+    useBlueprintStore.getState().addNodeInCenter(node);
+
+    const state = useBlueprintStore.getState();
+    const current = state.blueprints.find((item) => item.id === blueprint.id);
+    expect(current?.nodes).toHaveLength(1);
+    expect(current?.nodes[0].id).toBe('center-node');
+    // Auto-select + edge deselection (发送后自动选中)
+    expect(state.selectedNodeId).toBe('center-node');
+    expect(state.selectedEdgeId).toBeNull();
+    // 单击选中不驱动抽屉（P2 双击触发交互）
+    expect(state.drawerNodeId).toBeNull();
+  });
+
+  it('openDrawer drives the config drawer independently of selection (双击触发)', () => {
+    useBlueprintStore.getState().setActiveProjectId(projectA);
+    const blueprint = useBlueprintStore.getState().createBlueprint('蓝图 C');
+
+    // 单击选中：selectedNodeId 变化，drawerNodeId 保持 null
+    useBlueprintStore.getState().selectNode('image-node-1');
+    expect(useBlueprintStore.getState().selectedNodeId).toBe('image-node-1');
+    expect(useBlueprintStore.getState().drawerNodeId).toBeNull();
+
+    // 双击图片窗口：打开抽屉，不影响选中状态
+    useBlueprintStore.getState().openDrawer('image-node-1');
+    expect(useBlueprintStore.getState().drawerNodeId).toBe('image-node-1');
+    expect(useBlueprintStore.getState().selectedNodeId).toBe('image-node-1');
+
+    // 双击另一个视频窗口：抽屉切换
+    useBlueprintStore.getState().openDrawer('video-node-1');
+    expect(useBlueprintStore.getState().drawerNodeId).toBe('video-node-1');
+
+    // 关闭抽屉：传 null
+    useBlueprintStore.getState().openDrawer(null);
+    expect(useBlueprintStore.getState().drawerNodeId).toBeNull();
+
+    // 删除抽屉正挂载的节点：抽屉自动关闭
+    useBlueprintStore.getState().openDrawer('image-node-1');
+    useBlueprintStore.getState().removeNode('image-node-1');
+    expect(useBlueprintStore.getState().drawerNodeId).toBeNull();
+    const current = useBlueprintStore.getState().blueprints.find(
+      (item) => item.id === blueprint.id,
+    );
+    expect(current?.nodes).toHaveLength(0);
+  });
+
+  it('drawerNodeId is runtime-only and not persisted', () => {
+    useBlueprintStore.getState().setActiveProjectId(projectA);
+    useBlueprintStore.getState().createBlueprint();
+    useBlueprintStore.getState().openDrawer('some-node');
+    expect(useBlueprintStore.getState().drawerNodeId).toBe('some-node');
+
+    const persisted = partializeBlueprintStore(useBlueprintStore.getState());
+    expect(persisted).not.toHaveProperty('drawerNodeId');
   });
 
   it('removes connected edges when removing a node', () => {
@@ -199,10 +264,10 @@ describe('blueprint store', () => {
     ): BlueprintNode {
       return {
         id,
-        type: 'video-generator',
+        type: 'video-box',
         position: { x: 0, y: 0 },
         data: {
-          nodeType: 'video-generator',
+          nodeType: 'video-box',
           label: `video (${id})`,
           config: { prompt: 'test prompt' },
           ...(execution ? { execution } : {}),

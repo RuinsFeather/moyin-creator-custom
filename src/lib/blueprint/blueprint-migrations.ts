@@ -9,8 +9,9 @@ import {
   type BlueprintNode,
   type BlueprintEdge,
   type BlueprintNodeType,
+  type BlueprintMediaRef,
 } from '@/types/blueprint';
-import { isBlueprintNodeType } from './blueprint-schema';
+import { isBlueprintNodeType, isLegacyBlueprintNodeType } from './blueprint-schema';
 
 // ─── Persisted types ────────────────────────────────────────────
 
@@ -42,8 +43,12 @@ function defaultNodeData(nodeType: BlueprintNodeType) {
     label: nodeType,
     config: {},
   };
-  if (nodeType === 'text-input') {
+  if (nodeType === 'text-box') {
     base.config = { text: '' };
+  } else if (nodeType === 'image-box') {
+    base.config = { mode: 'upload', media: [] };
+  } else if (nodeType === 'video-box') {
+    base.config = { mode: 'upload', media: [] };
   } else if (nodeType === 'script-import') {
     base.config = { selectedShotIds: [], mode: 'snapshot' };
   } else if (nodeType === 'output') {
@@ -55,25 +60,106 @@ function defaultNodeData(nodeType: BlueprintNodeType) {
 // ─── Per-node migration ─────────────────────────────────────────
 
 /**
+ * Map a legacy (v1) node type to its v2 equivalent.
+ * Returns the input unchanged if it's already a v2 type.
+ */
+function mapLegacyNodeType(rawType: string): BlueprintNodeType {
+  switch (rawType) {
+    case 'text-input':
+      return 'text-box';
+    case 'image-reference':
+    case 'image-generator':
+      return 'image-box';
+    case 'video-reference':
+    case 'video-generator':
+      return 'video-box';
+    case 'script-import':
+    case 'output':
+      return rawType as BlueprintNodeType;
+    default:
+      return isBlueprintNodeType(rawType) ? rawType : 'text-box';
+  }
+}
+
+/**
+ * Migrate a v1 node's config to v2 format based on the legacy type.
+ */
+function migrateNodeConfig(
+  legacyType: string,
+  config: Record<string, unknown>,
+  output: unknown,
+): Record<string, unknown> {
+  switch (legacyType) {
+    case 'text-input':
+      // text-input → text-box: config is compatible as-is, ensure text field
+      return { text: '', ...config };
+    case 'image-reference':
+      // image-reference → image-box (upload mode)
+      return {
+        mode: 'upload',
+        media: Array.isArray(config.media) ? config.media : [],
+      };
+    case 'image-generator':
+      // image-generator → image-box (generate mode)
+      return {
+        mode: 'generate',
+        media: output
+          ? (Array.isArray(output) ? output : [output]).filter(
+              (r): r is BlueprintMediaRef =>
+                typeof r === 'object' && r !== null && 'url' in r,
+            )
+          : [],
+        generation: { ...config },
+      };
+    case 'video-reference':
+      // video-reference → video-box (upload mode)
+      return {
+        mode: 'upload',
+        media: Array.isArray(config.media) ? config.media : [],
+      };
+    case 'video-generator':
+      // video-generator → video-box (generate mode)
+      return {
+        mode: 'generate',
+        media: output
+          ? (Array.isArray(output) ? output : [output]).filter(
+              (r): r is BlueprintMediaRef =>
+                typeof r === 'object' && r !== null && 'url' in r,
+            )
+          : [],
+        generation: { ...config },
+      };
+    default:
+      return config;
+  }
+}
+
+/**
  * Normalize a single blueprint node, ensuring all required data fields exist.
- * Invalid nodeTypes fall back to 'text-input' to preserve the node in the graph.
+ * Invalid nodeTypes fall back to 'text-box' to preserve the node in the graph.
+ * Legacy v1 types are mapped to v2 types with config migration.
  */
 export function migrateBlueprintNode(node: unknown): BlueprintNode {
   if (!node || typeof node !== 'object') {
     return {
       id: 'unknown',
-      type: 'text-input',
+      type: 'text-box',
       position: { x: 0, y: 0 },
-      data: defaultNodeData('text-input') as BlueprintNode['data'],
+      data: defaultNodeData('text-box') as BlueprintNode['data'],
     };
   }
 
   const n = node as Record<string, unknown>;
   const id = typeof n.id === 'string' ? n.id : 'unknown';
-  const rawType = typeof n.type === 'string' ? n.type : 'text-input';
-  const nodeType: BlueprintNodeType = isBlueprintNodeType(rawType)
-    ? rawType
-    : 'text-input';
+  const rawType = typeof n.type === 'string' ? n.type : 'text-box';
+
+  // Map legacy types to v2 types
+  const nodeType: BlueprintNodeType = isLegacyBlueprintNodeType(rawType)
+    ? mapLegacyNodeType(rawType)
+    : isBlueprintNodeType(rawType)
+      ? rawType
+      : 'text-box';
+
   const position =
     n.position && typeof n.position === 'object'
       ? {
@@ -89,6 +175,15 @@ export function migrateBlueprintNode(node: unknown): BlueprintNode {
   // Normalize data
   const rawData = n.data && typeof n.data === 'object' ? (n.data as Record<string, unknown>) : {};
   const data: Record<string, unknown> = { ...rawData };
+
+  // Migrate config if this is a legacy type
+  const rawConfig =
+    data.config && typeof data.config === 'object'
+      ? (data.config as Record<string, unknown>)
+      : {};
+  if (isLegacyBlueprintNodeType(rawType)) {
+    data.config = migrateNodeConfig(rawType, rawConfig, data.output);
+  }
 
   if (typeof data.nodeType !== 'string' || !isBlueprintNodeType(data.nodeType)) {
     data.nodeType = nodeType;
@@ -247,14 +342,58 @@ function applyVersionMigrations(
 ): BlueprintProject {
   let migrated = doc;
 
-  // Example: when v2 is introduced, add here:
-  // if (fromVersion < 2) {
-  //   migrated = { ...migrated, metadata: migrated.metadata ?? {} };
-  // }
+  // v1 → v2: legacy types are already handled by migrateBlueprintNode
+  // (type mapping + config migration). Here we do a post-pass to spread
+  // overlapping nodes caused by the larger v2 box dimensions.
+  if (fromVersion < 2) {
+    migrated = spreadOverlappingNodes(migrated);
+  }
 
   // Always stamp to current version
   migrated = { ...migrated, version: BLUEPRINT_SCHEMA_VERSION };
   return migrated;
+}
+
+/**
+ * Spread nodes that may overlap due to v1→v2 dimension changes.
+ * Groups by node type and offsets each node by y+40 within its group.
+ */
+function spreadOverlappingNodes(doc: BlueprintProject): BlueprintProject {
+  // Build a position fingerprint map to detect exact overlaps
+  const posCount = new Map<string, number>();
+  for (const node of doc.nodes) {
+    const key = `${Math.round(node.position.x)},${Math.round(node.position.y)}`;
+    posCount.set(key, (posCount.get(key) ?? 0) + 1);
+  }
+
+  // If no overlaps, return unchanged
+  let hasOverlaps = false;
+  for (const count of posCount.values()) {
+    if (count > 1) { hasOverlaps = true; break; }
+  }
+  if (!hasOverlaps) return doc;
+
+  // Spread overlapping nodes by offsetting y within same-type groups
+  const seen = new Map<string, number>();
+  const nodes = doc.nodes.map((node) => {
+    const key = `${Math.round(node.position.x)},${Math.round(node.position.y)}`;
+    const count = posCount.get(key) ?? 0;
+    if (count <= 1) return node;
+
+    const groupKey = `${node.data.nodeType}:${key}`;
+    const idx = seen.get(groupKey) ?? 0;
+    seen.set(groupKey, idx + 1);
+
+    return {
+      ...node,
+      position: {
+        ...node.position,
+        y: node.position.y + idx * 40,
+      },
+    };
+  });
+
+  return { ...doc, nodes };
 }
 
 // ─── Top-level migration entry point ────────────────────────────

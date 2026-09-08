@@ -8,10 +8,9 @@ import type {
   BlueprintNode,
   BlueprintNodeData,
   MediaReferenceNodeConfig,
-  BlueprintMediaRef,
 } from '@/types/blueprint';
 import { useBlueprintStore } from '@/stores/blueprint-store';
-import { generateUUID } from '@/lib/utils';
+import { persistFilesAsRefs } from '@/lib/blueprint/blueprint-media';
 import {
   NodeCard,
   NodeLabel,
@@ -36,17 +35,14 @@ function ImageReferenceNodeComponent({
   const statusColor = getNodeStatusColor(execution?.status);
   const mediaItems = Array.isArray(config.media) ? config.media : [];
 
+  // 拖放/点选本地文件 → 持久化 local-image:// 引用。
+  // 旧实现用 blob: URL（仅会话内有效，重载后失效且无法上传）。
   const handleFiles = useCallback(
     (files: File[]) => {
-      // Create object URLs for preview. The actual upload happens at execution time.
-      const newMedia: BlueprintMediaRef[] = files.map((file) => ({
-        url: URL.createObjectURL(file),
-        localPath: file.name, // Store filename for display; actual path resolved later
-        mimeType: file.type,
-        dedupeKey: generateUUID(),
-      }));
-      updateNode(id, {
-        config: { ...config, media: [...mediaItems, ...newMedia] },
+      void persistFilesAsRefs(files).then((newMedia) => {
+        updateNode(id, {
+          config: { ...config, media: [...mediaItems, ...newMedia] },
+        });
       });
     },
     [id, config, mediaItems, updateNode],

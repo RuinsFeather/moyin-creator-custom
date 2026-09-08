@@ -7,8 +7,8 @@
  *
  * Converts `ScriptProjectData.shots` (Shot[]) into blueprint node groups.
  * Each shot becomes a set of connected nodes:
- *   text-input (prompt) → image-generator → output
-n *   script-import (context) → image-generator
+ *   text-box (prompt) → image-box
+ *   script-import (context) → image-box
  *
  * Supports creating preview from selected shots or the full shot list.
  *
@@ -32,7 +32,6 @@ import type {
   BlueprintImageGeneratorConfig,
   TextInputNodeConfig,
   ScriptImportNodeConfig,
-  OutputNodeConfig,
   MediaReferenceNodeConfig,
 } from '@/types/blueprint';
 import type { Shot } from '@/types/script';
@@ -165,13 +164,11 @@ function generateConversionDiagnostics(
  * Convert script shots into a blueprint graph.
  *
  * Each shot generates a node group:
- * 1. `text-input` — the shot's image/video prompt
+ * 1. `text-box` — the shot's image/video prompt
  * 2. `script-import` — context reference linking back to the shot
- * 3. `image-generator` — connects to text-input + script-import
- * 4. `output` — collects the generated image
+ * 3. `image-box` — connects to text-box + script-import (when prompt available)
  *
  * When a shot has no usable prompt, only a script-import node is created
- * (no generator or output), and the shot is still tracked in the result.
  */
 export function convertScriptToBlueprint(
   options: ConvertScriptToBlueprintOptions,
@@ -224,15 +221,15 @@ export function convertScriptToBlueprint(
     const prompt = resolveShotPrompt(shot);
     const sourceRef = makeShotSourceRef(shot, sourceVersion);
 
-    // 1. Text-input node for the prompt
+    // 1. Text-box node for the prompt
     const textInputId = generateUUID();
     const textConfig: TextInputNodeConfig = { text: prompt };
     nodes.push({
       id: textInputId,
-      type: 'text-input',
+      type: 'text-box',
       position: { x: 0, y: yOffset },
       data: {
-        nodeType: 'text-input',
+        nodeType: 'text-box',
         label: `镜头 ${shot.index + 1} 提示词`,
         config: textConfig,
         sourceRef,
@@ -258,41 +255,27 @@ export function convertScriptToBlueprint(
     });
 
     if (prompt) {
-      // 3. Image-generator node
+      // 3. Image-box node (generate mode)
       const generatorId = generateUUID();
       const genConfig: BlueprintImageGeneratorConfig = {
         prompt: '',
       };
       nodes.push({
         id: generatorId,
-        type: 'image-generator',
+        type: 'image-box',
         position: { x: X_SPACING, y: yOffset },
         data: {
-          nodeType: 'image-generator',
+          nodeType: 'image-box',
           label: `镜头 ${shot.index + 1} 生成`,
-          config: genConfig,
+          config: {
+            media: [],
+            generation: genConfig,
+          },
           sourceRef,
         },
       });
 
-      // 4. Output node
-      const outputId = generateUUID();
-      const outConfig: OutputNodeConfig = {
-        acceptedTypes: ['image'],
-      };
-      nodes.push({
-        id: outputId,
-        type: 'output',
-        position: { x: X_SPACING * 2, y: yOffset },
-        data: {
-          nodeType: 'output',
-          label: `镜头 ${shot.index + 1} 输出`,
-          config: outConfig,
-          sourceRef,
-        },
-      });
-
-      // Edges: text-input → image-generator (prompt port)
+      // Edges: text-box → image-box (prompt port)
       edges.push({
         id: generateUUID(),
         source: textInputId,
@@ -303,7 +286,7 @@ export function convertScriptToBlueprint(
         data: { dataType: 'text' },
       });
 
-      // Edges: script-import → image-generator (prompt port, for context)
+      // Edges: script-import → image-box (prompt port, for context)
       edges.push({
         id: generateUUID(),
         source: scriptImportId,
@@ -312,17 +295,6 @@ export function convertScriptToBlueprint(
         targetHandle: 'prompt',
         type: 'blueprint',
         data: { dataType: 'context' },
-      });
-
-      // Edges: image-generator → output
-      edges.push({
-        id: generateUUID(),
-        source: generatorId,
-        target: outputId,
-        sourceHandle: 'image',
-        targetHandle: 'media',
-        type: 'blueprint',
-        data: { dataType: 'image' },
       });
     }
 
@@ -389,8 +361,8 @@ export function previewScriptToBlueprint(
     }
   }
 
-  // Each shot with a prompt generates 4 nodes; without prompt, 2 nodes
-  const nodeCount = hasPrompts * 4 + missingPrompts * 2;
+  // Each shot with a prompt generates 3 nodes; without prompt, 2 nodes
+  const nodeCount = hasPrompts * 3 + missingPrompts * 2;
 
   // Generate diagnostics for preview
   const diagnostics = generateConversionDiagnostics(

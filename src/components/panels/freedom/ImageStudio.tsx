@@ -19,6 +19,7 @@ import { useFreedomStore } from '@/stores/freedom-store';
 import { useFreedomHistoryStore, type HistoryEntry } from '@/stores/freedom-history-store';
 import { useProjectStore } from '@/stores/project-store';
 import { ModelSelector } from './ModelSelector';
+import { GenParamControls, IMAGE_DEFAULT_ASPECT_RATIOS as DEFAULT_ASPECT_RATIOS, IMAGE_DEFAULT_RESOLUTIONS as DEFAULT_RESOLUTIONS } from './shared/GenParamControls';
 import { GenerationHistory } from './GenerationHistory';
 import { ActiveTaskCard, formatElapsed } from './ActiveTaskCard';
 import { SaveToPropsDialog } from './SaveToPropsDialog';
@@ -28,8 +29,6 @@ import {
   getAspectRatiosForT2IModel,
 } from '@/lib/freedom/model-registry';
 
-const DEFAULT_ASPECT_RATIOS = ['auto', '1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16', '21:9'];
-const DEFAULT_RESOLUTIONS = ['1K', '2K', '4K'];
 const MAX_REFERENCE_IMAGES = 10;
 const DEFAULT_MIDJOURNEY_SPEED = 'relaxed';
 const DEFAULT_MIDJOURNEY_STYLIZATION = 100;
@@ -467,38 +466,16 @@ export function ImageStudio() {
               )}
             </div>
 
-            {/* Aspect Ratio */}
-            <div className="space-y-2">
-              <Label className="text-sm font-medium">宽高比</Label>
-              <div className="flex flex-wrap gap-1.5">
-                {aspectRatios.map((ratio) => (
-                  <Button
-                    key={ratio}
-                    variant={imageAspectRatio === ratio ? 'default' : 'outline'}
-                    size="sm"
-                    className="h-7 text-xs px-2.5"
-                    onClick={() => setImageAspectRatio(ratio)}
-                  >
-                    {ratio}
-                  </Button>
-                ))}
-              </div>
-            </div>
-
-            {/* Resolution */}
-            <div className="space-y-2">
-              <Label className="text-sm font-medium">分辨率</Label>
-              <Select value={imageResolution || ''} onValueChange={setImageResolution}>
-                <SelectTrigger className="h-9">
-                  <SelectValue placeholder="选择分辨率（可选）" />
-                </SelectTrigger>
-                <SelectContent>
-                  {resolutions.map((r) => (
-                    <SelectItem key={r} value={String(r)}>{String(r)}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            {/* Aspect Ratio + Resolution (shared GenParamControls) */}
+            <GenParamControls
+              kind="image"
+              model={selectedImageModel}
+              aspectRatio={imageAspectRatio}
+              onAspectRatioChange={setImageAspectRatio}
+              resolution={imageResolution}
+              onResolutionChange={setImageResolution}
+              groupClassName="space-y-5"
+            />
 
             {/* Midjourney Params */}
             {hasMidjourneyParams && (

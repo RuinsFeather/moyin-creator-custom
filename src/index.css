@@ -260,3 +260,20 @@
   background-color: hsl(var(--timeline-effect) / 0.2);
   border-left: 3px solid hsl(var(--timeline-effect));
 }
+
+/* Blueprint canvas: connection-drag port highlighting (§2.3 / P1-7).
+   Applied via `blueprint-canvas-connecting` on the canvas container while
+   the user is dragging a connection from a handle. React Flow already
+   marks compatible handles with `.connectionindicator` and the handle
+   being dragged from with `.connectingfrom` / `.connectingto`; we boost
+   their visual weight here so "finding the port" is easier. */
+.blueprint-canvas-connecting .react-flow__handle.connectionindicator {
+  transform: scale(1.35);
+  box-shadow: 0 0 0 3px hsl(var(--primary) / 0.35);
+}
+.blueprint-canvas-connecting .react-flow__handle.connectingfrom {
+  box-shadow: 0 0 0 3px hsl(var(--primary) / 0.5);
+}
+.blueprint-canvas-connecting .react-flow__handle.valid {
+  box-shadow: 0 0 0 3px hsl(var(--success) / 0.5);
+}

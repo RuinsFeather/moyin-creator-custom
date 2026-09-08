@@ -18,6 +18,7 @@ import {
   NodeTextarea,
   NodeInfoRow,
   NodeProgress,
+  NodeRunningOverlay,
   NodeError,
   getNodeStatusColor,
 } from './NodeUI';
@@ -47,6 +48,7 @@ function VideoGeneratorNodeComponent({
   const execution = nodeData.execution;
   const selectNode = useBlueprintStore((s) => s.selectNode);
   const updateNode = useBlueprintStore((s) => s.updateNode);
+  const cancelRun = useBlueprintStore((s) => s.cancelRun);
 
   const statusColor = getNodeStatusColor(execution?.status);
   const progress = execution?.progress;
@@ -64,6 +66,16 @@ function VideoGeneratorNodeComponent({
 
   return (
     <NodeCard selected={selected} statusColor={statusColor}>
+      {/* Running overlay：进度 + 取消（叠加在窗口上方，风格对齐自由页工作室） */}
+      {execution?.status === 'running' && (
+        <NodeRunningOverlay
+          progress={progress ?? 0}
+          onCancel={cancelRun}
+          label="视频生成中"
+          testId="node-running-overlay"
+        />
+      )}
+
       <NodeLabel icon="🎥" label={nodeData.label}>
         <button
           className="nodrag ml-auto text-[9px] text-muted-foreground hover:text-foreground"

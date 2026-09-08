@@ -28,9 +28,9 @@ const PROJECT = 'proj-1';
 function textNode(id: string, text = 'hello'): BlueprintNode {
   return {
     id,
-    type: 'text-input',
+    type: 'text-box',
     position: { x: 0, y: 0 },
-    data: { nodeType: 'text-input', label: id, config: { text } },
+    data: { nodeType: 'text-box', label: id, config: { text } },
   };
 }
 
@@ -63,6 +63,7 @@ function setupStore() {
     blueprints: [],
     selectedNodeId: null,
     selectedEdgeId: null,
+    drawerNodeId: null,
     currentRun: null,
     executionLock: false,
     abortController: null,

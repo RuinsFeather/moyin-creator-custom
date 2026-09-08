@@ -82,8 +82,8 @@ describe("composeStoryboardToBlueprint", () => {
     expect(result.text).toContain("**镜头1：**");
     expect(result.text).toContain("**镜头2：**");
     // 节点类型
-    expect(result.node.type).toBe("text-input");
-    expect(result.node.data.nodeType).toBe("text-input");
+    expect(result.node.type).toBe("text-box");
+    expect(result.node.data.nodeType).toBe("text-box");
     expect((result.node.data.config as { text: string }).text).toBe(result.text);
     // 来源追踪
     expect(result.shotIds).toEqual(["s1", "s2"]);
@@ -119,5 +119,24 @@ describe("composeStoryboardToBlueprint", () => {
     expect(result.text.match(/角色1<洛蓝>/g)).toHaveLength(1);
     // 场景名只出现在场景标题行一次（镜头块不重复场景）
     expect((result.text.match(/咖啡馆/g) || []).length).toBe(1);
+  });
+
+  it("attaches sourceRef (kind=shot) to the node for provenance tracking", () => {
+    const shot = makeShot({ id: "s9" });
+    const result = composeStoryboardToBlueprint({
+      shots: [shot],
+      sourceRef: { kind: "shot", id: "s9", sourceVersion: "v-3" },
+    });
+    expect(result.node.data.sourceRef).toEqual({
+      kind: "shot",
+      id: "s9",
+      sourceVersion: "v-3",
+    });
+  });
+
+  it("defaults sourceRef to undefined when not provided", () => {
+    const shot = makeShot({ id: "s10" });
+    const result = composeStoryboardToBlueprint({ shots: [shot] });
+    expect(result.node.data.sourceRef).toBeUndefined();
   });
 });

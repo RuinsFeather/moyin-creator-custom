@@ -37,7 +37,7 @@ import { generateFreedomImage, generateFreedomVideo } from '@/lib/freedom/freedo
 
 function makeNode(
   id: string,
-  nodeType: BlueprintNode['data']['nodeType'] = 'text-input',
+  nodeType: string = 'text-box',
   config: Record<string, unknown> = {},
 ): BlueprintNode {
   return {
@@ -49,7 +49,7 @@ function makeNode(
       label: nodeType + ' (' + id + ')',
       config,
     },
-  } as BlueprintNode;
+  } as unknown as BlueprintNode;
 }
 
 function makeCtx(
@@ -57,7 +57,8 @@ function makeCtx(
   upstreamOutputs: Map<string, NodeExecutorOutput> = new Map(),
   projectId = 'test-project-123',
 ): NodeExecutionContext {
-  const targetHandle = node.data.nodeType === 'video-generator' ? 'media' : 'reference-images';
+  const nodeType = node.data.nodeType as string;
+  const targetHandle = (nodeType === 'video-generator' || nodeType === 'video-box') ? 'media' : 'reference-images';
   const edges: BlueprintEdge[] = [...upstreamOutputs.keys()].map((source, index) => ({
     id: `edge-${source}-${node.id}`,
     source,
@@ -86,15 +87,20 @@ describe('node-executors', () => {
   // ── Registry completeness ──────────────────────────────────────
 
   describe('NODE_EXECUTORS registry', () => {
-    it('has executors for all 7 node types', () => {
+    it('has executors for all node types (v2 + legacy)', () => {
       const expectedTypes = [
+        // v2 types
+        'text-box',
+        'image-box',
+        'video-box',
+        'script-import',
+        'output',
+        // Legacy types
         'text-input',
         'image-reference',
         'video-reference',
-        'script-import',
         'image-generator',
         'video-generator',
-        'output',
       ];
       for (const type of expectedTypes) {
         expect(NODE_EXECUTORS[type]).toBeDefined();
@@ -541,6 +547,186 @@ describe('node-executors', () => {
       const result = await NODE_EXECUTORS['output'](ctx);
       const refs = result.data as Array<{ url: string }>;
       expect(refs).toHaveLength(1);
+    });
+  });
+
+  // ── P3: box adapters — generation delegation & reference merge ──
+
+  describe('image-box generation adapter', () => {
+    it('passes through media[] when no generation config (import window)', async () => {
+      const node = makeNode('ib', 'image-box', {
+        media: [
+          { url: 'http://example.com/a.png', mimeType: 'image/png' },
+          { url: 'http://example.com/b.png', mimeType: 'image/png' },
+        ],
+      });
+      const result = await NODE_EXECUTORS['image-box'](makeCtx(node));
+      expect(Array.isArray(result.data)).toBe(true);
+      const refs = result.data as Array<{ url: string }>;
+      expect(refs).toHaveLength(2);
+      expect(refs[0].url).toContain('a.png');
+      expect(generateFreedomImage).not.toHaveBeenCalled();
+    });
+
+    it('delegates to image generation when generation config present', async () => {
+      const node = makeNode('ib', 'image-box', {
+        generation: { prompt: 'A cat' },
+      });
+      const result = await NODE_EXECUTORS['image-box'](makeCtx(node));
+      expect(generateFreedomImage).toHaveBeenCalledTimes(1);
+      expect(result.data).toMatchObject({ url: 'https://example.com/generated-image.png' });
+    });
+
+    it('merges manual referenceImageRefs after upstream references', async () => {
+      const node = makeNode('ib', 'image-box', {
+        generation: { prompt: 'A cat' },
+        referenceImageRefs: [
+          { url: 'http://example.com/manual.png', mimeType: 'image/png' },
+        ],
+      });
+      const upstreamOutputs = new Map<string, NodeExecutorOutput>();
+      upstreamOutputs.set('up-img', {
+        data: { url: 'http://example.com/upstream.png', mimeType: 'image/png' },
+        summary: 'image',
+      });
+      const ctx = makeCtx(node, upstreamOutputs);
+      await NODE_EXECUTORS['image-box'](ctx);
+
+      const callArgs = (generateFreedomImage as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(callArgs.referenceImages).toEqual([
+        'http://example.com/upstream.png',
+        'http://example.com/manual.png',
+      ]);
+    });
+  });
+
+  describe('video-box generation adapter', () => {
+    it('passes through media[] when no generation config (import window)', async () => {
+      const node = makeNode('vb', 'video-box', {
+        media: [{ url: 'http://example.com/v.mp4', mimeType: 'video/mp4' }],
+      });
+      const result = await NODE_EXECUTORS['video-box'](makeCtx(node));
+      expect(Array.isArray(result.data)).toBe(true);
+      expect((result.data as Array<{ url: string }>)[0].url).toContain('v.mp4');
+      expect(generateFreedomVideo).not.toHaveBeenCalled();
+    });
+
+    it('maps webSearch config to FreedomVideoParams.tools', async () => {
+      const node = makeNode('vb', 'video-box', {
+        generation: { prompt: 'Test video', webSearch: true },
+      });
+      await NODE_EXECUTORS['video-box'](makeCtx(node));
+      const callArgs = (generateFreedomVideo as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(callArgs.tools).toEqual([{ type: 'web_search' }]);
+    });
+
+    it('omits tools when webSearch is disabled', async () => {
+      const node = makeNode('vb', 'video-box', {
+        generation: { prompt: 'Test video', webSearch: false },
+      });
+      await NODE_EXECUTORS['video-box'](makeCtx(node));
+      const callArgs = (generateFreedomVideo as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(callArgs.tools).toBeUndefined();
+    });
+
+    it('applies edgeReferenceRoles overrides to upstream upload files', async () => {
+      const node = makeNode('vb', 'video-box', {
+        generation: {
+          prompt: 'Test video',
+          edgeReferenceRoles: { 'edge-ref-up': 'last' },
+        },
+      });
+      const upstreamOutputs = new Map<string, NodeExecutorOutput>();
+      upstreamOutputs.set('up-img', {
+        data: { url: 'http://example.com/frame.png', mimeType: 'image/png' },
+        summary: 'image',
+      });
+      // Build edges with the real port handle id ('reference-media') so
+      // rankEdges matches the edge for role override.
+      const ctx: NodeExecutionContext = {
+        node,
+        upstreamOutputs,
+        edges: [
+          {
+            id: 'edge-ref-up',
+            source: 'up-img',
+            target: 'vb',
+            targetHandle: 'reference-media',
+            data: { order: 0, dataType: 'image' },
+          },
+        ],
+        config: node.data.config,
+        signal: new AbortController().signal,
+        projectId: 'test-project-123',
+      };
+      await NODE_EXECUTORS['video-box'](ctx);
+
+      const callArgs = (generateFreedomVideo as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(callArgs.uploadFiles).toHaveLength(1);
+      expect(callArgs.uploadFiles[0].role).toBe('last');
+      expect(callArgs.uploadFiles[0].dataUrl).toContain('frame.png');
+    });
+
+    it('passes an upstream Volc asset to video generation as an Asset reference', async () => {
+      const node = makeNode('vb', 'video-box', {
+        generation: {
+          prompt: 'Animate the reference image',
+          model: 'doubao-seedance-2-0-pro-260128',
+        },
+      });
+      const upstreamOutputs = new Map<string, NodeExecutorOutput>();
+      upstreamOutputs.set('asset-image', {
+        data: {
+          url: 'local-image://volc-assets/thumbnail.png',
+          mimeType: 'image/png',
+          assetId: 'Asset-2026-video-ref',
+          volcAssetUri: 'Asset://Asset-2026-video-ref',
+        },
+        summary: 'asset image',
+      });
+      const ctx: NodeExecutionContext = {
+        node,
+        upstreamOutputs,
+        edges: [{
+          id: 'edge-asset-video',
+          source: 'asset-image',
+          target: 'vb',
+          targetHandle: 'reference-media',
+          data: { order: 0, dataType: 'image' },
+        }],
+        config: node.data.config,
+        signal: new AbortController().signal,
+        projectId: 'test-project-123',
+      };
+
+      await NODE_EXECUTORS['video-box'](ctx);
+
+      const callArgs = (generateFreedomVideo as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(callArgs.uploadFiles).toEqual([
+        expect.objectContaining({
+          role: 'reference',
+          assetType: 'image',
+          volcAssetUri: 'Asset://Asset-2026-video-ref',
+        }),
+      ]);
+    });
+
+    it('throws seedance reference-count error before submit', async () => {
+      // Seedance models limit image references; exceed with manual refs.
+      const node = makeNode('vb', 'video-box', {
+        generation: {
+          prompt: 'Test video',
+          model: 'seedance-1.0-pro',
+          referenceMediaRefs: Array.from({ length: 12 }, (_, i) => ({
+            url: `http://example.com/r${i}.png`,
+            mimeType: 'image/png',
+            assetType: 'image' as const,
+            role: 'reference' as const,
+          })),
+        },
+      });
+      await expect(NODE_EXECUTORS['video-box'](makeCtx(node))).rejects.toThrow();
+      expect(generateFreedomVideo).not.toHaveBeenCalled();
     });
   });
 });

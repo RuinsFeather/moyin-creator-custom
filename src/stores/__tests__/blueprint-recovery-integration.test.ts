@@ -43,10 +43,10 @@ function videoNode(
 ): BlueprintNode {
   return {
     id,
-    type: 'video-generator',
+    type: 'video-box',
     position: { x: 0, y: 0 },
     data: {
-      nodeType: 'video-generator',
+      nodeType: 'video-box',
       label: `video (${id})`,
       config: { prompt: 'test prompt' },
       ...(execution ? { execution } : {}),
@@ -72,6 +72,7 @@ describe('§12.3 视频任务网络中断与幂等恢复（integration）', () =
       blueprints: [],
       selectedNodeId: null,
       selectedEdgeId: null,
+      drawerNodeId: null,
       currentRun: null,
       executionLock: false,
       abortController: null,

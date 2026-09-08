@@ -187,12 +187,18 @@ export function collectReferenceImages(
 /**
  * Collect reference images as `BlueprintMediaRef[]` for persistence.
  * Same ordering as `collectReferenceImages` but returns full refs.
+ *
+ * Inline `configRefs` (manually added references from the box config,
+ * e.g. `ImageBoxConfig.referenceImageRefs`) are appended after upstream
+ * outputs — manual references are lower priority than connected ones.
+ * The combined list is capped at `maxCount` (default 10).
  */
 export function collectReferenceImageRefs(
   nodeId: string,
   edges: BlueprintEdge[],
   upstreamOutputs: Map<string, NodeExecutorOutput>,
   maxCount = 10,
+  configRefs?: BlueprintMediaRef[],
 ): BlueprintMediaRef[] {
   const imageSources = new Set<string>();
   for (const [id, output] of upstreamOutputs) {
@@ -222,6 +228,7 @@ export function collectReferenceImageRefs(
           refs.push({
             url: item.url,
             mimeType: (item as { mimeType?: string }).mimeType,
+            volcAssetUri: (item as { volcAssetUri?: string }).volcAssetUri,
           });
         }
       }
@@ -231,8 +238,18 @@ export function collectReferenceImageRefs(
       'url' in output.data &&
       typeof (output.data as { url: string }).url === 'string'
     ) {
-      const d = output.data as { url: string; mimeType?: string };
-      refs.push({ url: d.url, mimeType: d.mimeType });
+      const d = output.data as { url: string; mimeType?: string; volcAssetUri?: string };
+      refs.push({ url: d.url, mimeType: d.mimeType, volcAssetUri: d.volcAssetUri });
+    }
+  }
+
+  // Append inline manual references from config (after upstream, capped).
+  if (configRefs) {
+    for (const ref of configRefs) {
+      if (refs.length >= maxCount) break;
+      if (ref && typeof ref === 'object' && typeof ref.url === 'string') {
+        refs.push(ref);
+      }
     }
   }
 
@@ -245,6 +262,9 @@ export function collectReferenceImageRefs(
  * Collect upstream media and map to `uploadFiles` roles for video generation.
  *
  * Role assignment logic:
+ *   - If an edge has an explicit role in `edgeReferenceRoles` (keyed by edge ID,
+ *     e.g. `BlueprintVideoGeneratorConfig.edgeReferenceRoles`), it overrides
+ *     the default inference for that edge's items.
  *   - If a `BlueprintVideoReference` has an explicit `role`, use it.
  *   - If the upstream is from the `reference-media` port:
  *     - A single image with no explicit role → `'first'` (first frame).
@@ -259,6 +279,7 @@ export function collectVideoUploadFiles(
   edges: BlueprintEdge[],
   upstreamOutputs: Map<string, NodeExecutorOutput>,
   configRefMedia?: BlueprintVideoReference[],
+  edgeRoles?: Record<string, ResolvedVideoUploadFile['role']>,
 ): ResolvedVideoUploadFile[] {
   const mediaSources = new Set<string>();
   for (const [id, output] of upstreamOutputs) {
@@ -276,7 +297,7 @@ export function collectVideoUploadFiles(
   const ranked = rankEdges(nodeId, 'reference-media', edges, mediaSources);
   const files: ResolvedVideoUploadFile[] = [];
 
-  for (const { source } of ranked) {
+  for (const { source, edgeId } of ranked) {
     const output = upstreamOutputs.get(source);
     if (!output) continue;
 
@@ -303,10 +324,18 @@ export function collectVideoUploadFiles(
       items.push({ url: d.url, mimeType: d.mimeType, role: d.role, volcAssetUri: d.volcAssetUri });
     }
 
+    // Edge-level role assignment overrides per-item roles and default inference.
+    const edgeRole = edgeRoles?.[edgeId];
+
     if (items.length === 1) {
       const item = items[0];
+      // 素材库资产与「自由 / 视频工作室」保持一致：Asset:// 引用属于
+      // 多参考素材，不应被单图默认规则误判成 first_frame。
+      // 显式连线角色或素材自身角色仍拥有更高优先级。
+      const defaultRole: ResolvedVideoUploadFile['role'] =
+        item.volcAssetUri ? 'reference' : 'first';
       files.push({
-        role: (item.role as ResolvedVideoUploadFile['role']) ?? 'first',
+        role: edgeRole ?? (item.role as ResolvedVideoUploadFile['role']) ?? defaultRole,
         dataUrl: item.url,
         mimeType: item.mimeType,
         assetType: inferAssetType(item.mimeType),
@@ -316,7 +345,9 @@ export function collectVideoUploadFiles(
       for (let i = 0; i < items.length; i++) {
         const item = items[i];
         let role: ResolvedVideoUploadFile['role'];
-        if (item.role) {
+        if (edgeRole) {
+          role = edgeRole;
+        } else if (item.role) {
           role = item.role as ResolvedVideoUploadFile['role'];
         } else if (i === 0) {
           role = 'first';

@@ -47,7 +47,9 @@ const cancelFlags = new Map<string, boolean>();
  * 长剧本按段落分批的字符上限（§14 风险：单份剧本内容过长）。
  * 超过该长度时服务层按段落分批分析并在返回前合并镜头，UI 仍保持一张分镜表。
  */
-export const SCRIPT_CHUNK_CHAR_LIMIT = 12000;
+export const SCRIPT_CHUNK_CHAR_LIMIT = 8000;
+const MIN_RECOVERY_CHUNK_LENGTH = 1200;
+const MAX_RECOVERY_DEPTH = 5;
 
 /**
  * 将剧本按段落切分为不超过字符上限的若干块。
@@ -259,6 +261,11 @@ export function buildSystemPrompt(): string {
   }
 ]
 
+【输出规模约束】
+1. 本次最多输出 8 个镜头；剧本内容较多时，优先覆盖关键动作和对白，不要为了增加细节输出超长描述。
+2. 必须输出完整、可直接 JSON.parse 的数组，结尾必须包含对应的 ] 和 }，不要在半个镜头中结束。
+3. 不要输出 Markdown 代码围栏、注释或任何 JSON 之外的文字。
+
 请确保镜头之间逻辑连贯，覆盖剧本全部关键情节，不要遗漏。`;
 }
 
@@ -318,8 +325,15 @@ export async function startStoryboardAnalysis(
 
     if (totalChunks <= 1) {
       // 短剧本：单次完整分析（原有语义）
-      const userPrompt = buildUserPrompt(scriptContent, options.context);
-      const newShots = await analyzeChunk(jobId, systemPrompt, userPrompt, maxRetries, 1, 1);
+      const newShots = await analyzeChunkWithRecovery(
+        jobId,
+        systemPrompt,
+        scriptContent.trim(),
+        options.context,
+        maxRetries,
+        1,
+        1,
+      );
       applyShots(newShots);
       store.setAnalysisProgress({
         status: "succeeded",
@@ -340,15 +354,11 @@ export async function startStoryboardAnalysis(
         progress: Math.round((b / totalChunks) * 80),
         message: `正在分析剧本第 ${b + 1}/${totalChunks} 段…`,
       });
-      // 每批提示词标注当前段范围，保证批次间无 集/场 层级
-      const userPrompt =
-        `当前分析的是剧本第 ${b + 1}/${totalChunks} 段，请只基于这段剧本拆镜，` +
-        `不要输出任何 "集"、"场" 层级信息，不要输出图片/首尾帧/视频提示词。\n\n` +
-        buildUserPrompt(chunk, options.context);
-      const batchShots = await analyzeChunk(
+      const batchShots = await analyzeChunkWithRecovery(
         jobId,
         systemPrompt,
-        userPrompt,
+        chunk,
+        options.context,
         maxRetries,
         b + 1,
         totalChunks,
@@ -412,6 +422,42 @@ function applyShots(shots: StoryboardShot[]): void {
   });
 }
 
+async function analyzeChunkWithRecovery(
+  jobId: string,
+  systemPrompt: string,
+  scriptChunk: string,
+  context: string | undefined,
+  maxRetries: number,
+  chunkIndex: number,
+  totalChunks: number,
+  depth = 0,
+): Promise<StoryboardShot[]> {
+  const userPrompt =
+    `当前分析的是剧本第 ${chunkIndex}/${totalChunks} 段，请只基于这段剧本拆镜，` +
+    `不要输出任何 "集"、"场" 层级信息，不要输出图片/首尾帧/视频提示词。\n\n` +
+    buildUserPrompt(scriptChunk, context, 8);
+  try {
+    return await analyzeChunk(jobId, systemPrompt, userPrompt, maxRetries, chunkIndex, totalChunks);
+  } catch (error) {
+    if ((error as Error & { code?: string }).code !== "TRUNCATED_OUTPUT") throw error;
+    if (depth >= MAX_RECOVERY_DEPTH || scriptChunk.length <= MIN_RECOVERY_CHUNK_LENGTH) {
+      throw new Error(`第 ${chunkIndex}/${totalChunks} 段输出多次被截断，已达到自动拆分上限`);
+    }
+    const children = splitScriptIntoChunks(
+      scriptChunk,
+      Math.max(MIN_RECOVERY_CHUNK_LENGTH, Math.floor(scriptChunk.length / 2)),
+    );
+    if (children.length < 2) throw error;
+    const shots: StoryboardShot[] = [];
+    for (const child of children) {
+      shots.push(...await analyzeChunkWithRecovery(
+        jobId, systemPrompt, child, context, maxRetries, chunkIndex, totalChunks, depth + 1,
+      ));
+    }
+    return shots;
+  }
+}
+
 /**
  * 对单个分块执行一次拆镜（含解析/校验失败重试与取消检查）。
  * 返回该块产出的 StoryboardShot[]。
@@ -439,6 +485,11 @@ async function analyzeChunk(
     const parsed = parseStoryboardResponse(rawText);
     if (!parsed.ok) {
       lastError = parsed.error || "无法解析 AI 拆镜结果";
+      if (parsed.errorCode === "TRUNCATED_OUTPUT") {
+        const error = new Error(lastError) as Error & { code?: string };
+        error.code = "TRUNCATED_OUTPUT";
+        throw error;
+      }
       if (attempt < maxRetries) continue;
       throw new Error(`第 ${chunkIndex}/${totalChunks} 段解析失败：${lastError}`);
     }

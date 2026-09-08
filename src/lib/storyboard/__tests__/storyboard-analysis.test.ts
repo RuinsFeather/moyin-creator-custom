@@ -70,6 +70,12 @@ describe("storyboard-response-parser", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toBeTruthy();
   });
+
+  it("identifies an output truncated before the JSON array closes", () => {
+    const result = parseStoryboardResponse('[{"content":{"summary":"进入"}}');
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe("TRUNCATED_OUTPUT");
+  });
 });
 
 describe("storyboard-validator", () => {

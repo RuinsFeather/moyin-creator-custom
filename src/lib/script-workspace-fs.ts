@@ -11,7 +11,13 @@ export type ScriptWorkspaceResource = {
   content?: string;
 };
 
-export type ScriptWorkspaceFs = NonNullable<Window['scriptWorkspaceFs']>;
+export type ScriptWorkspaceFs = Omit<NonNullable<Window['scriptWorkspaceFs']>, 'writeImage' | 'readImage' | 'writeBinary' | 'readBinary' | 'copyExternalFile'> & {
+  writeImage?: (rootPath: string, relativePath: string, base64Data: string) => Promise<{ mtime: number; size: number }>;
+  readImage?: (rootPath: string, relativePath: string) => Promise<string>;
+  writeBinary?: (rootPath: string, relativePath: string, base64Data: string) => Promise<{ mtime: number; size: number }>;
+  readBinary?: (rootPath: string, relativePath: string, mimeType?: string) => Promise<string>;
+  copyExternalFile?: (sourcePath: string, rootPath: string, relativePath: string) => Promise<{ mtime: number; size: number }>;
+};
 
 /**
  * Resolve the script workspace filesystem bridge.
@@ -43,6 +49,16 @@ export function getScriptWorkspaceFs(): ScriptWorkspaceFs | null {
       ipc.invoke('script-workspace:copy', rootPath, sourcePath, targetPath) as Promise<boolean>,
     reveal: (rootPath, relativePath) =>
       ipc.invoke('script-workspace:reveal', rootPath, relativePath) as Promise<boolean>,
+    writeImage: (rootPath, relativePath, base64Data) =>
+      ipc.invoke('script-workspace:write-image', rootPath, relativePath, base64Data) as Promise<{ mtime: number; size: number }>,
+    writeBinary: (rootPath, relativePath, base64Data) =>
+      ipc.invoke('script-workspace:write-binary', rootPath, relativePath, base64Data) as Promise<{ mtime: number; size: number }>,
+    readBinary: (rootPath, relativePath, mimeType) =>
+      ipc.invoke('script-workspace:read-binary', rootPath, relativePath, mimeType) as Promise<string>,
+    copyExternalFile: (sourcePath, rootPath, relativePath) =>
+      ipc.invoke('script-workspace:copy-external-file', sourcePath, rootPath, relativePath) as Promise<{ mtime: number; size: number }>,
+    readImage: (rootPath, relativePath) =>
+      ipc.invoke('script-workspace:read-image', rootPath, relativePath) as Promise<string>,
   };
 }
 

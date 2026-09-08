@@ -52,7 +52,5 @@ describe('blueprintSchemaVersionFromAppVersion', () => {
     expect(BLUEPRINT_SCHEMA_VERSION).toBe(
       blueprintSchemaVersionFromAppVersion(packageJson.version),
     );
-    // 当前软件版本 0.4.0-2 → 4002
-    expect(BLUEPRINT_SCHEMA_VERSION).toBe(4002);
   });
 });
