@@ -280,9 +280,9 @@ export function MarkdownEditor() {
   }
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full flex flex-col overflow-hidden">
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-3 py-1.5 border-b border-border bg-panel">
+      <div className="shrink-0 flex items-center justify-between px-3 py-1.5 border-b border-border bg-panel">
         <div className="flex items-center gap-2">
           <span className="text-xs font-medium truncate max-w-[200px]">
             {activeFile?.name ?? '未命名'}
@@ -401,7 +401,7 @@ export function MarkdownEditor() {
       </div>
 
       {/* Status bar */}
-      <div className="flex items-center justify-between px-3 py-1 border-t border-border text-[10px] text-muted-foreground">
+      <div className="shrink-0 flex items-center justify-between px-3 py-1 border-t border-border text-[10px] text-muted-foreground">
         <span>{editorContent.length} 字符 · {editorContent.split('\n').length} 行</span>
         <span>Markdown · UTF-8</span>
       </div>

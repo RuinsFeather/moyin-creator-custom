@@ -25,6 +25,7 @@ describe('BlueprintToolbar', () => {
       addNode: vi.fn(),
       autoLayoutNodes: vi.fn(),
       currentRun: null,
+      activeRuns: {},
       executionLock: false,
       errorSummary: [],
       cancelRun: vi.fn(),

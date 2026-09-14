@@ -30,7 +30,7 @@ interface Props {
 
 export function StoryboardToolbar({ onToggleDetail, showDetail }: Props) {
   const setImportDialogOpen = useStoryboardStore((s) => s.setImportDialogOpen);
-  const addShot = useStoryboardStore((s) => s.addShot);
+  const addShotAfterSelection = useStoryboardStore((s) => s.addShotAfterSelection);
   const deleteShots = useStoryboardStore((s) => s.deleteShots);
   const saveToWorkspace = useStoryboardStore((s) => s.saveToWorkspace);
   const loadFromWorkspace = useStoryboardStore((s) => s.loadFromWorkspace);
@@ -109,7 +109,13 @@ export function StoryboardToolbar({ onToggleDetail, showDetail }: Props) {
           {analyzing ? "拆分中…" : "AI 拆分"}
         </Button>
 
-        <Button variant="outline" size="sm" onClick={() => addShot()} title="新增镜头" disabled={!document}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={addShotAfterSelection}
+          title="新增镜头：有选中镜头时插入其下方，否则追加到最后"
+          disabled={!document}
+        >
           <Plus className="h-4 w-4 mr-1" />
           新增镜头
         </Button>

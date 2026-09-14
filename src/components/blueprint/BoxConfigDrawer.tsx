@@ -11,6 +11,7 @@
 // 实时跟随，并进行边界修正。
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useViewport } from '@xyflow/react';
 import {
   ChevronsUpDown,
   Film,
@@ -41,7 +42,9 @@ import { executeBlueprintRun, retryNodeExecution } from '@/lib/blueprint/executi
 import { resolveVeoUploadCapability } from '@/lib/freedom/veo-capability';
 import {
   resolveSeedanceCapability,
+  resolveSeedanceCapabilityModelId,
   validateSeedanceReferenceCounts,
+  isSeedanceModel,
 } from '@/lib/video/seedance-capability';
 import type { FreedomVideoUploadRole } from '@/lib/freedom/freedom-api';
 import { Button } from '@/components/ui/button';
@@ -95,26 +98,29 @@ function resolveVideoCapabilityModelId(modelId: string): string {
   if (/^veo3/i.test(modelId)) return 'veo3';
   if (/^veo2/i.test(modelId)) return 'veo2';
   if (/^vidu/i.test(modelId) || modelId === 'aigc-video-vidu') return 'vidu2.0';
-  if (/^doubao-seedance-/i.test(modelId)) {
-    if (modelId.includes('2-5')) return 'seedance-2.5';
-    if (modelId.includes('pro-fast')) return 'seedance-pro-t2v-fast';
-    if (modelId.includes('lite')) return 'seedance-lite-t2v';
-    return 'seedance-pro-t2v';
-  }
+  // Seedance/Artsdance 各版本统一复用共享能力映射，避免无 doubao- 前缀时回退通用参数。
+  if (isSeedanceModel(modelId)) return resolveSeedanceCapabilityModelId(modelId);
   if (lower.startsWith('minimax/video-01')) return 'minimax-hailuo-02-standard-t2v';
   return modelId;
 }
 
 /** Drawer vertical gap below the selected window (px). */
 const DRAWER_GAP = 10;
-/** Drawer width (px). The wide layout keeps the main controls side by side. */
-export const DRAWER_WIDTH = 920;
-/** Hard max height; content scrolls internally. */
-const DRAWER_MAX_HEIGHT = 440;
+/**
+ * Drawer base width (px, zoom = 1)。相对收窄的竖向布局，把纵向空间留给
+ * 提示词输入区；实际渲染宽度随画布缩放（zoom）同步缩放，与功能窗口
+ * 视觉大小一致。
+ */
+export const DRAWER_WIDTH = 720;
+/** Hard max height (px, zoom = 1)；内容超高时内部滚动。 */
+const DRAWER_MAX_HEIGHT = 520;
 /** Estimated drawer height used for vertical flip/clamp calculations (px). */
 const DRAWER_ESTIMATED_HEIGHT = DRAWER_MAX_HEIGHT;
 /** Padding kept from canvas edges when clamping (px). */
 const EDGE_PADDING = 8;
+/** 抽屉随画布缩放的倍率下限/上限：避免极端 zoom 下抽屉不可读或过大。 */
+const DRAWER_MIN_SCALE = 0.6;
+const DRAWER_MAX_SCALE = 1.5;
 
 type DrawerGenerationMode =
   | 'text-to-image'
@@ -225,6 +231,10 @@ export function BoxConfigDrawer({ node, onClose }: BoxConfigDrawerProps) {
   const viewport = useBlueprintStore((s) =>
     s.blueprints.find((b) => b.id === s.activeBlueprintId)?.viewport,
   );
+  // React Flow 实时 zoom（store 里的 viewport 仅在 onViewportChange 结束时提交，
+  // 用它驱动缩放会在滚轮过程中抖动；useViewport 是 RF 内部实时值）。
+  const { zoom } = useViewport();
+  const drawerScale = Math.min(DRAWER_MAX_SCALE, Math.max(DRAWER_MIN_SCALE, zoom));
   const edgeCount = useBlueprintStore(
     (s) =>
       (s.blueprints.find((b) => b.id === s.activeBlueprintId)?.edges ?? []).filter(
@@ -549,8 +559,10 @@ export function BoxConfigDrawer({ node, onClose }: BoxConfigDrawerProps) {
     () => (kind === 'video' ? resolveVideoCapabilityModelId(modelDraft.model) : undefined),
     [kind, modelDraft.model],
   );
-  const isSeedanceModel = useMemo(
-    () => kind === 'video' && modelDraft.model.toLowerCase().includes('seedance'),
+  // 与 VideoStudio 的 isSeedanceGroupModel 对齐：seedance 与 artsdance 同组，
+  // 二者均支持多功能参考（image/video/audio）与联网搜索开关。
+  const isSeedanceGroup = useMemo(
+    () => kind === 'video' && isSeedanceModel(modelDraft.model),
     [kind, modelDraft.model],
   );
 
@@ -576,7 +588,7 @@ export function BoxConfigDrawer({ node, onClose }: BoxConfigDrawerProps) {
 
   /** Seedance 参考数校验（提交前提示；详细校验在 P3 执行器内）。 */
   const validateSeedanceRefs = useCallback((): boolean => {
-    if (!seedanceCapability || !isSeedanceModel) return true;
+    if (!seedanceCapability || !isSeedanceGroup) return true;
     const cfg = node.data.config as VideoBoxConfig;
     const refs = cfg.generation?.referenceMediaRefs ?? [];
     const images = refs.filter((r) => (r.assetType ?? 'image') === 'image').length;
@@ -588,7 +600,7 @@ export function BoxConfigDrawer({ node, onClose }: BoxConfigDrawerProps) {
       return false;
     }
     return true;
-  }, [seedanceCapability, isSeedanceModel, node.data.config, modelDraft.model]);
+  }, [seedanceCapability, isSeedanceGroup, node.data.config, modelDraft.model]);
 
   const handleGenerate = useCallback(async () => {
     if (!modelDraft.model) {
@@ -679,9 +691,19 @@ export function BoxConfigDrawer({ node, onClose }: BoxConfigDrawerProps) {
       `.react-flow__node[data-id="${node.id}"]`,
     );
     if (!container || !nodeEl) return;
-    const next = computeAnchor(container, nodeEl, DRAWER_WIDTH, DRAWER_ESTIMATED_HEIGHT);
-    if (next) setAnchor(next);
-  }, [node.id]);
+    // transform-origin 为 center，缩放前后元素中心点不变，因此水平居中
+    // 始终用基础宽度；垂直方向先按"缩放后视觉高度"做翻转/贴边判断，
+    // 再补偿 center-origin 带来的半差，让缩放后边缘正好贴合窗口。
+    const visualHeight = DRAWER_ESTIMATED_HEIGHT * drawerScale;
+    const next = computeAnchor(container, nodeEl, DRAWER_WIDTH, visualHeight);
+    if (next) {
+      const halfDelta = (visualHeight - DRAWER_ESTIMATED_HEIGHT) / 2;
+      setAnchor({
+        ...next,
+        top: next.placement === 'below' ? next.top + halfDelta : next.top - halfDelta,
+      });
+    }
+  }, [node.id, drawerScale]);
 
   // Mount: capture container + first measurement (before paint to avoid flash).
   useLayoutEffect(() => {
@@ -756,13 +778,17 @@ export function BoxConfigDrawer({ node, onClose }: BoxConfigDrawerProps) {
       left: anchor?.left ?? -9999,
       top: anchor?.top ?? -9999,
       width: DRAWER_WIDTH,
-      maxWidth: `calc(100% - ${EDGE_PADDING * 2}px)`,
+      maxWidth: `calc((100% - ${EDGE_PADDING * 2}px) / ${drawerScale})`,
       maxHeight: DRAWER_MAX_HEIGHT,
+      // 与画布缩放同步：以锚定点（窗口底部中心）为原点整体缩放，
+      // 视觉上抽屉跟随功能窗口一起变大/缩小。
+      transform: `scale(${drawerScale})`,
+      transformOrigin: anchor?.placement === 'above' ? 'center bottom' : 'center top',
       // `left` is already the final left edge centered on the node.
       // Keep hidden until first measurement to avoid a flash at (0,0).
       visibility: anchor ? 'visible' : 'hidden',
     }),
-    [anchor],
+    [anchor, drawerScale],
   );
 
   return (
@@ -916,7 +942,7 @@ export function BoxConfigDrawer({ node, onClose }: BoxConfigDrawerProps) {
                 value={promptValue}
                 onChange={handlePromptChange}
                 placeholder="在这里输入提示词....."
-                className="h-full min-h-[120px] w-full resize-none rounded-none border-0 bg-transparent px-3 py-2.5 text-sm shadow-none focus-visible:ring-0"
+                className="h-full min-h-[200px] w-full resize-none rounded-none border-0 bg-transparent px-3 py-2.5 text-sm shadow-none focus-visible:ring-0"
               />
             )}
           </section>
@@ -1036,6 +1062,10 @@ export function BoxConfigDrawer({ node, onClose }: BoxConfigDrawerProps) {
                       ? {
                           duration: modelDraft.duration ?? 5,
                           onDurationChange: (v: number) => patchDraft({ duration: v }),
+                          // 与 VideoStudio 对齐：seedance/artsdance 2.5 支持 4-30s，
+                          // 其余模型回退 4-15s（seedanceCapability 已按版本解析）。
+                          durationMin: isSeedanceGroup ? seedanceCapability?.minDuration ?? 4 : 4,
+                          durationMax: isSeedanceGroup ? seedanceCapability?.maxDuration ?? 15 : 15,
                         }
                       : {})}
                   />
@@ -1174,7 +1204,7 @@ export function BoxConfigDrawer({ node, onClose }: BoxConfigDrawerProps) {
                           onCheckedChange={(v) => patchDraft({ watermark: v })}
                         />
                       </div>
-                      {isSeedanceModel && (
+                      {isSeedanceGroup && (
                         <div className="flex items-center justify-between">
                           <Label className="text-xs">联网搜索</Label>
                           <Switch

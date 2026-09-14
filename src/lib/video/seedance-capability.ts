@@ -55,17 +55,38 @@ export const SEEDANCE_2_5_CAPABILITY: SeedanceCapability = {
 };
 
 export function isSeedanceModel(modelId?: string): boolean {
-  return /seedance/i.test(modelId || '');
+  return /seedance|artsdance/i.test(modelId || '');
 }
 
 export function isSeedance25Model(modelId?: string): boolean {
-  return /(?:^|[-_])seedance[-_](?:v?2[._-]?5)(?:[-_]|$)/i.test(modelId || '')
+  return /(?:^|[-_])(?:seedance|artsdance)[-_](?:v?2[._-]?5)(?:[-_]|$)/i.test(modelId || '')
     || (modelId || '').toLowerCase() === SEEDANCE_2_5_MODEL_ID;
+}
+
+/**
+ * 将供应商侧的 Seedance/Artsdance 版本名映射到参数注册表中的能力模型 ID。
+ * 仅用于查询 UI 能力；实际 API 请求仍应透传原始模型 ID。
+ */
+export function resolveSeedanceCapabilityModelId(modelId: string): string {
+  if (!isSeedanceModel(modelId)) return modelId;
+
+  const lower = modelId.toLowerCase();
+  if (isSeedance25Model(modelId)) return 'seedance-2.5';
+  if (lower.includes('lite')) return 'seedance-lite-t2v';
+
+  const isFast = lower.includes('fast');
+  const isVersion15 = /(?:^|[-_])seedance[-_](?:v?1[._-]?5)(?:[-_]|$)/i.test(modelId);
+  if (isVersion15) {
+    return isFast ? 'seedance-v1.5-pro-t2v-fast' : 'seedance-v1.5-pro-t2v';
+  }
+  if (isFast) return 'seedance-pro-t2v-fast';
+  return 'seedance-pro-t2v';
 }
 
 export function resolveSeedanceCapability(modelId?: string): SeedanceCapability {
   if (isSeedance25Model(modelId)) return SEEDANCE_2_5_CAPABILITY;
-  if (/(?:^|[-_])seedance[-_](?:v?2(?:[._-]?0)?)(?:[-_]|$)/i.test(modelId || '')) {
+  if (/(?:^|[-_])(?:seedance|artsdance)[-_](?:v?2(?:[._-]?0)?)(?:[-_]|$)/i.test(modelId || '')
+    || /artsdance/i.test(modelId || '')) {
     return SEEDANCE_2_0_CAPABILITY;
   }
   return LEGACY_CAPABILITY;

@@ -104,6 +104,35 @@ function throwIfAborted(signal: AbortSignal): void {
   }
 }
 
+/**
+ * Video APIs do not consistently expose a server-side percentage. Keep the
+ * blueprint progress bar moving while the request is being polled, but leave
+ * the final step to the executor after a successful response.
+ */
+async function generateVideoWithEstimatedProgress<T>(
+  ctx: NodeExecutionContext,
+  generate: () => Promise<T>,
+): Promise<T> {
+  let estimatedProgress = 10;
+  const timer = setInterval(() => {
+    if (estimatedProgress >= 90) return;
+
+    const increment = estimatedProgress < 30 ? 3
+      : estimatedProgress < 60 ? 2
+      : 1;
+    estimatedProgress = Math.min(90, estimatedProgress + increment);
+    ctx.onProgress?.(estimatedProgress);
+  }, 3000);
+
+  try {
+    const result = await generate();
+    ctx.onProgress?.(100);
+    return result;
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 // ── Input node executors ─────────────────────────────────────────────────
 
 async function executeTextInput(
@@ -280,7 +309,7 @@ async function executeVideoGenerator(
   };
 
   // Call the real Freedom Video API
-  const result = await generateFreedomVideo(videoParams);
+  const result = await generateVideoWithEstimatedProgress(ctx, () => generateFreedomVideo(videoParams));
 
   throwIfAborted(ctx.signal);
 
@@ -291,8 +320,6 @@ async function executeVideoGenerator(
     dedupeKey: `vid-${ctx.node.id}-${result.taskId ?? Date.now()}`,
     taskId: result.taskId,
   };
-  ctx.onProgress?.(100);
-
   return {
     data: mediaRef,
     summary: `video-generator (model=${cfg.model ?? 'default'}, refs=${uploadFiles.length})`,
@@ -560,7 +587,7 @@ async function executeVideoGeneratorFromConfig(
     },
   };
 
-  const result = await generateFreedomVideo(videoParams);
+  const result = await generateVideoWithEstimatedProgress(ctx, () => generateFreedomVideo(videoParams));
   throwIfAborted(ctx.signal);
 
   const mediaRef: BlueprintMediaRef = {
@@ -570,8 +597,6 @@ async function executeVideoGeneratorFromConfig(
     dedupeKey: `vid-${ctx.node.id}-${result.taskId ?? Date.now()}`,
     taskId: result.taskId,
   };
-  ctx.onProgress?.(100);
-
   return {
     data: mediaRef,
     summary: `video-box/generate (model=${genConfig.model ?? 'default'}, refs=${uploadFiles.length})`,

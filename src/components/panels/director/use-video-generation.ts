@@ -9,10 +9,13 @@ import { useAPIConfigStore } from "@/stores/api-config-store";
 import { retryOperation } from "@/lib/utils/retry";
 import { corsFetch } from "@/lib/cors-fetch";
 import {
+  isSeedanceModel,
   resolveSeedanceCapability,
   validateSeedanceDuration,
   validateSeedanceReferenceCounts,
 } from "@/lib/video/seedance-capability";
+import { buildVolcVideoSubmitPath } from "@/lib/video/volc-video-endpoint";
+import type { SeedancePostChannel } from "@/lib/api-key-manager";
 
 // ==================== Content Moderation ====================
 
@@ -238,7 +241,12 @@ function getUnifiedEndpointPaths(endpointTypes: string[]): { submit: string; pol
  * 根据模型的 supported_endpoint_types 元数据检测应使用的视频 API 格式
  * 优先使用 MemeFast /api/pricing_new 同步的元数据，fallback 到模型名推断
  */
-function detectVideoApiFormat(model: string): 'openai_official' | 'unified' | 'volc' | 'wan' | 'kling' | 'replicate' {
+function detectVideoApiFormat(model: string): 'openai_official' | 'unified' | 'volc' | 'wan' | 'kling' | 'replicate' | 'artsdance' {
+  const normalizedModel = model.toLowerCase();
+  // 确定的家族路由优先于可能过期或错误的 endpoint metadata。
+  if (normalizedModel.includes('artsdance')) return 'artsdance';
+  if (isSeedanceModel(model)) return 'volc';
+
   // 1. 查询 store 中的 endpoint types 元数据
   const endpointTypes = useAPIConfigStore.getState().modelEndpointTypes[model];
   if (endpointTypes && endpointTypes.length > 0) {
@@ -283,11 +291,10 @@ function detectVideoApiFormat(model: string): 'openai_official' | 'unified' | 'v
   }
 
   // 2. Fallback: 按模型名推断
-  const m = model.toLowerCase();
+  const m = normalizedModel;
   if (m.includes('sora-2')) return 'openai_official';
   if (m.includes('kling')) return 'kling';
-  // doubao-seedance 走 volc 格式（/volc/v1/contents/generations/tasks）
-  if (m.includes('doubao') || m.includes('seedance') || m.includes('seedream')) return 'volc';
+  if (m.includes('seedream')) return 'volc';
   if (m.includes('wan') || m.includes('happyhorse')) return 'wan';
   return 'unified';
 }
@@ -329,8 +336,8 @@ function handleVideoSubmitError(
 // ==================== 图片最小尺寸保障 ====================
 
 /**
- * 视频生成 API 通常要求输入图片满足最小尺寸（如 Seedance 要求宽度 ≥ 300px）。
- * 当九宫格切割后的图片尺寸过小时，自动放大到满足最低要求后重新上传。
+ * 视频生成 API 通常要求输入图片满足最小尺寸（如 Seedance 要求宽度 ≥ 300px）.
+ * 当九宫格切割后的图片尺寸过小时，自动放大到满足最低要求后重新上传.
  * @param imageUrl  HTTP URL 图片地址
  * @param minDimension  宽高的最小像素值（默认 300，匹配 Seedance 等模型要求）
  * @returns 原始 URL（尺寸达标）或放大后重新上传的新 URL
@@ -479,7 +486,9 @@ export async function callVideoGenerationApi(
       case 'openai_official':
         return callOpenAIOfficialVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, duration, videoResolution, onProgress, keyManager, signal);
       case 'volc':
-        return callVolcVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, processedImages, videoResolution, duration, enableAudio, cameraFixed, onProgress, keyManager, videoRefs, audioRefs, signal);
+        return callVolcVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, processedImages, videoResolution, duration, enableAudio, cameraFixed, onProgress, keyManager, videoRefs, audioRefs, signal, featureConfig?.provider.seedancePostChannel);
+      case 'artsdance':
+        return callArtsdanceVideoApi(currentApiKey, prompt, videoBaseUrl, model, aspectRatio, processedImages, videoResolution, duration, enableAudio, onProgress, keyManager, signal);
       case 'wan':
         return callWanVideoApi(currentApiKey, prompt, videoBaseUrl, model, processedImages, videoResolution, duration, enableAudio, onProgress, keyManager, signal);
       case 'kling':
@@ -524,16 +533,37 @@ function toRunwayRatio(aspectRatio: string): string {
  * Extract video URL from various response formats
  */
 function extractVideoUrl(data: Record<string, any>): string | null {
+  if (!data || typeof data !== 'object') return null;
+
+  const direct = (val: unknown): string | null => {
+    if (typeof val === 'string' && val.startsWith('http')) return normalizeUrl(val) ?? null;
+    return null;
+  };
+
   const url =
-    data.data?.[0]?.url ||
-    data.url ||
-    data.output?.url ||
-    (typeof data.output === 'string' && data.output.startsWith('http') ? data.output : null) ||
-    (Array.isArray(data.output) && typeof data.output[0] === 'string' ? data.output[0] : null) ||
-    data.outputs?.[0] ||
-    data.video_url ||
-    data.result_url ||
-    data.response?.url;  // doubao, jimeng, grok, wan2.6
+    direct(data.data?.[0]?.url) ||
+    direct(data.data?.[0]?.video_url) ||
+    direct(data.data?.result_url) ||
+    direct(data.data?.video_url) ||
+    direct(data.data?.url) ||
+    direct(data.data?.data?.content?.video_url) ||
+    direct(data.data?.content?.video_url) ||
+    direct(data.data?.data?.result_url) ||
+    direct(data.data?.data?.video_url) ||
+    direct(data.data?.data?.url) ||
+    direct(data.url) ||
+    direct(data.output?.url) ||
+    direct(data.output?.video_url) ||
+    (typeof data.output === 'string' && data.output.startsWith('http') ? normalizeUrl(data.output) : null) ||
+    (Array.isArray(data.output) && typeof data.output[0] === 'string' ? normalizeUrl(data.output[0]) : null) ||
+    (Array.isArray(data.outputs) && typeof data.outputs[0] === 'string' ? normalizeUrl(data.outputs[0]) : null) ||
+    direct(data.video_url) ||
+    direct(data.result_url) ||
+    direct(data.response?.url) ||
+    direct(data.response?.video_url) ||
+    direct(data.result?.url) ||
+    direct(data.result?.video_url);
+
   return (url ? normalizeUrl(url) : undefined) ?? null;
 }
 
@@ -684,7 +714,7 @@ async function callUnifiedVideoApi(
     const statusData = await statusResponse.json();
     console.log(`[VideoGen] Unified task ${taskId} status:`, statusData);
 
-    const status = String(statusData.status || statusData.state || statusData.data?.status || '').toLowerCase();
+    const status = String(statusData.status || statusData.state || statusData.data?.status || statusData.data?.data?.status || '').toLowerCase();
 
     if (status === 'completed' || status === 'succeeded' || status === 'success') {
       const videoUrl = extractVideoUrl(statusData);
@@ -694,6 +724,154 @@ async function callUnifiedVideoApi(
 
     if (status === 'failed' || status === 'error' || status === 'cancelled') {
       const errorMsg = statusData.error?.message || statusData.error || statusData.message || '视频生成失败';
+      throw new Error(typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg));
+    }
+  }
+  throw new Error('视频生成超时');
+}
+
+// ==================== Artsdance 格式（Seedance 的 OpenAI 兼容版本）====================
+// datastart 等平台: POST /v1/video/generations + GET /v1/video/generations/{id}
+// 使用 metadata.content 数组结构传递参考图，与 Seedance 原生格式不同
+
+async function callArtsdanceVideoApi(
+  apiKey: string,
+  prompt: string,
+  baseUrl: string,
+  model: string,
+  aspectRatio: string,
+  imageWithRoles: Array<{ url: string; role: string }>,
+  videoResolution?: string,
+  duration?: number,
+  enableAudio?: boolean,
+  onProgress?: (progress: number) => void,
+  keyManager?: { handleError: (status: number, errorText?: string) => boolean },
+  signal?: AbortSignal,
+): Promise<string> {
+  // 构建 metadata.content 数组（artsdance 格式）
+  const content: Array<Record<string, unknown>> = [];
+
+  // 参考图：artsdance 使用 metadata.content 数组，role 为 reference_image
+  for (const img of imageWithRoles) {
+    if (img.url) {
+      content.push({
+        type: 'image_url',
+        image_url: { url: img.url },
+        role: img.role === 'first_frame' || img.role === 'last_frame' ? 'reference_image' : img.role,
+      });
+    }
+  }
+
+  // 构建请求体
+  const body: Record<string, unknown> = {
+    model,
+    prompt,
+  };
+
+  // metadata 包含所有结构化参数
+  const metadata: Record<string, unknown> = {};
+  if (content.length > 0) metadata.content = content;
+  if (duration) {
+    body.duration = duration;
+    metadata.duration = duration;
+  }
+  if (videoResolution) {
+    body.resolution = videoResolution;
+    metadata.resolution = videoResolution;
+  }
+  if (aspectRatio) {
+    body.ratio = aspectRatio;
+    body.aspect_ratio = aspectRatio;
+    metadata.ratio = aspectRatio;
+    metadata.aspect_ratio = aspectRatio;
+  }
+  if (enableAudio !== undefined) {
+    body.generate_audio = enableAudio;
+    metadata.generate_audio = enableAudio;
+  }
+  metadata.watermark = false;
+
+  if (Object.keys(metadata).length > 0) body.metadata = metadata;
+
+  // 端点：/v1/video/generations
+  const rootBase = baseUrl.replace(/\/v\d+$/, '');
+  const submitUrl = `${rootBase}/v1/video/generations`;
+
+  console.log('[VideoGen] Artsdance format → POST /v1/video/generations', {
+    model,
+    body,
+    metadata,
+    contentCount: content.length,
+  });
+
+  const submitResponse = await corsFetch(submitUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!submitResponse.ok) {
+    const errorText = await submitResponse.text();
+    handleVideoSubmitError(submitResponse.status, errorText, keyManager);
+  }
+
+  const submitData = await submitResponse.json();
+  console.log('[VideoGen] Artsdance submit response:', submitData);
+
+  // 提取任务 ID
+  const taskId = (
+    submitData.task_id ||
+    submitData.id ||
+    submitData.request_id ||
+    submitData.data?.task_id ||
+    submitData.data?.id
+  )?.toString();
+
+  // 某些模型直接返回结果
+  const directUrl = extractVideoUrl(submitData);
+  if (directUrl) return directUrl;
+  if (!taskId) {
+    console.error('[VideoGen] Cannot extract taskId from artsdance response:', JSON.stringify(submitData).substring(0, 300));
+    throw new Error('返回空的任务 ID（响应格式未识别）');
+  }
+
+  // 轮询任务状态
+  const pollUrl = `${rootBase}/v1/video/generations/${taskId}`;
+  const pollInterval = 5000;
+  const maxAttempts = 180;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    onProgress?.(Math.min(20 + Math.floor((attempt / maxAttempts) * 80), 99));
+    await sleepOrAbort(pollInterval, signal);
+
+    const statusResponse = await corsFetch(pollUrl, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      signal,
+    });
+
+    if (!statusResponse.ok) continue;
+
+    const statusData = await statusResponse.json();
+    console.log(`[VideoGen] Artsdance task ${taskId} status:`, statusData);
+
+    const status = String(statusData.status || statusData.state || statusData.data?.status || statusData.data?.data?.status || '').toLowerCase();
+
+    if (status === 'completed' || status === 'succeeded' || status === 'success') {
+      const videoUrl = extractVideoUrl(statusData);
+      if (!videoUrl) throw new Error('任务完成但没有视频 URL');
+      return videoUrl;
+    }
+
+    if (status === 'failed' || status === 'error') {
+      const errorMsg = statusData.error || statusData.error_message || '视频生成失败';
       throw new Error(typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg));
     }
   }
@@ -722,6 +900,7 @@ async function callVolcVideoApi(
   /** Seedance 2.0: 音频引用 URL 列表 */
   audioRefs?: string[],
   signal?: AbortSignal,
+  postChannel?: SeedancePostChannel,
 ): Promise<string> {
   // 构建 content 数组（Volcengine 格式: text + image_url）
   const content: Array<Record<string, unknown>> = [];
@@ -794,20 +973,8 @@ async function callVolcVideoApi(
     requestBody.watermark = false;
   }
 
-  // 路径分支：火山方舟原生域名（ark.cn-beijing.volces.com/api/v3）使用 /contents/generations/tasks
-  // MemeFast 等中转使用 /volc/v1/contents/generations/tasks
-  const isVolcNative = /\.volces\.com|ark\.cn-beijing/i.test(baseUrl);
-  const normalizedBase = baseUrl.replace(/\/+$/, '');
-  const rootBase = normalizedBase.replace(/\/v\d+$/, '');
-  const nativeApiBase = /\/api\/v3(?:\/|$)/i.test(normalizedBase)
-    ? normalizedBase.replace(/\/contents\/generations\/tasks$/i, '')
-    : `${normalizedBase}/api/v3`;
-  const submitUrl = isVolcNative
-    ? `${nativeApiBase}/contents/generations/tasks`
-    : `${rootBase}/volc/v1/contents/generations/tasks`;
-  const pollUrlPrefix = isVolcNative
-    ? `${nativeApiBase}/contents/generations/tasks`
-    : `${rootBase}/volc/v1/contents/generations/tasks`;
+  const submitUrl = buildVolcVideoSubmitPath(baseUrl, postChannel);
+  const pollUrlPrefix = submitUrl;
 
   console.log('[VideoGen] Volc format → POST', submitUrl, {
     model,
@@ -815,7 +982,7 @@ async function callVolcVideoApi(
     aspectRatio,
     duration,
     imageCount: imageWithRoles.filter(i => i.url).length,
-    isVolcNative,
+    isVolcNative: submitUrl.includes('/api/v3/'),
   });
 
   const submitResponse = await corsFetch(submitUrl, {

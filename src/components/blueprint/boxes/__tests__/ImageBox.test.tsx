@@ -11,10 +11,6 @@ import { ImageBox } from '../ImageBox';
 import { useBlueprintStore } from '@/stores/blueprint-store';
 import type { BlueprintNode } from '@/types/blueprint';
 
-vi.mock('@/hooks/use-asset-upload', () => ({
-  useAssetUpload: () => ({ uploadFiles: vi.fn().mockResolvedValue([]), uploading: false }),
-}));
-
 vi.mock('@/components/panels/freedom/VolcAssetPanel', () => ({
   VolcAssetPanel: () => null,
 }));
@@ -69,7 +65,7 @@ describe('ImageBox', () => {
     expect(img.src).toBe('https://example.com/a.png');
   });
 
-  it('shows download button and generation-dependent buttons when media exists', () => {
+  it('shows download and asset-library buttons when media exists', () => {
     renderImageBox({
       data: {
         nodeType: 'image-box',
@@ -78,8 +74,8 @@ describe('ImageBox', () => {
       },
     });
     expect(screen.getByText('⬇ 下载')).toBeTruthy();
-    expect(screen.getByText('⬆ 上传到素材库')).toBeTruthy();
     expect(screen.getByText('🗂 素材库')).toBeTruthy();
+    expect(screen.queryByText('⬆ 上传到素材库')).toBeNull();
   });
 
   it('no longer renders an inline 重新生成 button (drawer is the entry)', () => {

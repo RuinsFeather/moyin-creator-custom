@@ -211,10 +211,15 @@ function makeId(): string {
 }
 
 function normalizeShotContent(raw: Partial<StoryboardShotContent> | undefined): StoryboardShotContent {
+  const summary = typeof raw?.summary === "string" ? raw.summary : "";
+  const action =
+    typeof raw?.action === "string" && raw.action.trim()
+      ? raw.action
+      : summary;
   return {
-    summary: typeof raw?.summary === "string" ? raw.summary : "",
+    summary,
     scene: typeof raw?.scene === "string" ? raw.scene : "",
-    action: typeof raw?.action === "string" ? raw.action : "",
+    action,
     dialogue: typeof raw?.dialogue === "string" ? raw.dialogue : "",
     shotSize: typeof raw?.shotSize === "string" ? raw.shotSize : "",
     cameraMovement: typeof raw?.cameraMovement === "string" ? raw.cameraMovement : "",

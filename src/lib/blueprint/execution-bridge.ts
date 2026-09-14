@@ -10,7 +10,7 @@
 // and programmatic runs all go through here.
 //
 // Responsibilities:
-//   1. Acquire the execution lock via `beginRun`
+//   1. Register an independently cancellable run via `beginRun`
 //   2. Read the active blueprint snapshot
 //   3. Optionally confirm paid tasks before execution
 //   4. Call `runBlueprint` with progress/status callbacks
@@ -81,7 +81,7 @@ export async function executeBlueprintRun(
 ): Promise<void> {
   const store = useBlueprintStore.getState();
 
-  // ── 1. Acquire lock ──────────────────────────────────────────
+  // ── 1. Register run ──────────────────────────────────────────
   const request = store.beginRun(mode, nodeId);
   if (!request) return;
 
@@ -90,7 +90,7 @@ export async function executeBlueprintRun(
   const state = useBlueprintStore.getState();
   const blueprint = selectActiveBlueprint(state);
   if (!blueprint) {
-    state.finishRun(['没有活跃蓝图']);
+    state.finishRun(['没有活跃蓝图'], request.runId);
     return;
   }
 
@@ -102,14 +102,14 @@ export async function executeBlueprintRun(
     if (paidNodes.length > 0) {
       const confirmed = await options.confirmPaidTask(paidNodes);
       if (!confirmed) {
-        state.finishRun([]);
+        useBlueprintStore.getState().finishRun([], request.runId);
         return;
       }
     }
   }
 
   // ── 4. Execute ───────────────────────────────────────────────
-  const abortController = state.abortController;
+  const abortController = state.activeRuns[request.runId]?.abortController;
 
   try {
     const result = await runBlueprintWithMetrics({
@@ -136,16 +136,16 @@ export async function executeBlueprintRun(
     });
 
     // ── 5. Finish ────────────────────────────────────────────
-    useBlueprintStore.getState().finishRun(result.errorSummary);
+    useBlueprintStore.getState().finishRun(result.errorSummary, request.runId);
   } catch (err) {
     // ── 6. Handle unexpected errors ──────────────────────────
     if (err instanceof DOMException && err.name === 'AbortError') {
       // User cancelled — cancelRun already handled node states
-      useBlueprintStore.getState().finishRun([]);
+      useBlueprintStore.getState().finishRun([], request.runId);
       return;
     }
     const errMsg = err instanceof Error ? err.message : String(err);
-    useBlueprintStore.getState().finishRun([errMsg]);
+    useBlueprintStore.getState().finishRun([errMsg], request.runId);
   }
 }
 

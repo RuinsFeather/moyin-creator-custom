@@ -152,16 +152,15 @@ export const STORYBOARD_JSON_SCHEMA = {
       content: {
         type: "object",
         properties: {
-          summary: { type: "string", description: "本镜头画面内容的一句话概述" },
           scene: { type: "string", description: "发生场景（与角色/场景库名一致或描述）" },
           action: { type: "string", description: "镜头内主要动作" },
           dialogue: { type: "string", description: "若镜头内有对白，放原文；否则空串" },
-          shotSize: { type: "string", description: "景别：特写/近景/中景/全景/远景" },
-          cameraMovement: { type: "string", description: "镜头运动：固定/推/拉/摇/移/跟" },
+          shotSize: { type: "string", description: "景别" },
+          cameraMovement: { type: "string", description: "镜头运动" },
           durationSeconds: { type: "number", description: "预估时长（秒），可选" },
           additionalDescription: { type: "string", description: "补充视觉/氛围描述，可选" },
         },
-        required: ["summary", "scene", "action", "dialogue", "shotSize", "cameraMovement"],
+        required: ["scene", "action", "dialogue", "shotSize", "cameraMovement"],
       },
       references: {
         type: "object",
@@ -170,6 +169,24 @@ export const STORYBOARD_JSON_SCHEMA = {
           costumes: { type: "array", items: { type: "string" } },
           scenes: { type: "array", items: { type: "string" } },
         },
+      },
+      sourceUnitIds: {
+        type: "array",
+        items: { type: "string" },
+        description: "本镜头覆盖的源单元 ID，可选",
+      },
+      dialogueSlices: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            unitId: { type: "string" },
+            start: { type: "number" },
+            end: { type: "number" },
+          },
+          required: ["unitId", "start", "end"],
+        },
+        description: "对白切片的引用，可选",
       },
       sourceText: { type: "string", description: "从剧本中摘取的对应原文，可选" },
     },

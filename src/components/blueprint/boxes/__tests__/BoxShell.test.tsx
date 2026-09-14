@@ -100,4 +100,30 @@ describe('BoxShell', () => {
     expect(addNode).toHaveBeenCalledTimes(1);
     expect(selectNode).toHaveBeenCalledTimes(1);
   });
+
+  it('renames the node label via updateNode on double-click + Enter', () => {
+    const updateNode = vi.fn();
+    useBlueprintStore.setState({ updateNode });
+    renderShell();
+
+    fireEvent.doubleClick(screen.getByText('我的文本框'));
+    const input = screen.getByDisplayValue('我的文本框');
+    fireEvent.change(input, { target: { value: '  产品主图  ' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    expect(updateNode).toHaveBeenCalledWith('node-1', { label: '产品主图' });
+  });
+
+  it('does not call updateNode when the new name is empty or unchanged', () => {
+    const updateNode = vi.fn();
+    useBlueprintStore.setState({ updateNode });
+    renderShell();
+
+    fireEvent.doubleClick(screen.getByText('我的文本框'));
+    const input = screen.getByDisplayValue('我的文本框');
+    fireEvent.change(input, { target: { value: '   ' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    expect(updateNode).not.toHaveBeenCalled();
+  });
 });

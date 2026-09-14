@@ -80,6 +80,37 @@ describe("storyboard store", () => {
     expect(shots.map((s) => s.shotNumber)).toEqual(["1", "2", "3"]);
   });
 
+  it("addShotAfterSelection inserts below the selected shot", () => {
+    useStoryboardStore.getState().initDocument({ title: "t" });
+    useStoryboardStore.getState().addShot();
+    useStoryboardStore.getState().addShot();
+    useStoryboardStore.getState().addShot();
+
+    const firstId = useStoryboardStore.getState().document!.shots[0].id;
+    useStoryboardStore.getState().setSelectedShot(firstId);
+    useStoryboardStore.getState().addShotAfterSelection();
+
+    const shots = useStoryboardStore.getState().document!.shots;
+    const selectedShotId = useStoryboardStore.getState().selectedShotId;
+    expect(shots).toHaveLength(4);
+    expect(shots[1].id).toBe(selectedShotId);
+    expect(shots.map((s) => s.shotNumber)).toEqual(["1", "2", "3", "4"]);
+  });
+
+  it("addShotAfterSelection appends when no shot is selected", () => {
+    useStoryboardStore.getState().initDocument({ title: "t" });
+    useStoryboardStore.getState().addShot();
+    useStoryboardStore.getState().addShot();
+    useStoryboardStore.getState().setSelectedShot(null);
+
+    useStoryboardStore.getState().addShotAfterSelection();
+
+    const shots = useStoryboardStore.getState().document!.shots;
+    const selectedShotId = useStoryboardStore.getState().selectedShotId;
+    expect(shots).toHaveLength(3);
+    expect(shots[2].id).toBe(selectedShotId);
+  });
+
   it("reorders shots and renumbers shotNumbers", () => {
     useStoryboardStore.getState().initDocument({ title: "t" });
     useStoryboardStore.getState().addShot();

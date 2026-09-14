@@ -9,6 +9,7 @@
  */
 import { useStoryboardStore } from "@/stores/storyboard-store";
 import type { StoryboardShot } from "@/types/storyboard";
+import { SHOT_SIZES, CAMERA_MOVEMENTS } from "@/lib/storyboard/shot-options";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -23,9 +24,6 @@ interface Props {
   shot: StoryboardShot;
 }
 
-const SHOT_SIZES = ["特写", "近景", "中景", "全景", "远景"];
-const CAMERAS = ["固定", "推", "拉", "摇", "移", "跟", "升降"];
-
 const fieldCls = "w-full";
 const labelCls = "text-[10px] text-muted-foreground mb-1 block";
 
@@ -36,16 +34,6 @@ export function ShotContentEditor({ shot }: Props) {
 
   return (
     <div className="flex flex-col gap-2 border rounded-md p-2">
-      <div>
-        <label className={labelCls}>画面内容概述</label>
-        <Textarea
-          className={fieldCls}
-          rows={2}
-          value={c.summary}
-          onChange={(e) => updateShotContent(shot.id, { summary: e.target.value })}
-        />
-      </div>
-
       <div>
         <label className={labelCls}>场景</label>
         <Input
@@ -87,7 +75,9 @@ export function ShotContentEditor({ shot }: Props) {
             </SelectTrigger>
             <SelectContent>
               {SHOT_SIZES.map((s) => (
-                <SelectItem key={s} value={s}>{s}</SelectItem>
+                <SelectItem key={s.value} value={s.value} title={s.description}>
+                  {s.label}
+                </SelectItem>
               ))}
             </SelectContent>
           </Select>
@@ -102,8 +92,10 @@ export function ShotContentEditor({ shot }: Props) {
               <SelectValue placeholder="镜头运动" />
             </SelectTrigger>
             <SelectContent>
-              {CAMERAS.map((s) => (
-                <SelectItem key={s} value={s}>{s}</SelectItem>
+              {CAMERA_MOVEMENTS.map((s) => (
+                <SelectItem key={s.value} value={s.value} title={s.description}>
+                  {s.label}
+                </SelectItem>
               ))}
             </SelectContent>
           </Select>

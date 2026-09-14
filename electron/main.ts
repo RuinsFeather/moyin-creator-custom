@@ -2247,6 +2247,25 @@ app.whenReady().then(() => {
     }
   })
 
+  // Open a skill directory in the system file explorer. When `isBuiltIn` is true,
+  // opens the built-in skill directory (for reference); otherwise opens the custom
+  // skill directory (from localStorage). If no custom dir is set, falls back to built-in.
+  ipcMain.handle('skills:openDir', async (_event, { customDir, isBuiltIn }: { customDir?: string | null, isBuiltIn?: boolean }) => {
+    try {
+      const target = isBuiltIn || !customDir
+        ? getSkillPath()
+        : customDir
+      const errorMessage = await shell.openPath(target)
+      if (errorMessage) {
+        return { success: false, error: errorMessage }
+      }
+      return { success: true, path: target }
+    } catch (error) {
+      console.error('Failed to open skill dir:', error)
+      return { success: false, error: String(error) }
+    }
+  })
+
   const resolveScriptWorkspacePath = (rootPath: string, relativePath = '') => {
     const root = path.resolve(rootPath)
     const target = path.resolve(root, relativePath)

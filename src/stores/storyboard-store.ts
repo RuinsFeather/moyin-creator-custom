@@ -94,6 +94,8 @@ interface StoryboardActions {
 
   // shot CRUD
   addShot: (index?: number) => void;
+  /** 新增空镜头：有选中镜头时插入其下方，否则追加到最后 */
+  addShotAfterSelection: () => void;
   duplicateShot: (shotId: string) => void;
   updateShot: (shotId: string, updates: Partial<StoryboardShot>) => void;
   updateShotContent: (shotId: string, updates: Partial<StoryboardShotContent>) => void;
@@ -207,6 +209,21 @@ export const useStoryboardStore = create<StoryboardStore>()(
           if (!state.document) return state;
           const { shots } = state.document;
           const at = index ?? shots.length;
+          const nw = createEmptyShot(0);
+          const next = [...shots.slice(0, at), nw, ...shots.slice(at)];
+          return {
+            document: { ...state.document, shots: reindexShots(next), updatedAt: Date.now() },
+            selectedShotId: nw.id,
+            dirty: true,
+          };
+        }),
+
+      addShotAfterSelection: () =>
+        set((state) => {
+          if (!state.document) return state;
+          const { shots } = state.document;
+          const selectedIndex = shots.findIndex((s) => s.id === state.selectedShotId);
+          const at = selectedIndex >= 0 ? selectedIndex + 1 : shots.length;
           const nw = createEmptyShot(0);
           const next = [...shots.slice(0, at), nw, ...shots.slice(at)];
           return {

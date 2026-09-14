@@ -33,6 +33,20 @@ import { canConnectBlueprintPorts } from '@/lib/blueprint/blueprint-schema';
 import { generateUUID, cn } from '@/lib/utils';
 import { blueprintNodeTypes } from './boxes';
 import { CanvasContextMenu } from './CanvasContextMenu';
+import {
+  classifyBlueprintMediaFile,
+  persistDroppedBlueprintFiles,
+} from '@/lib/blueprint/blueprint-media';
+import { toast } from 'sonner';
+
+const DROP_NODE_COLUMN_GAP = 360;
+const DROP_NODE_ROW_GAP = 280;
+const DROP_NODE_COLUMNS = 3;
+
+function containsExternalFiles(dataTransfer: DataTransfer): boolean {
+  return Array.from(dataTransfer.types).includes('Files')
+    && !Array.from(dataTransfer.types).includes('application/x-media-item');
+}
 
 /** Find the port data types for a given node type + handle ID. */
 function getPortDataTypes(
@@ -58,10 +72,13 @@ function getPortDataTypes(
  */
 export function BlueprintCanvas() {
   const containerRef = useRef<HTMLDivElement>(null);
-  
+  const dragDepthRef = useRef(0);
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+  const [isImportingFiles, setIsImportingFiles] = useState(false);
+
   // ── Context menu state ──────────────────────────────────────────────────
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
-  
+
   // ── Connection highlighting state ───────────────────────────────────────
   const [connectingFrom, setConnectingFrom] = useState<{
     nodeId: string;
@@ -305,6 +322,77 @@ export function BlueprintCanvas() {
     [viewport, addNode],
   );
 
+  const onFileDragEnter = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!containsExternalFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setIsDraggingFiles(true);
+  }, []);
+
+  const onFileDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!containsExternalFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  }, []);
+
+  const onFileDragLeave = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!containsExternalFiles(event.dataTransfer)) return;
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setIsDraggingFiles(false);
+  }, []);
+
+  const onFileDrop = useCallback(async (event: React.DragEvent<HTMLDivElement>) => {
+    if (!containsExternalFiles(event.dataTransfer) || !containerRef.current) return;
+    event.preventDefault();
+    dragDepthRef.current = 0;
+    setIsDraggingFiles(false);
+    if (isImportingFiles) return;
+
+    const files = Array.from(event.dataTransfer.files);
+    const supportedCount = files.filter((file) => classifyBlueprintMediaFile(file) !== null).length;
+    const unsupportedCount = files.length - supportedCount;
+    if (supportedCount === 0) {
+      toast.error('未检测到支持的图片或视频文件');
+      return;
+    }
+
+    const bounds = containerRef.current.getBoundingClientRect();
+    const dropPosition = {
+      x: (event.clientX - bounds.left - viewport.x) / viewport.zoom,
+      y: (event.clientY - bounds.top - viewport.y) / viewport.zoom,
+    };
+
+    setIsImportingFiles(true);
+    try {
+      const persisted = await persistDroppedBlueprintFiles(files);
+      persisted.forEach(({ file, kind, ref }, index) => {
+        const nodeType = kind === 'image' ? 'image-box' : 'video-box';
+        addNode({
+          id: generateUUID(),
+          type: nodeType,
+          position: {
+            x: dropPosition.x + (index % DROP_NODE_COLUMNS) * DROP_NODE_COLUMN_GAP,
+            y: dropPosition.y + Math.floor(index / DROP_NODE_COLUMNS) * DROP_NODE_ROW_GAP,
+          },
+          data: {
+            nodeType,
+            label: file.name,
+            config: { media: [ref] },
+          },
+        } as BlueprintNode);
+      });
+      toast.success(`已创建 ${persisted.length} 个素材窗口`);
+      if (unsupportedCount > 0) {
+        toast.warning(`已忽略 ${unsupportedCount} 个不支持的文件`);
+      }
+    } catch (error) {
+      console.error('[BlueprintCanvas] 导入素材失败:', error);
+      toast.error(error instanceof Error ? error.message : '素材导入失败');
+    } finally {
+      setIsImportingFiles(false);
+    }
+  }, [addNode, isImportingFiles, viewport.x, viewport.y, viewport.zoom]);
+
   // ── Memoize default viewport to avoid re-applying on every render ───────
   const defaultViewport = useMemo(
     () => ({ x: viewport.x, y: viewport.y, zoom: viewport.zoom }),
@@ -346,11 +434,15 @@ export function BlueprintCanvas() {
     <div
       ref={containerRef}
       className={cn(
-        'h-full w-full',
+        'relative h-full w-full',
         connectingFrom && 'blueprint-canvas-connecting',
       )}
       onPointerDownCapture={handleCanvasPointerDownCapture}
       onDoubleClick={handleContainerDoubleClick}
+      onDragEnter={onFileDragEnter}
+      onDragOver={onFileDragOver}
+      onDragLeave={onFileDragLeave}
+      onDrop={onFileDrop}
     >
       <ReactFlow
         nodes={nodes}
@@ -370,6 +462,11 @@ export function BlueprintCanvas() {
         onViewportChange={onViewportChange}
         defaultViewport={defaultViewport}
         fitView
+        panOnDrag={[1, 2]}
+        selectionOnDrag
+        panActivationKeyCode={null}
+        selectionKeyCode={null}
+        multiSelectionKeyCode={null}
         snapToGrid
         snapGrid={[16, 16]}
         deleteKeyCode={['Backspace', 'Delete']}
@@ -397,6 +494,17 @@ export function BlueprintCanvas() {
           y={contextMenu.y}
           onClose={handleCloseContextMenu}
         />
+      )}
+      {(isDraggingFiles || isImportingFiles) && (
+        <div className="pointer-events-none absolute inset-4 z-40 flex items-center justify-center rounded-xl border-2 border-dashed border-primary bg-background/85 backdrop-blur-sm">
+          <div className="rounded-lg bg-panel px-6 py-4 text-center shadow-lg">
+            <div className="text-2xl">{isImportingFiles ? '⏳' : '📥'}</div>
+            <p className="mt-2 text-sm font-medium text-foreground">
+              {isImportingFiles ? '正在导入素材…' : '释放以创建图片或视频窗口'}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">支持同时拖入多个图片和视频文件</p>
+          </div>
+        </div>
       )}
     </div>
   );

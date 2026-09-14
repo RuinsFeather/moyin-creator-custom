@@ -74,6 +74,7 @@ describe('§12.3 视频任务网络中断与幂等恢复（integration）', () =
       selectedEdgeId: null,
       drawerNodeId: null,
       currentRun: null,
+      activeRuns: {},
       executionLock: false,
       abortController: null,
       errorSummary: [],

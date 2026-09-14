@@ -25,10 +25,18 @@ import { saveVideoToLocal, readImageAsBase64 } from '@/lib/image-storage';
 import { toast } from 'sonner';
 import { sanitizeErrorMessage } from '@/lib/blueprint/error-utils';
 import {
+  isSeedanceModel,
   resolveSeedanceCapability,
   validateSeedanceDuration,
   validateSeedanceReferenceCounts,
 } from '@/lib/video/seedance-capability';
+import { buildVolcVideoSubmitPath } from '@/lib/video/volc-video-endpoint';
+import type { SeedancePostChannel } from '@/lib/api-key-manager';
+import {
+  isStrictGptImageGenerationRequest,
+  sanitizeImageGenerationJsonBody,
+} from '@/lib/ai/image-request-policy';
+import { submitGptImageEdit } from '@/lib/ai/gpt-image-edits';
 
 // ==================== Types ====================
 
@@ -93,7 +101,7 @@ export interface FreedomVideoParams {
 
 export interface FreedomServerTaskInfo {
   taskId: string;
-  route: 'unified' | 'volc' | 'openai_official';
+  route: 'unified' | 'volc' | 'openai_official' | 'artsdance';
   pollUrl: string;
   model: string;
 }
@@ -461,22 +469,6 @@ function getRootBaseUrl(baseUrl: string): string {
   return normalized.replace(/\/v\d+$/, '');
 }
 
-function buildVolcVideoSubmitPath(baseUrl: string): string {
-  const normalized = baseUrl.replace(/\/+$/, '');
-  if (/\/contents\/generations\/tasks$/i.test(normalized)) {
-    return normalized;
-  }
-  if (/\/api\/v3$/i.test(normalized)) {
-    return `${normalized}/contents/generations/tasks`;
-  }
-  // 火山方舟原生域名，或本地/自建的方舟兼容服务，应使用 /api/v3/contents/generations/tasks。
-  if (/\.volces\.com|ark\.cn-beijing|localhost|127\.0\.0\.1|^https?:\/\/(?:10|172\.(?:1[6-9]|2\d|3[0-1])|192\.168)\./i.test(normalized)) {
-    return `${normalized}/api/v3/contents/generations/tasks`;
-  }
-  // MemeFast 等中转使用 /volc/v1/contents/generations/tasks。
-  return `${getRootBaseUrl(normalized)}/volc/v1/contents/generations/tasks`;
-}
-
 async function readJsonResponse<T = any>(response: Response, label: string): Promise<T> {
   const text = await response.text();
   try {
@@ -546,7 +538,7 @@ function detectFreedomImageRoute(model: string, endpointTypes?: string[]): Freed
   return baseRoute === 'openai_chat' ? 'openai_chat' : 'openai_images';
 }
 
-type FreedomVideoRoute = 'openai_official' | 'unified' | 'volc' | 'wan' | 'kling' | 'replicate';
+type FreedomVideoRoute = 'openai_official' | 'unified' | 'volc' | 'wan' | 'kling' | 'replicate' | 'artsdance';
 
 const FREEDOM_VIDEO_ROUTE_MAP: Record<string, FreedomVideoRoute> = {
   'openAI官方视频格式': 'openai_official',
@@ -630,11 +622,14 @@ function getUnifiedEndpointPaths(endpointTypes: string[]): { submit: string; pol
 function detectFreedomVideoRoute(model: string, endpointTypes?: string[]): FreedomVideoRoute {
   const m = model.toLowerCase();
 
+  // artsdance 系列：seedance 的 OpenAI 兼容格式版本，必须优先走 /v1/video/generations + metadata.content
+  if (m.includes('artsdance')) return 'artsdance';
+
   // Seedance/Doubao 必须优先按模型名走火山/方舟任务接口。
   // 这类模型如果被未验证 key 同步出的 endpointTypes 污染成“视频统一格式”，
   // 会误走 /v1/video/generations 并返回 404。缓存文件清理后恢复正常，
   // 说明这里不能让全局 endpointTypes 覆盖 Seedance 的确定路由。
-  if (m.includes('seedance') || m.includes('doubao')) return 'volc';
+  if (isSeedanceModel(model)) return 'volc';
 
   if (endpointTypes && endpointTypes.length > 0) {
     // 优先级：官方 Sora -> Kling -> Volc -> Wan -> Replicate -> Unified
@@ -868,6 +863,26 @@ async function _generateFreedomImageInner(
     prompt: params.prompt.slice(0, 50),
   });
 
+  // GPT Image 带参考图属于图片编辑：必须使用 multipart /v1/images/edits。
+  // 此判断优先于 endpoint metadata，避免被错误映射到 chat 或 generations。
+  if (isGptImageModel && params.referenceImages?.length) {
+    params.onProgress?.({ phase: 'submitting', percent: 10, message: '上传参考图并提交编辑…' });
+    const imageUrl = await submitGptImageEdit({
+      baseUrl: normalizedBase,
+      apiKey,
+      model,
+      prompt: params.prompt,
+      referenceImages: params.referenceImages,
+      size: normalizeGptImageSize(params.aspectRatio, params.resolution),
+      extraParams: params.extraParams,
+      signal: params.signal,
+    });
+    params.onProgress?.({ phase: 'finalizing', percent: 95, message: '保存到素材库…' });
+    const mediaId = saveToMediaLibrary(imageUrl, params.prompt, 'ai-image', params.projectId);
+    params.onProgress?.({ phase: 'done', percent: 100, message: '完成' });
+    return { url: imageUrl, mediaId };
+  }
+
   if (route === 'midjourney') {
     return await generateViaMidjourneyEndpoint(params, model, apiKey, normalizedBase);
   }
@@ -906,11 +921,7 @@ async function _generateFreedomImageInner(
     }
   }
 
-  // 注意：GPT Image + 参考图不再改道 chat/completions。
-  // images/generations 端点本身支持多模态编辑（body.image 传参考图），
-  // 且 size 白名单在该端点生效；改道 chat 会导致 size 被中转站丢弃
-  // （自动回落 auto/沿用参考图画幅），并因中转站通常只给 gpt-image 注册
-  // images 通道而出现「无可用渠道」的间歇性连接失败。
+  // GPT Image 无参考图时使用标准文生图 generations 端点。
   return await generateViaImagesEndpoint(params, model, apiKey, normalizedBase, endpointTypes);
 }
 
@@ -1525,6 +1536,7 @@ async function generateViaImagesEndpoint(
     model,
   };
   const isGptImage = isGptImageModelId(model);
+  const imagePaths = getImageEndpointPaths(endpointTypes || []);
 
   // 尺寸下发：同时附带 aspect_ratio / size / width / height，
   // 各供应商按各自识别字段自行匹配（未识别字段会被忽略）
@@ -1547,9 +1559,10 @@ async function generateViaImagesEndpoint(
   if (params.extraParams) {
     Object.assign(body, params.extraParams);
   }
-  // 参考图：GPT-image 系列使用 image 字段（支持单张字符串或数组）
-  // 将 dataURL 转为纯 base64（去掉 data:xxx;base64, 前缀），兼容各类代理
-  if (params.referenceImages && params.referenceImages.length > 0) {
+  // 部分自定义提供商接受 JSON 参考图；严格的 GPT Image generations
+  // 端点不接受这些字段（参考图需走单独的 edits/multipart 协议）。
+  const strictGptGeneration = isStrictGptImageGenerationRequest(model, imagePaths.submit);
+  if (params.referenceImages && params.referenceImages.length > 0 && !strictGptGeneration) {
     const refs = params.referenceImages.slice(0, 16);
     const toImageValue = (dataUrl: string): string => {
       // 如果已经是 http(s) URL，直接使用
@@ -1565,7 +1578,12 @@ async function generateViaImagesEndpoint(
     }
   }
 
-  const imagePaths = getImageEndpointPaths(endpointTypes || []);
+  // extraParams 也可能带入历史兼容字段，提交前统一清理。
+  sanitizeImageGenerationJsonBody(body, model, imagePaths.submit);
+  if (strictGptGeneration && params.referenceImages?.length) {
+    console.warn('[Freedom] GPT Image generations endpoint does not accept JSON reference images; omitted unsupported fields.');
+  }
+
   const rootBase = getRootBaseUrl(baseUrl);
   const submitUrl = `${rootBase}${imagePaths.submit}`;
   console.log('[Freedom] Submitting via images endpoint:', {
@@ -2357,7 +2375,16 @@ async function _generateFreedomVideoInner(
       result = await generateVideoViaOpenAIOfficial(innerParams, model, apiKey, baseUrl);
       break;
     case 'volc':
-      result = await generateVideoViaVolc(innerParams, model, apiKey, baseUrl);
+      result = await generateVideoViaVolc(
+        innerParams,
+        model,
+        apiKey,
+        baseUrl,
+        config.provider.seedancePostChannel,
+      );
+      break;
+    case 'artsdance':
+      result = await generateVideoViaArtsdance(innerParams, model, apiKey, baseUrl);
       break;
     case 'wan':
       result = await generateVideoViaWan(innerParams, model, apiKey, baseUrl);
@@ -2489,7 +2516,7 @@ export async function queryFreedomTaskById(options: {
   let pollUrl = explicitPollUrl;
   if (!pollUrl) {
     if (route === 'volc') {
-      pollUrl = `${buildVolcVideoSubmitPath(baseUrl)}/${taskId}`;
+      pollUrl = `${buildVolcVideoSubmitPath(baseUrl, config?.provider.seedancePostChannel)}/${taskId}`;
     } else if (route === 'openai_official') {
       pollUrl = buildEndpoint(baseUrl, `videos/${taskId}`);
     } else {
@@ -3271,7 +3298,7 @@ async function pollUnifiedVideoTask(
     const pollResp = await pollFetchWithRetry(pollUrl, { headers: authHeaders, signal }, pollState, signal);
     if (!pollResp) continue;
     const pollData = await pollResp.json();
-    const status = String(pollData.status || pollData.state || pollData.data?.status || '').toLowerCase();
+    const status = String(pollData.status || pollData.state || pollData.data?.status || pollData.data?.data?.status || '').toLowerCase();
     if (status === 'completed' || status === 'succeeded' || status === 'success') {
       const videoUrl = extractVideoUrl(pollData);
       if (videoUrl) return { url: videoUrl, taskId: String(taskId) };
@@ -3280,6 +3307,139 @@ async function pollUnifiedVideoTask(
       throw new Error(sanitizeErrorMessage(pollData.error?.message || pollData.error || pollData.message || '视频生成失败'));
     }
   }
+}
+
+/**
+ * Artsdance 视频生成（Seedance 的 OpenAI 兼容格式版本）
+ * datastart 等平台: POST /v1/video/generations + GET /v1/video/generations/{id}
+ * 使用 metadata.content 数组结构传递参考图
+ */
+async function generateVideoViaArtsdance(
+  params: FreedomVideoParams,
+  model: string,
+  apiKey: string,
+  baseUrl: string,
+): Promise<GenerationResult> {
+  const rootBase = getRootBaseUrl(baseUrl);
+  const submitUrl = `${rootBase}/v1/video/generations`;
+
+  // 构建 metadata.content 数组（artsdance 格式）
+  const content: Array<Record<string, unknown>> = [];
+  const grouped = groupVideoUploadFiles(params.uploadFiles);
+
+  // 多模态参考素材（Seedance / Artsdance 格式支持：image, video, audio）
+  if (grouped.references.length > 0) {
+    for (const ref of grouped.references) {
+      const url = await toUploadHttpUrl(ref);
+      const assetType = ref.assetType || inferAssetType(ref);
+      if (assetType === 'video') {
+        content.push({
+          type: 'video_url',
+          video_url: { url },
+          role: 'reference_video',
+        });
+      } else if (assetType === 'audio') {
+        content.push({
+          type: 'audio_url',
+          audio_url: { url },
+          role: 'reference_audio',
+        });
+      } else {
+        content.push({
+          type: 'image_url',
+          image_url: { url },
+          role: 'reference_image',
+        });
+      }
+    }
+  }
+
+  // 首帧/尾帧作为首尾帧/参考图处理
+  if (grouped.single || grouped.first) {
+    const url = await toUploadHttpUrl((grouped.single || grouped.first)!);
+    content.push({
+      type: 'image_url',
+      image_url: { url },
+      role: 'reference_image',
+    });
+  }
+  if (grouped.last) {
+    const url = await toUploadHttpUrl(grouped.last);
+    content.push({
+      type: 'image_url',
+      image_url: { url },
+      role: 'reference_image',
+    });
+  }
+
+  // 构建请求体
+  const body: Record<string, any> = {
+    model,
+    prompt: params.prompt,
+  };
+
+  // metadata 包含所有结构化参数
+  const metadata: Record<string, any> = {};
+  if (content.length > 0) metadata.content = content;
+  if (params.duration) {
+    body.duration = params.duration;
+    metadata.duration = params.duration;
+  }
+  if (params.resolution) {
+    body.resolution = params.resolution;
+    metadata.resolution = params.resolution;
+  }
+  if (params.aspectRatio) {
+    body.ratio = params.aspectRatio;
+    body.aspect_ratio = params.aspectRatio;
+    metadata.ratio = params.aspectRatio;
+    metadata.aspect_ratio = params.aspectRatio;
+  }
+  if (params.generateAudio !== undefined) {
+    body.generate_audio = params.generateAudio;
+    metadata.generate_audio = params.generateAudio;
+  }
+  metadata.watermark = params.watermark ?? false;
+
+  if (Object.keys(metadata).length > 0) body.metadata = metadata;
+
+  console.log('[Freedom] Artsdance submit → POST /v1/video/generations', {
+    model,
+    body,
+    metadata,
+    contentCount: content.length,
+  });
+
+  const resp = await corsFetch(submitUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+    signal: params.signal,
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw toHttpError('Artsdance video submit failed', resp.status, text);
+  }
+
+  const submitData = await resp.json();
+  const taskId =
+    submitData.task_id ||
+    submitData.id ||
+    submitData.request_id ||
+    submitData.data?.task_id ||
+    submitData.data?.id;
+  const directUrl = extractVideoUrl(submitData);
+  if (directUrl) return { url: directUrl, taskId: taskId ? String(taskId) : undefined };
+  if (!taskId) throw new Error('Artsdance 接口返回空任务 ID');
+
+  // 轮询任务状态
+  const pollUrl = `${rootBase}/v1/video/generations/${taskId}`;
+  params.onTaskCreated?.({ taskId: String(taskId), route: 'artsdance', pollUrl, model });
+  return pollUnifiedVideoTask(pollUrl, String(taskId), model, params.signal);
 }
 
 /**
@@ -3302,8 +3462,9 @@ async function generateVideoViaVolc(
   model: string,
   apiKey: string,
   baseUrl: string,
+  postChannel?: SeedancePostChannel,
 ): Promise<GenerationResult> {
-  const submitPath = buildVolcVideoSubmitPath(baseUrl);
+  const submitPath = buildVolcVideoSubmitPath(baseUrl, postChannel);
   const resolution = params.resolution?.toLowerCase();
   const ratio = params.aspectRatio;
   const usesSeedanceV2Params = resolveSeedanceCapability(model).structuredParameters
@@ -3763,15 +3924,36 @@ function extractImageUrl(data: any): string | null {
 }
 
 function extractVideoUrl(data: any): string | null {
-  if (data.data?.[0]?.url) return data.data[0].url;
-  if (data.url) return data.url;
-  if (data.output?.url) return data.output.url;
+  if (!data || typeof data !== 'object') return null;
+
+  const direct = (val: unknown): string | null => {
+    if (typeof val === 'string' && val.startsWith('http')) return val.trim();
+    return null;
+  };
+
+  if (direct(data.data?.[0]?.url)) return direct(data.data[0].url);
+  if (direct(data.data?.[0]?.video_url)) return direct(data.data[0].video_url);
+  if (direct(data.data?.result_url)) return direct(data.data.result_url);
+  if (direct(data.data?.video_url)) return direct(data.data.video_url);
+  if (direct(data.data?.url)) return direct(data.data.url);
+  if (direct(data.data?.data?.content?.video_url)) return direct(data.data.data.content.video_url);
+  if (direct(data.data?.content?.video_url)) return direct(data.data.content.video_url);
+  if (direct(data.data?.data?.result_url)) return direct(data.data.data.result_url);
+  if (direct(data.data?.data?.video_url)) return direct(data.data.data.video_url);
+  if (direct(data.data?.data?.url)) return direct(data.data.data.url);
+  if (direct(data.url)) return direct(data.url);
+  if (direct(data.output?.url)) return direct(data.output.url);
+  if (direct(data.output?.video_url)) return direct(data.output.video_url);
   // Replicate: output as direct string URL or array of URLs (minimax/video-01, etc.)
-  if (typeof data.output === 'string' && data.output.startsWith('http')) return data.output;
-  if (Array.isArray(data.output) && typeof data.output[0] === 'string') return data.output[0];
-  if (data.outputs?.[0]) return data.outputs[0];
-  if (data.video_url) return data.video_url;
-  if (data.response?.url) return data.response.url;  // doubao, jimeng, grok, wan2.6
+  if (typeof data.output === 'string' && data.output.startsWith('http')) return data.output.trim();
+  if (Array.isArray(data.output) && typeof data.output[0] === 'string' && data.output[0].startsWith('http')) return data.output[0].trim();
+  if (Array.isArray(data.outputs) && typeof data.outputs[0] === 'string' && data.outputs[0].startsWith('http')) return data.outputs[0].trim();
+  if (direct(data.video_url)) return direct(data.video_url);
+  if (direct(data.result_url)) return direct(data.result_url);
+  if (direct(data.response?.url)) return direct(data.response.url);  // doubao, jimeng, grok, wan2.6
+  if (direct(data.response?.video_url)) return direct(data.response.video_url);
+  if (direct(data.result?.url)) return direct(data.result.url);
+  if (direct(data.result?.video_url)) return direct(data.result.video_url);
   return null;
 }
 

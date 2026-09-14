@@ -20,9 +20,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
-import type { IProvider } from "@/lib/api-key-manager";
-import { getApiKeyCount } from "@/lib/api-key-manager";
+import type { IProvider, SeedancePostChannel } from "@/lib/api-key-manager";
+import { DEFAULT_SEEDANCE_POST_CHANNEL, getApiKeyCount } from "@/lib/api-key-manager";
 
 interface EditProviderDialogProps {
   open: boolean;
@@ -41,6 +42,9 @@ export function EditProviderDialog({
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("");
+  const [seedancePostChannel, setSeedancePostChannel] = useState<SeedancePostChannel>(
+    DEFAULT_SEEDANCE_POST_CHANNEL,
+  );
 
   // Initialize form when provider changes
   useEffect(() => {
@@ -50,6 +54,7 @@ export function EditProviderDialog({
       setApiKey(provider.apiKey);
       // 加载已有模型
       setModel(provider.model?.join(', ') || '');
+      setSeedancePostChannel(provider.seedancePostChannel ?? DEFAULT_SEEDANCE_POST_CHANNEL);
     }
   }, [provider]);
 
@@ -73,6 +78,7 @@ export function EditProviderDialog({
       baseUrl: baseUrl.trim(),
       apiKey: apiKey.trim(),
       model: models,
+      seedancePostChannel,
     });
 
     onOpenChange(false);
@@ -80,6 +86,9 @@ export function EditProviderDialog({
   };
 
   const keyCount = getApiKeyCount(apiKey);
+  const hasSeedanceModel = model
+    .split(/[,\n]/)
+    .some((item) => /seedance/i.test(item.trim()));
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -146,6 +155,34 @@ export function EditProviderDialog({
               多个模型用逗号分隔，第一个为默认模型
             </p>
           </div>
+
+          {hasSeedanceModel && (
+            <div className="space-y-2 rounded-md border p-3">
+              <div className="flex items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <Label htmlFor="seedance-post-channel">Seedance POST 地址</Label>
+                  <p className="text-xs text-muted-foreground">
+                    {seedancePostChannel === 'v1/video/generations/tasks'
+                      ? '/v1/video/generations/tasks'
+                      : '/api/v3/contents/generations/tasks（默认）'}
+                  </p>
+                </div>
+                <Switch
+                  id="seedance-post-channel"
+                  aria-label="使用 Seedance v1 视频任务通道"
+                  checked={seedancePostChannel === 'v1/video/generations/tasks'}
+                  onCheckedChange={(checked) => setSeedancePostChannel(
+                    checked
+                      ? 'v1/video/generations/tasks'
+                      : DEFAULT_SEEDANCE_POST_CHANNEL,
+                  )}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                开启后使用 v1/video 通道；关闭后使用官方 api/v3/contents 通道。
+              </p>
+            </div>
+          )}
         </div>
 
         <DialogFooter>

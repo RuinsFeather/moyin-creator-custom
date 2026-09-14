@@ -395,6 +395,46 @@ describe('node-executors', () => {
   // ── video-generator ───────────────────────────────────────────
 
   describe('video-generator', () => {
+    it('reports estimated progress while video generation is pending', async () => {
+      vi.useFakeTimers();
+      try {
+        let resolveVideo!: (value: {
+          url: string;
+          mediaId: string;
+          taskId: string;
+          metadata: Record<string, unknown>;
+        }) => void;
+        const pendingVideo = new Promise((resolve) => {
+          resolveVideo = resolve;
+        });
+        (generateFreedomVideo as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => pendingVideo);
+
+        const progressValues: number[] = [];
+        const node = makeNode('vid-progress', 'video-generator', { prompt: 'A moving cat' });
+        const ctx: NodeExecutionContext = {
+          ...makeCtx(node),
+          onProgress: (progress) => progressValues.push(progress),
+        };
+        const execution = NODE_EXECUTORS['video-generator'](ctx);
+
+        await vi.advanceTimersByTimeAsync(9000);
+        expect(progressValues[0]).toBe(10);
+        expect(progressValues.some((progress) => progress > 10 && progress < 100)).toBe(true);
+        expect(progressValues).not.toContain(100);
+
+        resolveVideo({
+          url: 'https://example.com/generated-video.mp4',
+          mediaId: 'media-789',
+          taskId: 'task-vid-789',
+          metadata: {},
+        });
+        await execution;
+        expect(progressValues[progressValues.length - 1]).toBe(100);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('executes successfully with a prompt', async () => {
       const node = makeNode('gen', 'video-generator', {
         prompt: 'A moving cat',

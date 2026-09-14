@@ -54,9 +54,9 @@ export function ScriptWorkspace() {
   const isLeftCollapsed = leftPanelWidth === 0;
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full min-h-0 flex flex-col overflow-hidden">
       {/* Header bar */}
-      <div className="flex items-center justify-between px-3 py-1.5 border-b border-border bg-panel">
+      <div className="shrink-0 flex items-center justify-between px-3 py-1.5 border-b border-border bg-panel">
         <div className="flex items-center gap-2">
           <button
             onClick={isLeftCollapsed ? restorePanelDefaults : collapseLeftPanel}

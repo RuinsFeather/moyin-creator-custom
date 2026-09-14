@@ -59,12 +59,19 @@ export interface BlueprintRunRequest {
   requestedAt: number;
 }
 
+export interface BlueprintActiveRun {
+  request: BlueprintRunRequest;
+  abortController: AbortController;
+}
+
 export interface BlueprintStoreState extends PersistedBlueprintState {
   selectedNodeId: string | null;
   selectedEdgeId: string | null;
   /** 双击图片/视频窗口时打开的配置抽屉节点 ID（运行时状态，不持久化、不进撤销历史） */
   drawerNodeId: string | null;
   currentRun: BlueprintRunRequest | null;
+  /** 当前并行执行中的运行，以 runId 索引（仅运行时，不持久化）。 */
+  activeRuns: Record<string, BlueprintActiveRun>;
   executionLock: boolean;
   abortController: AbortController | null;
   errorSummary: string[];
@@ -109,8 +116,9 @@ export interface BlueprintStoreActions {
     nodeId?: string,
     abortController?: AbortController,
   ) => BlueprintRunRequest | null;
-  finishRun: (errorSummary?: string[]) => void;
-  cancelRun: () => void;
+  finishRun: (errorSummary?: string[], runId?: string) => void;
+  /** 取消指定节点对应的运行；不传 nodeId 时取消全部运行。 */
+  cancelRun: (nodeId?: string) => void;
   resetRuntimeState: () => void;
   /**
    * Scan active blueprint for video-generator/video-box nodes with pending tasks
@@ -158,6 +166,7 @@ const runtimeInitialState: Omit<
   selectedEdgeId: null,
   drawerNodeId: null,
   currentRun: null,
+  activeRuns: {},
   executionLock: false,
   abortController: null,
   errorSummary: [],
@@ -645,7 +654,7 @@ export const useBlueprintStore = create<BlueprintStore>()(
 
       beginRun: (mode, nodeId, abortController = new AbortController()) => {
         const state = get();
-        if (state.executionLock || !state.activeBlueprintId) return null;
+        if (state.recoveryAbortController || !state.activeBlueprintId) return null;
         if (mode !== 'all' && !nodeId) return null;
         const activeBlueprint = state.blueprints.find(
           (blueprint) =>
@@ -654,6 +663,19 @@ export const useBlueprintStore = create<BlueprintStore>()(
         );
         if (!activeBlueprint) return null;
         if (nodeId && !activeBlueprint.nodes.some((node) => node.id === nodeId)) {
+          return null;
+        }
+        const activeRuns = state.activeRuns ?? {};
+        const runningRequests = Object.values(activeRuns).map((entry) => entry.request);
+        // 整图运行保持独占；节点运行只对同一目标去重，不阻塞其他窗口并行生成。
+        if (
+          (mode === 'all' && runningRequests.length > 0) ||
+          runningRequests.some(
+            (running) =>
+              running.mode === 'all' ||
+              (nodeId !== undefined && running.nodeId === nodeId),
+          )
+        ) {
           return null;
         }
         const request: BlueprintRunRequest = {
@@ -665,6 +687,10 @@ export const useBlueprintStore = create<BlueprintStore>()(
         };
         set({
           currentRun: request,
+          activeRuns: {
+            ...activeRuns,
+            [request.runId]: { request, abortController },
+          },
           executionLock: true,
           abortController,
           errorSummary: [],
@@ -672,26 +698,43 @@ export const useBlueprintStore = create<BlueprintStore>()(
         return request;
       },
 
-      finishRun: (errorSummary = []) => {
-        set({
-          currentRun: null,
-          executionLock: false,
-          abortController: null,
-          errorSummary,
+      finishRun: (errorSummary = [], runId) => {
+        set((state) => {
+          const activeRuns = { ...(state.activeRuns ?? {}) };
+          const completedRunId = runId ?? state.currentRun?.runId;
+          if (completedRunId) delete activeRuns[completedRunId];
+          const remaining = Object.values(activeRuns);
+          const currentRun = remaining.at(-1)?.request ?? null;
+          return {
+            activeRuns,
+            currentRun,
+            executionLock: remaining.length > 0 || state.recoveryAbortController !== null,
+            abortController: currentRun
+              ? activeRuns[currentRun.runId]?.abortController ?? null
+              : null,
+            errorSummary: [...state.errorSummary, ...errorSummary],
+          };
         });
       },
 
-      cancelRun: () => {
+      cancelRun: (nodeId) => {
         const state = get();
-        state.abortController?.abort();
-        const runId = state.currentRun?.runId;
+        const activeRuns = state.activeRuns ?? {};
+        const runsToCancel = Object.values(activeRuns).filter(
+          ({ request }) => nodeId === undefined || request.nodeId === nodeId,
+        );
+        if (runsToCancel.length === 0) return;
+        runsToCancel.forEach(({ abortController }) => abortController.abort());
+        const cancelledRunIds = new Set(
+          runsToCancel.map(({ request }) => request.runId),
+        );
         set((current) => ({
           ...updateActiveBlueprint(current, (blueprint) => ({
             ...blueprint,
             status: blueprint.status === 'archived' ? 'archived' : 'draft',
             nodes: blueprint.nodes.map((node) =>
-              runId &&
-              node.data.execution?.runId === runId &&
+              node.data.execution?.runId &&
+              cancelledRunIds.has(node.data.execution.runId) &&
               ['queued', 'running'].includes(node.data.execution.status)
                 ? {
                     ...node,
@@ -708,9 +751,22 @@ export const useBlueprintStore = create<BlueprintStore>()(
             ),
             updatedAt: Date.now(),
           })),
-          currentRun: null,
-          executionLock: false,
-          abortController: null,
+          activeRuns: Object.fromEntries(
+            Object.entries(current.activeRuns ?? {}).filter(
+              ([runId]) => !cancelledRunIds.has(runId),
+            ),
+          ),
+          currentRun: Object.values(current.activeRuns ?? {})
+            .filter(({ request }) => !cancelledRunIds.has(request.runId))
+            .at(-1)?.request ?? null,
+          executionLock:
+            Object.values(current.activeRuns ?? {}).some(
+              ({ request }) => !cancelledRunIds.has(request.runId),
+            ) || current.recoveryAbortController !== null,
+          abortController:
+            Object.values(current.activeRuns ?? {})
+              .filter(({ request }) => !cancelledRunIds.has(request.runId))
+              .at(-1)?.abortController ?? null,
         }));
       },
 
@@ -901,6 +957,9 @@ export const useBlueprintStore = create<BlueprintStore>()(
 
       resetRuntimeState: () => {
         const state = get();
+        Object.values(state.activeRuns ?? {}).forEach(({ abortController }) =>
+          abortController.abort(),
+        );
         state.recoveryAbortController?.abort();
         set(runtimeInitialState);
       },

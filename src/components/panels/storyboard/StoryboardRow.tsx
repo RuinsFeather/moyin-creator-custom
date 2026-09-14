@@ -42,7 +42,7 @@ export function StoryboardRow({ shot }: Props) {
       </TableCell>
       <TableCell className="font-mono text-xs">{shot.shotNumber}</TableCell>
       <TableCell>
-        <div className="text-xs font-medium">{c.summary || "—"}</div>
+        <div className="text-xs font-medium">{c.scene || "—"}</div>
         {c.action && <div className="text-[11px] text-muted-foreground mt-0.5">{c.action}</div>}
         {(c.shotSize || c.cameraMovement) && (
           <div className="text-[10px] text-muted-foreground mt-0.5">

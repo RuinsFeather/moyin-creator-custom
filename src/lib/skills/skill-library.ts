@@ -182,6 +182,30 @@ export async function pickCustomSkillDir(): Promise<string | null> {
   }
 }
 
+/**
+ * Open a skill directory in the system file explorer. When `isBuiltIn` is true,
+ * opens the built-in skill directory (for reference); otherwise opens the custom
+ * skill directory (from localStorage, or built-in if not set). Only works in Electron.
+ */
+export async function openSkillDir(isBuiltIn = false): Promise<boolean> {
+  const ipc = getIpc();
+  if (!ipc) return false;
+  try {
+    const customDir = isBuiltIn ? null : getCustomSkillDir();
+    const result = (await ipc.invoke('skills:openDir', {
+      customDir,
+      isBuiltIn,
+    })) as { success?: boolean; error?: string };
+    if (!result.success) {
+      console.warn('Failed to open skill dir:', result.error);
+    }
+    return result.success ?? false;
+  } catch (error) {
+    console.error('openSkillDir error:', error);
+    return false;
+  }
+}
+
 // ── Listing ──────────────────────────────────────────────────────────────
 
 interface RawSkillsResult {

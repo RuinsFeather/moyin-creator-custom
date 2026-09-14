@@ -10,6 +10,7 @@
  * elements with Tailwind classes work reliably inside node cards.
  */
 
+import { useState } from 'react';
 import { Loader2, StopCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -32,18 +33,64 @@ export function NodeSection({
 export function NodeLabel({
   icon,
   label,
+  onRename,
   children,
 }: {
   icon: string;
   label: string;
+  /** 双击标题进入编辑；为空则不可编辑。 */
+  onRename?: (next: string) => void;
   children?: React.ReactNode;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(label);
+
+  const commit = () => {
+    const next = draft.trim();
+    if (next && next !== label) onRename?.(next);
+    setEditing(false);
+  };
+
   return (
     <div className="mb-1 flex items-center gap-1.5">
       <span className="text-xs">{icon}</span>
-      <span className="truncate text-xs font-medium text-foreground">
-        {label}
-      </span>
+      {editing ? (
+        <input
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') commit();
+            if (e.key === 'Escape') {
+              setDraft(label);
+              setEditing(false);
+            }
+          }}
+          onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+          className="nodrag min-w-0 flex-1 rounded border border-primary/60 bg-background px-1 py-0.5 text-xs font-medium text-foreground outline-none"
+        />
+      ) : (
+        <span
+          className={cn(
+            'truncate text-xs font-medium text-foreground',
+            onRename && 'cursor-text select-none',
+          )}
+          title={onRename ? '双击重命名' : undefined}
+          onDoubleClick={
+            onRename
+              ? (e) => {
+                  e.stopPropagation();
+                  setDraft(label);
+                  setEditing(true);
+                }
+              : undefined
+          }
+        >
+          {label}
+        </span>
+      )}
       {children}
     </div>
   );

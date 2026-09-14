@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   SEEDANCE_2_5_MODEL_ID,
+  isSeedanceModel,
   isSeedance25Model,
   resolveSeedanceCapability,
+  resolveSeedanceCapabilityModelId,
   validateSeedanceDuration,
   validateSeedanceReferenceCounts,
 } from '../seedance-capability';
@@ -12,6 +14,25 @@ import {
 } from '../../freedom/model-registry';
 
 describe('Seedance 2.5 capability', () => {
+  it('recognizes Seedance names without the doubao prefix', () => {
+    expect(isSeedanceModel('seedance-2.0')).toBe(true);
+    expect(isSeedanceModel('seedance-2.5')).toBe(true);
+    expect(isSeedanceModel('seedance-1.5-pro')).toBe(true);
+    expect(resolveSeedanceCapability('seedance-2.0').version).toBe('2.0');
+    expect(resolveSeedanceCapability('seedance-2.5').version).toBe('2.5');
+    expect(resolveSeedanceCapability('seedance-1.5-pro').version).toBe('legacy');
+  });
+
+  it('maps prefixed and unprefixed names to registered UI capabilities', () => {
+    expect(resolveSeedanceCapabilityModelId('seedance-2.0')).toBe('seedance-pro-t2v');
+    expect(resolveSeedanceCapabilityModelId('doubao-seedance-2-0-260128')).toBe('seedance-pro-t2v');
+    expect(resolveSeedanceCapabilityModelId('seedance-2.5')).toBe('seedance-2.5');
+    expect(resolveSeedanceCapabilityModelId(SEEDANCE_2_5_MODEL_ID)).toBe('seedance-2.5');
+    expect(resolveSeedanceCapabilityModelId('seedance-1.5-pro')).toBe('seedance-v1.5-pro-t2v');
+    expect(resolveSeedanceCapabilityModelId('doubao-seedance-1-5-pro-251215')).toBe('seedance-v1.5-pro-t2v');
+    expect(resolveSeedanceCapabilityModelId('SEEDANCE-1.5-PRO-FAST')).toBe('seedance-v1.5-pro-t2v-fast');
+  });
+
   it('recognizes the official model and structured parameters', () => {
     expect(isSeedance25Model(SEEDANCE_2_5_MODEL_ID)).toBe(true);
     const capability = resolveSeedanceCapability(SEEDANCE_2_5_MODEL_ID);

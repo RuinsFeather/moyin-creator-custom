@@ -25,7 +25,9 @@ import { inFlightVideoTaskIds, setVideoStudioMounted } from '@/lib/freedom/video
 import { VolcAssetPanel, type VolcAssetItem } from './VolcAssetPanel';
 import { resolveVeoUploadCapability, type VeoUploadCapability } from '@/lib/freedom/veo-capability';
 import {
+  isSeedanceModel,
   resolveSeedanceCapability,
+  resolveSeedanceCapabilityModelId,
   validateSeedanceDuration,
   validateSeedanceReferenceCounts,
 } from '@/lib/video/seedance-capability';
@@ -121,22 +123,16 @@ interface MultiRefAsset {
   if (/^vidu/i.test(modelId) || modelId === 'aigc-video-vidu') {
     return 'vidu2.0';
   }
-  if (/^doubao-seedance-/i.test(modelId)) {
-    if (modelId.includes('2-5')) return 'seedance-2.5';
-    if (modelId.includes('pro-fast')) return 'seedance-pro-t2v-fast';
-    if (modelId.includes('lite')) return 'seedance-lite-t2v';
-    return 'seedance-pro-t2v';
-  }
+  if (isSeedanceModel(modelId)) return resolveSeedanceCapabilityModelId(modelId);
   if (lower.startsWith('minimax/video-01')) {
     return 'minimax-hailuo-02-standard-t2v';
   }
   return modelId;
 }
 
-/** 判断模型是否属于 Seedance 组别 */
+/** 判断模型是否属于 Seedance / Artsdance 组别 */
 function isSeedanceGroupModel(modelId: string): boolean {
-  const lower = modelId.toLowerCase();
-  return lower.includes('seedance');
+  return isSeedanceModel(modelId);
 }
 
 /** 判断模型是否属于 Seedance 2.0 组别 */

@@ -4,7 +4,9 @@
 /**
  * Storyboard analysis service (AI 完整剧本拆镜)
  *
- * 一次分析当前单集、单场剧本，输出不含 集/场、首尾帧和提示词 的分镜镜头。
+ * 阶段 3 重构：画面级精细拆分。
+ * 链路：解析六类语法 → 提取源单元/视觉事件 → 按场次与事件组分批 →
+ *       预算感知生成 → 源覆盖审计 → 定向修复 → 全局原子发布。
  * 关键约束（来自重构计划）：
  *   - 失败不覆盖现有分镜（先做快照，成功才应用）
  *   - 可取消 / 重试 / 失败恢复
@@ -13,6 +15,12 @@
 import { callFeatureAPI } from "@/lib/ai/feature-router";
 import { parseStoryboardResponse } from "./storyboard-response-parser";
 import { validateShotBatch } from "./storyboard-validator";
+import { SHOT_SIZE_VALUES, CAMERA_MOVEMENT_VALUES } from "./shot-options";
+import { parseScriptSyntax } from "./script-syntax-parser";
+import { extractSourceUnits } from "./storyboard-visual-events";
+import { auditSourceCoverage } from "./storyboard-coverage-audit";
+import { validateWithSkillRules } from "./skill-validator";
+import type { SourceUnit, ShotDraft, CoverageAuditResult } from "./storyboard-source-contract";
 import { useStoryboardStore } from "@/stores/storyboard-store";
 import { useCharacterLibraryStore } from "@/stores/character-library-store";
 import { useSceneStore } from "@/stores/scene-store";
@@ -44,12 +52,14 @@ export interface AnalyzeResult {
 const cancelFlags = new Map<string, boolean>();
 
 /**
- * 长剧本按段落分批的字符上限（§14 风险：单份剧本内容过长）。
- * 超过该长度时服务层按段落分批分析并在返回前合并镜头，UI 仍保持一张分镜表。
+ * 长剧本按段落分批的字符上限（兼容保留）。
+ * 阶段 3 中分批不再以字符硬切，而是按场次与事件组；此常量仅作兜底预算参考。
  */
 export const SCRIPT_CHUNK_CHAR_LIMIT = 8000;
-const MIN_RECOVERY_CHUNK_LENGTH = 1200;
-const MAX_RECOVERY_DEPTH = 5;
+/** 单批源单元数上限（预算感知的保守默认） */
+const MAX_UNITS_PER_BATCH = 12;
+/** 定向修复每单元最大重试次数 */
+const MAX_REPAIR_RETRIES = 2;
 
 /**
  * 将剧本按段落切分为不超过字符上限的若干块。
@@ -191,7 +201,14 @@ function matchReference(
  * 构建每个镜头的 StoryboardShot（分配 ID、references 匹配库）。
  */
 function buildShots(
-  parsedShots: Array<{ content: StoryboardShotContent; references?: any; sourceText?: string }>,
+  parsedShots: Array<{
+    content: StoryboardShotContent;
+    references?: any;
+    sourceText?: string;
+    sourceUnitIds?: string[];
+    dialogueSlices?: Array<{ unitId: string; start: number; end: number }>;
+    sourceRanges?: Array<{ start: number; end: number }>;
+  }>,
 ): StoryboardShot[] {
   const characterNames = getCharacterNames();
   const sceneNames = getSceneNames();
@@ -208,6 +225,9 @@ function buildShots(
       source: "ai-suggestion" as const,
     }));
 
+    const continuous =
+      p.sourceRanges && p.sourceRanges.length === 1 ? p.sourceRanges[0] : undefined;
+
     return {
       id: uidCounter(),
       order: i,
@@ -221,15 +241,16 @@ function buildShots(
       createdAt: now,
       updatedAt: now,
       sourceText: p.sourceText,
+      sourceTextRange: continuous,
     };
   });
 }
 
 /**
- * 构建 AI 系统提示词（严格约束：不含集/场/首尾帧/提示词）。
+ * 构建 AI 系统提示词（阶段 3：画面节拍 + 六类语法 + 对白语义规则）。
  */
 export function buildSystemPrompt(): string {
-  return `你是专业的影视分镜师。请根据给定的单集、单场剧本，将其拆解为一组连续的分镜镜头。
+  return `你是专业的影视分镜师。请根据给定的单集、单场剧本，按画面变化拆解为一组连续的分镜镜头。
 
 【硬性要求】
 1. 只针对当前输入的这份剧本进行拆镜，不要涉及其他集、场。
@@ -238,17 +259,25 @@ export function buildSystemPrompt(): string {
 4. 不要输出任何 Base64 图片、图片 URL 或视频 URL。
 5. 每个镜头只描述画面内容、场景、动作、对白、景别、镜头运动，不负责生成图像或视频。
 
+【拆分原则】
+1. 一个镜头对应一个在同一时空中连续发生、可独立拍摄的视觉节拍。
+2. 先拆视觉事件链，再绑定对白：建立 → 发起 → 显现 → 作用 → 结果 → 反应。
+3. 出现以下情况必须拆分：地点/时间变化、主要可见主体改变、主体状态不可逆变化、
+   新威胁/新角色/关键道具/字幕/转场/特效首次显现、动作从发起进入命中/作用或从作用进入结果/反应。
+4. 对白绑定到说话发生时的画面，不因说话人变化机械切镜；同一连续画面内的问答可合并。
+5. 画外音、字幕、转场和特效必须挂到实际画面上，不能单独构成空镜头。
+6. 镜头数量由视觉节拍覆盖决定，不设固定配额；长复合动作要细拆，短而不可再分的动作保持完整。
+
 【输出格式】
 必须严格输出一个 JSON 数组，不要输出任何解释文字。数组每一项结构如下：
 [
   {
     "content": {
-      "summary": "本镜头画面内容的一句话概述",
       "scene": "发生场景，尽量使用给定的角色/场景库中的名称",
       "action": "镜头内主要动作",
       "dialogue": "若本镜头有对白，放剧本原文；否则空字符串",
-      "shotSize": "景别：特写/近景/中景/全景/远景",
-      "cameraMovement": "镜头运动：固定/推/拉/摇/移/跟",
+      "shotSize": "景别：${SHOT_SIZE_VALUES.join("/")}",
+      "cameraMovement": "镜头运动：${CAMERA_MOVEMENT_VALUES.join("/")}",
       "durationSeconds": 3,
       "additionalDescription": "补充视觉或氛围描述，可选"
     },
@@ -257,12 +286,17 @@ export function buildSystemPrompt(): string {
       "costumes": ["出现的服装名"],
       "scenes": ["出现的场景名"]
     },
+    "sourceUnitIds": ["本镜头覆盖的源单元 ID（来自输入）"],
+    "dialogueSlices": [{"unitId": "对白单元ID", "start": 该片段在整篇剧本中的绝对起始偏移, "end": 绝对结束偏移}],
     "sourceText": "从剧本中摘取的对应原文，可选"
   }
 ]
 
+【禁止输出字段】
+不要输出 "summary" 字段，画面内容直接由 scene + action 表达。
+
 【输出规模约束】
-1. 本次最多输出 8 个镜头；剧本内容较多时，优先覆盖关键动作和对白，不要为了增加细节输出超长描述。
+1. 镜头数量由视觉节拍决定，不设固定数量；每个镜头的 action 必须非空且可拍摄。
 2. 必须输出完整、可直接 JSON.parse 的数组，结尾必须包含对应的 ] 和 }，不要在半个镜头中结束。
 3. 不要输出 Markdown 代码围栏、注释或任何 JSON 之外的文字。
 
@@ -280,6 +314,252 @@ export function buildUserPrompt(
   const hint = shotCountHint ? `\n【目标镜头数】约 ${shotCountHint} 个镜头，可根据剧情灵活调整。` : "";
   const ctx = context ? `\n【参考上下文】\n${context}\n` : "";
   return `【剧本】\n${scriptContent}\n${ctx}${hint}\n\n请按上述要求输出 JSON 数组。`;
+}
+
+/**
+ * 构建批次用户提示：带源单元 ID、原文范围与场次，明确"仅输出本批"。
+ */
+export function buildBatchUserPrompt(
+  units: SourceUnit[],
+  scriptContent: string,
+  context?: string,
+): string {
+  const unitLines = units
+    .filter((u) => u.required)
+    .map((u) => {
+      const text = scriptContent
+        .slice(u.sourceRange.start, u.sourceRange.end)
+        .replace(/\n/g, " ");
+      return `- [${u.id}] (${u.kind}) [${u.sourceRange.start},${u.sourceRange.end}) ${text}`;
+    })
+    .join("\n");
+  const constraintLines = units
+    .filter((u) => !u.required)
+    .map((u) => {
+      const text = scriptContent
+        .slice(u.sourceRange.start, u.sourceRange.end)
+        .replace(/\n/g, " ");
+      return `- (${u.kind}) [${u.sourceRange.start},${u.sourceRange.end}) ${text}`;
+    })
+    .join("\n");
+  const constraints = constraintLines
+    ? `\n\n【本批创作约束（不单独生成镜头）】\n${constraintLines}`
+    : "";
+  const ctx = context ? `\n【参考上下文】\n${context}\n` : "";
+  return `【本批需要覆盖的源单元】\n${unitLines}${constraints}\n\n【约束】\n仅输出覆盖上述源单元的镜头，按源顺序覆盖每个必需单元；可为同一动作生成多个镜头。${ctx}\n\n请按系统提示要求的 JSON 数组格式输出，每个镜头用 sourceUnitIds 标注其覆盖的源单元 ID。dialogueSlices 仅在一句对白确实跨多个镜头时输出；start/end 必须使用上方标注的整篇剧本绝对偏移，不确定时省略该字段。`;
+}
+
+// ==================== 分批 ====================
+
+interface Batch {
+  units: SourceUnit[];
+  range: { start: number; end: number };
+  sceneId: string | null;
+}
+
+/**
+ * 将源单元按场次与事件组边界分批（预算感知）。
+ * 不跨场；每批必需单元数不超过 MAX_UNITS_PER_BATCH。
+ */
+export function batchSourceUnits(units: SourceUnit[]): Batch[] {
+  const batches: Batch[] = [];
+  let current: SourceUnit[] = [];
+  let currentScene: string | null = null;
+  let requiredCount = 0;
+
+  const flush = () => {
+    if (current.length === 0) return;
+    if (requiredCount === 0) {
+      current = [];
+      return;
+    }
+    const first = current[0];
+    const last = current[current.length - 1];
+    batches.push({
+      units: current,
+      range: { start: first.sourceRange.start, end: last.sourceRange.end },
+      sceneId: currentScene,
+    });
+    current = [];
+    requiredCount = 0;
+  };
+
+  for (const u of units) {
+    if (u.sceneId !== currentScene && current.length > 0) {
+      flush();
+      currentScene = u.sceneId;
+    } else if (currentScene === null) {
+      currentScene = u.sceneId;
+    }
+    // 达到预算后，在下一个必需单元开始前切批，让尾随注释留在其约束的上一批。
+    if (u.required && requiredCount >= MAX_UNITS_PER_BATCH) {
+      flush();
+      currentScene = u.sceneId;
+    }
+    current.push(u);
+    if (u.required) requiredCount++;
+  }
+  flush();
+  return batches;
+}
+
+// ==================== 生成 ====================
+
+async function callAI(
+  jobId: string,
+  systemPrompt: string,
+  userPrompt: string,
+  options: AnalyzeOptions,
+): Promise<string> {
+  throwIfCancelled(jobId);
+  return await callFeatureAPI("script_analysis", systemPrompt, userPrompt, {
+    maxTokens: 16384,
+    temperature: 0.4,
+    modelOverride: options.modelOverride,
+  });
+}
+
+/**
+ * 对单个批次执行一次拆镜（含解析/校验失败重试），返回解析结果。
+ */
+async function analyzeBatch(
+  jobId: string,
+  systemPrompt: string,
+  userPrompt: string,
+  options: AnalyzeOptions,
+  maxRetries: number,
+): Promise<ReturnType<typeof parseStoryboardResponse>> {
+  let lastError = "";
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    throwIfCancelled(jobId);
+    const rawText = await callAI(jobId, systemPrompt, userPrompt, options);
+    throwIfCancelled(jobId);
+
+    const parsed = parseStoryboardResponse(rawText);
+    if (!parsed.ok) {
+      lastError = parsed.error || "无法解析 AI 拆镜结果";
+      if (parsed.errorCode === "TRUNCATED_OUTPUT") {
+        const error = new Error(lastError) as Error & { code?: string };
+        error.code = "TRUNCATED_OUTPUT";
+        throw error;
+      }
+      if (attempt < maxRetries) continue;
+      throw new Error(`解析失败：${lastError}`);
+    }
+
+    const validation = validateShotBatch(parsed.shots);
+    if (!validation.valid) {
+      lastError = validation.error || "AI 拆镜结果未通过校验";
+      if (attempt < maxRetries) continue;
+      throw new Error(`未通过校验：${lastError}`);
+    }
+
+    return parsed;
+  }
+  throw new Error(`拆镜失败：${lastError || "未知错误"}`);
+}
+
+/**
+ * 将解析结果转为 ShotDraft（供覆盖审计）。
+ */
+function toDrafts(
+  parsed: ReturnType<typeof parseStoryboardResponse>,
+  units: SourceUnit[],
+  scriptContent: string,
+): ShotDraft[] {
+  const unitById = new Map(units.map((unit) => [unit.id, unit]));
+  return parsed.shots.map((p) => ({
+    content: p.content,
+    sourceUnitIds: p.sourceUnitIds || [],
+    dialogueSlices: normalizeDialogueSlices(
+      p.dialogueSlices || [],
+      p.sourceUnitIds || [],
+      unitById,
+      scriptContent,
+    ),
+    // 来源范围由可信的本地源单元回填，不依赖模型猜测全文偏移。
+    sourceRanges: sourceRangesForIds(p.sourceUnitIds || [], unitById),
+    references: p.references,
+  }));
+}
+
+function sourceRangesForIds(
+  ids: string[],
+  unitById: Map<string, SourceUnit>,
+): Array<{ start: number; end: number }> {
+  const seen = new Set<string>();
+  return ids.flatMap((id) => {
+    if (seen.has(id)) return [];
+    seen.add(id);
+    const unit = unitById.get(id);
+    return unit ? [unit.sourceRange] : [];
+  });
+}
+
+/**
+ * 模型常把对白切片返回为对白文本内的相对偏移，即使契约要求全文绝对偏移。
+ * 此处兼容两种表示；没有可靠切片时按 sourceUnitIds 回填整段对白范围。
+ */
+function normalizeDialogueSlices(
+  slices: Array<{ unitId: string; start: number; end: number }>,
+  sourceUnitIds: string[],
+  unitById: Map<string, SourceUnit>,
+  scriptContent: string,
+): Array<{ unitId: string; start: number; end: number }> {
+  const normalized: Array<{ unitId: string; start: number; end: number }> = [];
+  const coveredDialogueIds = new Set<string>();
+
+  for (const slice of slices) {
+    const unit = unitById.get(slice.unitId);
+    if (!unit || unit.kind !== "dialogue") continue;
+
+    if (
+      slice.start >= unit.sourceRange.start &&
+      slice.end <= unit.sourceRange.end &&
+      slice.start < slice.end
+    ) {
+      normalized.push(slice);
+      coveredDialogueIds.add(slice.unitId);
+      continue;
+    }
+
+    const rawUnit = scriptContent.slice(unit.sourceRange.start, unit.sourceRange.end);
+    const dialogueOffset = rawUnit.indexOf(unit.content);
+    if (
+      dialogueOffset >= 0 &&
+      slice.start >= 0 &&
+      slice.end > slice.start &&
+      slice.end <= unit.content.length
+    ) {
+      const contentStart = unit.sourceRange.start + dialogueOffset;
+      normalized.push({
+        unitId: slice.unitId,
+        start: contentStart + slice.start,
+        end: contentStart + slice.end,
+      });
+      coveredDialogueIds.add(slice.unitId);
+    }
+  }
+
+  for (const id of sourceUnitIds) {
+    const unit = unitById.get(id);
+    if (unit?.kind === "dialogue" && !coveredDialogueIds.has(id)) {
+      normalized.push({ unitId: id, ...unit.sourceRange });
+    }
+  }
+  return normalized;
+}
+
+/**
+ * 从 draft 的 sourceRanges 回填 sourceText（不依赖模型摘抄）。
+ */
+function extractSourceText(draft: ShotDraft, scriptContent: string): string {
+  if (draft.sourceRanges.length === 0) return "";
+  return draft.sourceRanges
+    .map((r) => scriptContent.slice(r.start, r.end))
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 /**
@@ -320,63 +600,91 @@ export async function startStoryboardAnalysis(
 
   try {
     const systemPrompt = buildSystemPrompt();
-    const chunks = splitScriptIntoChunks(scriptContent);
-    const totalChunks = chunks.length;
 
-    if (totalChunks <= 1) {
-      // 短剧本：单次完整分析（原有语义）
-      const newShots = await analyzeChunkWithRecovery(
-        jobId,
-        systemPrompt,
-        scriptContent.trim(),
-        options.context,
-        maxRetries,
-        1,
-        1,
-      );
-      applyShots(newShots);
-      store.setAnalysisProgress({
-        status: "succeeded",
-        progress: 100,
-        message: `拆镜完成，共 ${newShots.length} 个镜头`,
-        finishedAt: Date.now(),
-      });
-      store.setStatus("review");
-      return { ok: true, jobId, shotCount: newShots.length };
-    }
+    // 1. 解析六类语法 + 提取源单元
+    const parsed = parseScriptSyntax(scriptContent);
+    const units = extractSourceUnits(parsed);
+    const batches = batchSourceUnits(units);
 
-    // 长剧本：按段落分批分析并在返回前合并镜头（UI 仍保持一张分镜表）
     const allShots: StoryboardShot[] = [];
-    for (let b = 0; b < totalChunks; b++) {
+    const totalBatches = batches.length;
+
+    // 2. 逐批生成 + 审计 + 定向修复
+    for (let b = 0; b < totalBatches; b++) {
       throwIfCancelled(jobId);
-      const chunk = chunks[b];
+      const batch = batches[b];
       store.setAnalysisProgress({
-        progress: Math.round((b / totalChunks) * 80),
-        message: `正在分析剧本第 ${b + 1}/${totalChunks} 段…`,
+        progress: Math.round((b / Math.max(totalBatches, 1)) * 80),
+        message: `正在拆分第 ${b + 1}/${totalBatches} 批…`,
       });
-      const batchShots = await analyzeChunkWithRecovery(
-        jobId,
-        systemPrompt,
-        chunk,
-        options.context,
-        maxRetries,
-        b + 1,
-        totalChunks,
+
+      const userPrompt = buildBatchUserPrompt(batch.units, scriptContent, options.context);
+      const parsedBatch = await analyzeBatch(jobId, systemPrompt, userPrompt, options, maxRetries);
+
+      let drafts = toDrafts(parsedBatch, batch.units, scriptContent);
+
+      // 3. 覆盖审计
+      const audit = auditSourceCoverage(drafts, {
+        units: batch.units,
+        batchRange: batch.range,
+      });
+
+      // 4. 定向修复缺失单元
+      if (!audit.valid) {
+        drafts = await repairMissingUnits(
+          jobId,
+          systemPrompt,
+          batch,
+          scriptContent,
+          options,
+          audit,
+          drafts,
+        );
+        const reAudit = auditSourceCoverage(drafts, {
+          units: batch.units,
+          batchRange: batch.range,
+        });
+        if (!reAudit.valid) {
+          throw new Error(
+            `第 ${b + 1}/${totalBatches} 批覆盖审计失败：${reAudit.issues
+              .map((i) => i.message)
+              .join("；")}`,
+          );
+        }
+      }
+
+      const batchShots = buildShots(
+        drafts.map((d) => ({
+          content: d.content,
+          references: d.references,
+          sourceText: extractSourceText(d, scriptContent),
+          sourceUnitIds: d.sourceUnitIds,
+          dialogueSlices: d.dialogueSlices,
+          sourceRanges: d.sourceRanges,
+        })),
       );
       allShots.push(...batchShots);
+      store.setAnalysisProgress({
+        progress: Math.round(((b + 1) / Math.max(totalBatches, 1)) * 80),
+        message: `已完成第 ${b + 1}/${totalBatches} 批，累计 ${allShots.length} 个镜头`,
+      });
     }
 
-    // 按顺序重排镜头号（各批内部是 1..n，合并后需连续）
+    // 5. 全局合并 + Skill 校验 + 重排编号
     const mergedShots = allShots.map((s, i) => ({
       ...s,
       order: i,
       shotNumber: String(i + 1),
     }));
+
+    // Skill 校验（质量提示，非阻断；阻断性遗漏已由覆盖审计拦截）
+    validateWithSkillRules(mergedShots);
+
     applyShots(mergedShots);
     store.setAnalysisProgress({
       status: "succeeded",
       progress: 100,
-      message: `拆镜完成，共 ${mergedShots.length} 个镜头（${totalChunks} 段合并）`,
+      message: `拆镜完成，共 ${mergedShots.length} 个镜头（${totalBatches} 批）`,
       finishedAt: Date.now(),
     });
     store.setStatus("review");
@@ -422,89 +730,42 @@ function applyShots(shots: StoryboardShot[]): void {
   });
 }
 
-async function analyzeChunkWithRecovery(
-  jobId: string,
-  systemPrompt: string,
-  scriptChunk: string,
-  context: string | undefined,
-  maxRetries: number,
-  chunkIndex: number,
-  totalChunks: number,
-  depth = 0,
-): Promise<StoryboardShot[]> {
-  const userPrompt =
-    `当前分析的是剧本第 ${chunkIndex}/${totalChunks} 段，请只基于这段剧本拆镜，` +
-    `不要输出任何 "集"、"场" 层级信息，不要输出图片/首尾帧/视频提示词。\n\n` +
-    buildUserPrompt(scriptChunk, context, 8);
-  try {
-    return await analyzeChunk(jobId, systemPrompt, userPrompt, maxRetries, chunkIndex, totalChunks);
-  } catch (error) {
-    if ((error as Error & { code?: string }).code !== "TRUNCATED_OUTPUT") throw error;
-    if (depth >= MAX_RECOVERY_DEPTH || scriptChunk.length <= MIN_RECOVERY_CHUNK_LENGTH) {
-      throw new Error(`第 ${chunkIndex}/${totalChunks} 段输出多次被截断，已达到自动拆分上限`);
-    }
-    const children = splitScriptIntoChunks(
-      scriptChunk,
-      Math.max(MIN_RECOVERY_CHUNK_LENGTH, Math.floor(scriptChunk.length / 2)),
-    );
-    if (children.length < 2) throw error;
-    const shots: StoryboardShot[] = [];
-    for (const child of children) {
-      shots.push(...await analyzeChunkWithRecovery(
-        jobId, systemPrompt, child, context, maxRetries, chunkIndex, totalChunks, depth + 1,
-      ));
-    }
-    return shots;
-  }
-}
-
 /**
- * 对单个分块执行一次拆镜（含解析/校验失败重试与取消检查）。
- * 返回该块产出的 StoryboardShot[]。
+ * 定向修复缺失源单元：针对未覆盖单元发小额重试，不重写已确认批次。
  */
-async function analyzeChunk(
+async function repairMissingUnits(
   jobId: string,
   systemPrompt: string,
-  userPrompt: string,
-  maxRetries: number,
-  chunkIndex: number,
-  totalChunks: number,
-): Promise<StoryboardShot[]> {
-  let lastError = "";
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  batch: Batch,
+  scriptContent: string,
+  options: AnalyzeOptions,
+  audit: CoverageAuditResult,
+  existingDrafts: ShotDraft[],
+): Promise<ShotDraft[]> {
+  const missing = audit.missingUnitIds;
+  if (missing.length === 0) return existingDrafts;
+
+  const repairedDrafts: ShotDraft[] = [...existingDrafts];
+  let missingUnits = batch.units.filter((u) => missing.includes(u.id));
+
+  for (let retry = 0; retry < MAX_REPAIR_RETRIES && missingUnits.length > 0; retry++) {
     throwIfCancelled(jobId);
-    if (attempt > 0) {
-      // 重试进度
-    }
-    const rawText = await callFeatureAPI("script_analysis", systemPrompt, userPrompt, {
-      maxTokens: 16384,
-      temperature: 0.4,
+    const repairPrompt =
+      buildBatchUserPrompt(missingUnits, scriptContent, options.context) +
+      `\n\n【注意】这是针对遗漏单元的补充分镜，只输出上述缺失单元的镜头。`;
+    const parsedRepair = await analyzeBatch(jobId, systemPrompt, repairPrompt, options, 0);
+    const repairDrafts = toDrafts(parsedRepair, batch.units, scriptContent);
+    repairedDrafts.push(...repairDrafts);
+
+    const reAudit = auditSourceCoverage(repairedDrafts, {
+      units: batch.units,
+      batchRange: batch.range,
     });
-    throwIfCancelled(jobId);
-
-    const parsed = parseStoryboardResponse(rawText);
-    if (!parsed.ok) {
-      lastError = parsed.error || "无法解析 AI 拆镜结果";
-      if (parsed.errorCode === "TRUNCATED_OUTPUT") {
-        const error = new Error(lastError) as Error & { code?: string };
-        error.code = "TRUNCATED_OUTPUT";
-        throw error;
-      }
-      if (attempt < maxRetries) continue;
-      throw new Error(`第 ${chunkIndex}/${totalChunks} 段解析失败：${lastError}`);
-    }
-
-    const validation = validateShotBatch(parsed.shots);
-    if (!validation.valid) {
-      lastError = validation.error || "AI 拆镜结果未通过校验";
-      if (attempt < maxRetries) continue;
-      throw new Error(`第 ${chunkIndex}/${totalChunks} 段未通过校验：${lastError}`);
-    }
-
-    // 成功：构建该块镜头
-    return buildShots(parsed.shots);
+    if (reAudit.missingUnitIds.length === 0) return repairedDrafts;
+    missingUnits = batch.units.filter((u) => reAudit.missingUnitIds.includes(u.id));
   }
-  throw new Error(`第 ${chunkIndex}/${totalChunks} 段拆镜失败：${lastError || "未知错误"}`);
+
+  return repairedDrafts;
 }
 
 /**

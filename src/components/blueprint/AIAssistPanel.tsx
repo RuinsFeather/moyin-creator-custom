@@ -20,6 +20,10 @@ import {
 import {
   listSkills,
   subscribeSkills,
+  pickCustomSkillDir,
+  openSkillDir,
+  getCustomSkillDir,
+  setCustomSkillDir,
   type SkillInfo,
 } from '@/lib/skills/skill-library';
 import { generateUUID } from '@/lib/utils';
@@ -59,6 +63,7 @@ export const AIAssistPanel = memo(function AIAssistPanel({
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [availableSkills, setAvailableSkills] = useState<SkillInfo[]>([]);
+  const [showSkillManager, setShowSkillManager] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -178,6 +183,28 @@ export const AIAssistPanel = memo(function AIAssistPanel({
     setError(null);
   }, []);
 
+  const handlePickCustomDir = useCallback(async () => {
+    const picked = await pickCustomSkillDir();
+    if (picked) {
+      setShowSkillManager(false);
+    }
+  }, []);
+
+  const handleOpenCustomDir = useCallback(async () => {
+    await openSkillDir(false);
+  }, []);
+
+  const handleOpenBuiltInDir = useCallback(async () => {
+    await openSkillDir(true);
+  }, []);
+
+  const handleClearCustomDir = useCallback(() => {
+    if (window.confirm('确定要清除自定义 Skill 目录吗？\n清除后将只加载内置 Skill。')) {
+      setCustomSkillDir(null);
+      setShowSkillManager(false);
+    }
+  }, []);
+
   // ── Render ─────────────────────────────────────────────────────────────
 
   return (
@@ -212,9 +239,60 @@ export const AIAssistPanel = memo(function AIAssistPanel({
       {availableSkills.length > 0 && onSkillRefsChange && (
         <div
           data-testid="skill-chips"
-          className="shrink-0 border-b border-border px-2 py-1.5"
+          className="relative shrink-0 border-b border-border px-2 py-1.5"
         >
-          <div className="mb-1 text-[9px] text-muted-foreground">装载技能</div>
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-[9px] text-muted-foreground">装载技能</span>
+            <div className="relative">
+              <button
+                onClick={() => setShowSkillManager(!showSkillManager)}
+                title="管理 Skill 目录"
+                className="rounded px-1 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                ⚙
+              </button>
+              {showSkillManager && (
+                <div className="absolute right-0 top-full z-50 mt-1 w-56 rounded-lg border border-border bg-panel shadow-xl">
+                  <div className="p-2 text-[10px]">
+                    <div className="mb-2 text-[9px] text-muted-foreground">
+                      当前自定义目录：
+                      <span className="block truncate font-mono text-foreground">
+                        {getCustomSkillDir() || '（未配置，使用内置）'}
+                      </span>
+                    </div>
+                    <button
+                      onClick={handlePickCustomDir}
+                      className="mb-1 w-full rounded border border-border bg-background px-2 py-1 text-left text-[10px] transition-colors hover:bg-accent hover:text-foreground"
+                    >
+                      📁 选择自定义 Skill 目录
+                    </button>
+                    {getCustomSkillDir() && (
+                      <button
+                        onClick={handleOpenCustomDir}
+                        className="mb-1 w-full rounded border border-border bg-background px-2 py-1 text-left text-[10px] transition-colors hover:bg-accent hover:text-foreground"
+                      >
+                        🗂 在资源管理器中打开
+                      </button>
+                    )}
+                    <button
+                      onClick={handleOpenBuiltInDir}
+                      className="mb-1 w-full rounded border border-border bg-background px-2 py-1 text-left text-[10px] transition-colors hover:bg-accent hover:text-foreground"
+                    >
+                      🔍 查看内置 Skill（参考）
+                    </button>
+                    {getCustomSkillDir() && (
+                      <button
+                        onClick={handleClearCustomDir}
+                        className="w-full rounded border border-border bg-background px-2 py-1 text-left text-[10px] text-red-600 transition-colors hover:bg-red-50 hover:text-red-700 dark:text-red-400 dark:hover:bg-red-950/20"
+                      >
+                        🗑 清除自定义目录
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
           <div className="flex max-h-16 flex-wrap gap-1 overflow-y-auto">
             {availableSkills.map((skill) => {
               const active = skillRefs?.includes(skill.name) ?? false;

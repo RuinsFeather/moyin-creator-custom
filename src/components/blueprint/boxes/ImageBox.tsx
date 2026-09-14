@@ -19,7 +19,6 @@ import type {
 } from '@/types/blueprint';
 import { useBlueprintStore } from '@/stores/blueprint-store';
 import { generateUUID } from '@/lib/utils';
-import { useAssetUpload } from '@/hooks/use-asset-upload';
 import { VolcAssetPanel, type VolcAssetItem } from '@/components/panels/freedom/VolcAssetPanel';
 import { saveFreedomMedia } from '@/lib/freedom/download-utils';
 import { persistFilesAsRefs } from '@/lib/blueprint/blueprint-media';
@@ -32,7 +31,6 @@ function ImageBoxComponent({ id, data, selected }: NodeProps<BlueprintNode>) {
   const config = (nodeData.config ?? { media: [] }) as ImageBoxConfig;
   const execution = nodeData.execution;
   const updateNode = useBlueprintStore((s) => s.updateNode);
-  const { uploadFiles, uploading } = useAssetUpload();
   const [assetDialogOpen, setAssetDialogOpen] = useState(false);
 
   const media = Array.isArray(config.media) ? config.media : [];
@@ -62,30 +60,6 @@ function ImageBoxComponent({ id, data, selected }: NodeProps<BlueprintNode>) {
     },
     [media, patchConfig],
   );
-
-  const handleUploadToLibrary = useCallback(async () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'image/*';
-    input.multiple = true;
-    input.onchange = async (e) => {
-      const files = Array.from((e.target as HTMLInputElement).files ?? []);
-      if (files.length === 0) return;
-      const results = await uploadFiles(files);
-      if (results.length === 0) return;
-      const newRefs: BlueprintMediaRef[] = results.map((r) => ({
-        url: r.url,
-        localPath: r.name,
-        mimeType: 'image/' + (r.name.match(/\.(jpe?g|png|webp|gif|bmp)$/i)?.[1] ?? 'png'),
-        assetId: r.assetId,
-        volcAssetUri: r.assetUri,
-        mediaId: r.assetId,
-        dedupeKey: generateUUID(),
-      }));
-      patchConfig({ media: [...media, ...newRefs] });
-    };
-    input.click();
-  }, [uploadFiles, media, patchConfig]);
 
   const handleSelectAsset = useCallback(
     (asset: VolcAssetItem) => {
@@ -137,13 +111,6 @@ function ImageBoxComponent({ id, data, selected }: NodeProps<BlueprintNode>) {
                 ⬇ 下载
               </button>
               <button
-                className="nodrag flex-1 rounded border border-input bg-muted/40 px-1.5 py-1 text-[10px] text-foreground transition-colors hover:bg-muted disabled:opacity-40"
-                onClick={handleUploadToLibrary}
-                disabled={uploading}
-              >
-                {uploading ? '上传中...' : '⬆ 上传到素材库'}
-              </button>
-              <button
                 className="nodrag flex-1 rounded border border-input bg-muted/40 px-1.5 py-1 text-[10px] text-foreground transition-colors hover:bg-muted"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -165,14 +132,7 @@ function ImageBoxComponent({ id, data, selected }: NodeProps<BlueprintNode>) {
             />
             <div className="mt-1 flex gap-1">
               <button
-                className="nodrag flex-1 rounded border border-input bg-muted/40 px-1.5 py-1 text-[10px] text-foreground transition-colors hover:bg-muted disabled:opacity-40"
-                onClick={handleUploadToLibrary}
-                disabled={uploading}
-              >
-                {uploading ? '上传中...' : '⬆ 上传到素材库'}
-              </button>
-              <button
-                className="nodrag flex-1 rounded border border-input bg-muted/40 px-1.5 py-1 text-[10px] text-foreground transition-colors hover:bg-muted"
+                className="nodrag w-full rounded border border-input bg-muted/40 px-1.5 py-1 text-[10px] text-foreground transition-colors hover:bg-muted"
                 onClick={(e) => {
                   e.stopPropagation();
                   setAssetDialogOpen(true);

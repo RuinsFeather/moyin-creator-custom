@@ -21,6 +21,14 @@ export interface ParsedRawShot {
     scenes: string[];
   };
   sourceText?: string;
+  /** 本镜头覆盖的源单元 ID（阶段 3 覆盖审计用） */
+  sourceUnitIds?: string[];
+  /** 对白片段（单元 ID + 原文范围） */
+  dialogueSlices?: Array<{ unitId: string; start: number; end: number }>;
+  /** 覆盖的原文范围 */
+  sourceRanges?: Array<{ start: number; end: number }>;
+  /** 批末尾未完成源单元 ID（分页游标） */
+  pendingUnitIds?: string[];
 }
 
 export interface ParseResult {
@@ -29,6 +37,8 @@ export interface ParseResult {
   error?: string;
   rawText?: string;
   errorCode?: "TRUNCATED_OUTPUT" | "INVALID_JSON";
+  /** 批末尾未完成源单元 ID（分页游标） */
+  pendingUnitIds?: string[];
 }
 
 /**
@@ -116,16 +126,24 @@ export function parseStoryboardResponse(text: string): ParseResult {
   }
 
   const shots: ParsedRawShot[] = [];
+  const pendingSet = new Set<string>();
   for (let i = 0; i < parsed.length; i++) {
     const item = parsed[i];
     if (!item || typeof item !== "object") continue;
 
     const raw = item as Record<string, unknown>;
     const normalized = normalizeShot(raw, i);
-    if (normalized) shots.push(normalized);
+    if (!normalized) continue;
+    shots.push(normalized);
+    for (const id of normalized.pendingUnitIds || []) pendingSet.add(id);
   }
 
-  return { ok: true, shots, rawText: jsonStr };
+  return {
+    ok: true,
+    shots,
+    rawText: jsonStr,
+    pendingUnitIds: pendingSet.size ? Array.from(pendingSet) : undefined,
+  };
 }
 
 function asString(v: unknown): string {
@@ -183,6 +201,11 @@ function normalizeShot(raw: Record<string, unknown>, index: number): ParsedRawSh
 
   const sourceText = asString(raw.sourceText) || undefined;
 
+  const sourceUnitIds = asStringArray(raw.sourceUnitIds);
+  const sourceRanges = asRangeArray(raw.sourceRanges);
+  const dialogueSlices = asDialogueSliceArray(raw.dialogueSlices);
+  const pendingUnitIds = asStringArray(raw.pendingUnitIds);
+
   return {
     content,
     references:
@@ -190,5 +213,38 @@ function normalizeShot(raw: Record<string, unknown>, index: number): ParsedRawSh
         ? references
         : undefined,
     sourceText,
+    sourceUnitIds: sourceUnitIds.length ? sourceUnitIds : undefined,
+    sourceRanges: sourceRanges.length ? sourceRanges : undefined,
+    dialogueSlices: dialogueSlices.length ? dialogueSlices : undefined,
+    pendingUnitIds: pendingUnitIds.length ? pendingUnitIds : undefined,
   };
+}
+
+function asRangeArray(v: unknown): Array<{ start: number; end: number }> {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map((r) => {
+      if (!r || typeof r !== "object") return null;
+      const o = r as Record<string, unknown>;
+      const start = typeof o.start === "number" ? o.start : NaN;
+      const end = typeof o.end === "number" ? o.end : NaN;
+      if (Number.isNaN(start) || Number.isNaN(end)) return null;
+      return { start, end };
+    })
+    .filter((r): r is { start: number; end: number } => r !== null);
+}
+
+function asDialogueSliceArray(v: unknown): Array<{ unitId: string; start: number; end: number }> {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map((r) => {
+      if (!r || typeof r !== "object") return null;
+      const o = r as Record<string, unknown>;
+      const unitId = asString(o.unitId);
+      const start = typeof o.start === "number" ? o.start : NaN;
+      const end = typeof o.end === "number" ? o.end : NaN;
+      if (!unitId || Number.isNaN(start) || Number.isNaN(end)) return null;
+      return { unitId, start, end };
+    })
+    .filter((r): r is { unitId: string; start: number; end: number } => r !== null);
 }

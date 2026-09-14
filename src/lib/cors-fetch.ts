@@ -185,6 +185,15 @@ async function serializeForProxy(init?: RequestInit): Promise<{
   body?: string;
   bodyIsBase64?: boolean;
 }> {
+  const bytesToBase64 = (bytes: Uint8Array): string => {
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
+      for (let i = 0; i < chunk.length; i += 1) binary += String.fromCharCode(chunk[i]);
+    }
+    return btoa(binary);
+  };
   const method = (init?.method || 'GET').toUpperCase();
   const headers: Record<string, string> = {};
   if (init?.headers) {
@@ -204,7 +213,7 @@ async function serializeForProxy(init?: RequestInit): Promise<{
     return { method, headers, body };
   }
   if (body instanceof ArrayBuffer) {
-    const b64 = btoa(String.fromCharCode(...new Uint8Array(body)));
+    const b64 = bytesToBase64(new Uint8Array(body));
     return { method, headers, body: b64, bodyIsBase64: true };
   }
   if (ArrayBuffer.isView(body)) {
@@ -216,7 +225,7 @@ async function serializeForProxy(init?: RequestInit): Promise<{
   }
   if (body instanceof Blob) {
     const buf = await body.arrayBuffer();
-    const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+    const b64 = bytesToBase64(new Uint8Array(buf));
     return { method, headers, body: b64, bodyIsBase64: true };
   }
   if (body instanceof FormData) {
@@ -283,7 +292,8 @@ export async function corsFetch(
   const proxyInit: RequestInit = {
     ...init,
     headers: {
-      'Content-Type': 'application/json',
+      // 外层代理请求必须保留实际 body 类型；multipart boundary 不能被改成 JSON。
+      'Content-Type': originalHeaders['content-type'] || originalHeaders['Content-Type'] || 'application/json',
       'x-proxy-headers': JSON.stringify(originalHeaders),
     },
   };

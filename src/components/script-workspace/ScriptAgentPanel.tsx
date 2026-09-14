@@ -1006,9 +1006,9 @@ export function ScriptAgentPanel() {
   if (!showAgent) return null;
 
   return (
-    <div className="h-full flex flex-col bg-panel">
+    <div className="h-full flex flex-col overflow-hidden bg-panel">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-border">
+      <div className="shrink-0 flex items-center justify-between px-3 py-2 border-b border-border">
         <div className="flex min-w-0 items-center gap-1.5">
           <span className="text-xs font-medium flex items-center gap-1.5 shrink-0">
             <MessageSquareIcon className="h-3.5 w-3.5" />
@@ -1135,7 +1135,7 @@ export function ScriptAgentPanel() {
       <div
         ref={scrollContainerRef}
         onScroll={handleMessagesScroll}
-        className="relative flex-1 overflow-y-auto p-3 space-y-3"
+        className="relative flex-1 min-h-0 overflow-y-auto p-3 space-y-3"
       >
         {agentMessages.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
@@ -1287,7 +1287,7 @@ export function ScriptAgentPanel() {
 
       {/* ⑧ 批量应用：多条未处理 diff 时显示 */}
       {pendingDiffCount > 1 && !isAgentThinking && (
-        <div className="px-3 pb-2">
+        <div className="shrink-0 px-3 pb-2">
           <button
             onClick={() => void handleApplyAllPending()}
             className="w-full flex items-center justify-center gap-1 rounded-md border border-green-500/30 bg-green-500/5 px-2 py-1.5 text-[10px] text-green-600 hover:bg-green-500/10 transition-colors dark:text-green-400"
@@ -1299,7 +1299,7 @@ export function ScriptAgentPanel() {
       )}
 
       {/* Quick actions */}
-      <div className="px-2 pb-1 flex flex-wrap gap-1">
+      <div className="shrink-0 px-2 pb-1 flex flex-wrap gap-1">
         {[
           { label: '续写', tip: selection ? `从第 ${selection.line + 1} 行光标处继续创作` : '基于光标位置继续创作（请先在编辑器中定位）', disabled: !selection, action: () => {
             const sel = useScriptWorkspaceStore.getState().editorSelection;
@@ -1360,7 +1360,7 @@ export function ScriptAgentPanel() {
 
       {/* Input and file context */}
       <div
-        className={cn('border-t border-border p-2 transition-colors', isDraggingContext && 'bg-primary/10 ring-1 ring-inset ring-primary')}
+        className={cn('shrink-0 border-t border-border p-2 transition-colors', isDraggingContext && 'bg-primary/10 ring-1 ring-inset ring-primary')}
         onDragEnter={(event) => { event.preventDefault(); setIsDraggingContext(true); }}
         onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; }}
         onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setIsDraggingContext(false); }}

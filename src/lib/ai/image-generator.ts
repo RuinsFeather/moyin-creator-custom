@@ -11,6 +11,11 @@ import { getFeatureConfig, getFeatureNotConfiguredMessage } from '@/lib/ai/featu
 import { retryOperation } from '@/lib/utils/retry';
 import { resolveImageApiFormat } from '@/lib/api-key-manager';
 import { useAPIConfigStore } from '@/stores/api-config-store';
+import {
+  isStrictGptImageGenerationRequest,
+  sanitizeImageGenerationJsonBody,
+} from '@/lib/ai/image-request-policy';
+import { submitGptImageEdit } from '@/lib/ai/gpt-image-edits';
 
 export interface ImageGenerationParams {
   prompt: string;
@@ -220,6 +225,18 @@ async function generateImage(
     resolution,
     promptPreview: params.prompt.substring(0, 100) + '...',
   });
+
+  if (isGptImageModelId(model) && params.referenceImages?.length) {
+    const imageUrl = await submitGptImageEdit({
+      baseUrl,
+      apiKey: featureConfig.keyManager?.getCurrentKey?.() || apiKey,
+      model,
+      prompt: params.prompt,
+      referenceImages: params.referenceImages,
+      size: normalizeGptImageSize(aspectRatio, resolution),
+    });
+    return { imageUrl };
+  }
 
   // Gemini 等模型通过 chat completions 生图
   if (apiFormat === 'openai_chat') {
@@ -592,8 +609,10 @@ async function submitImageTask(
     size: sizeValue,
     stream: false,
   };
+  const imagePaths = getImageEndpointPaths(endpointTypes || []);
+  const strictGptGeneration = isStrictGptImageGenerationRequest(model, imagePaths.submit);
 
-  if (referenceImages && referenceImages.length > 0) {
+  if (referenceImages && referenceImages.length > 0 && !strictGptGeneration) {
     console.log('[ImageGenerator] Adding reference images:', referenceImages.length);
     // 压缩 base64 参考图，避免超大 payload 导致 API 错误
     const compressed = await Promise.all(referenceImages.map((img) => compressReferenceImage(img)));
@@ -608,6 +627,11 @@ async function submitImageTask(
     requestData.images = compressed;
     requestData.reference_images = compressed;
     requestData.image = compressed.length === 1 ? compressed[0] : compressed;
+  }
+
+  sanitizeImageGenerationJsonBody(requestData, model, imagePaths.submit);
+  if (strictGptGeneration && referenceImages?.length) {
+    console.warn('[ImageGenerator] GPT Image generations endpoint does not accept JSON reference images; omitted unsupported fields.');
   }
 
   console.log('[ImageGenerator] Submitting image task:', {
@@ -625,7 +649,6 @@ async function submitImageTask(
 
       // 每次重试动态取当前 key（利用 keyManager rotate 后的新 key）
       const currentApiKey = keyManager?.getCurrentKey?.() || apiKey;
-      const imagePaths = getImageEndpointPaths(endpointTypes || []);
       const rootBase = getRootBaseUrl(baseUrl);
       const endpoint = `${rootBase}${imagePaths.submit}`;
       try {
@@ -904,6 +927,19 @@ export async function submitGridImageRequest(params: {
   const endpointTypes = useAPIConfigStore.getState().modelEndpointTypes[model];
   const apiFormat = resolveImageApiFormat(endpointTypes, model);
   console.log('[GridImageAPI] format:', apiFormat, 'model:', model);
+
+  if (isGptImageModelId(model) && referenceImages?.length) {
+    const imageUrl = await submitGptImageEdit({
+      baseUrl: normalizedBase,
+      apiKey: keyManager?.getCurrentKey?.() || apiKey,
+      model,
+      prompt,
+      referenceImages,
+      size: normalizeGptImageSize(aspectRatio, resolution),
+      signal,
+    });
+    return { imageUrl };
+  }
 
   if (apiFormat === 'openai_chat') {
     // Gemini 等模型通过 chat completions 生图

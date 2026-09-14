@@ -45,6 +45,7 @@ export interface StoryboardReferenceImage {
 // ==================== Shot ====================
 
 export interface StoryboardShotContent {
+  /** 已废弃：画面内容概述与 `scene` + `action` 语义重复，仅用于旧数据兼容。 */
   summary: string;
   scene: string;
   action: string;

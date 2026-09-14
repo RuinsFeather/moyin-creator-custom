@@ -277,3 +277,12 @@
 .blueprint-canvas-connecting .react-flow__handle.valid {
   box-shadow: 0 0 0 3px hsl(var(--success) / 0.5);
 }
+
+/* Blueprint canvas: left-drag marquee select + middle-drag pan.
+   Panning is configured via `panOnDrag={[1,2]}` and marquee selection via
+   `selectionOnDrag` on the ReactFlow component; this CSS only styles the
+   native selection rectangle. */
+.react-flow__selection {
+  background: hsl(var(--primary) / 0.1);
+  border: 1px solid hsl(var(--primary) / 0.7);
+}

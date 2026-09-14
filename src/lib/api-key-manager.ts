@@ -18,6 +18,13 @@ export type ModelCapability =
   | 'reasoning' 
   | 'embedding';
 
+export type SeedancePostChannel =
+  | 'api/v3/contents/generations/tasks'
+  | 'v1/video/generations/tasks';
+
+export const DEFAULT_SEEDANCE_POST_CHANNEL: SeedancePostChannel =
+  'api/v3/contents/generations/tasks';
+
 export interface IProvider {
   id: string;
   platform: string;
@@ -27,6 +34,8 @@ export interface IProvider {
   model: string[];
   capabilities?: ModelCapability[];
   contextLimit?: number;
+  /** Seedance 视频任务 POST 通道；旧配置缺省时使用官方 api/v3 通道。 */
+  seedancePostChannel?: SeedancePostChannel;
 }
 
 /**
@@ -79,7 +88,7 @@ export function classifyModelByName(modelName: string): ModelCapability[] {
   const videoPatterns = [
     'veo', 'sora', 'wan', 'vidu', 'kling', 'runway', 'luma', 'seedance',
     'cogvideo', 'hunyuan-video', 'minimax-video', 'hailuo', 'pika',
-    'gen-3', 'gen3', 'mochi', 'ltx', 'happyhorse',
+    'gen-3', 'gen3', 'mochi', 'ltx', 'happyhorse', 'artsdance',
   ];
   // Grok 视频：兼容 grok-video-*、grok-imagine-video-* 与平台 ID grok-imagine-1.5。
   // 显式包含 image 的 Grok 图片模型不能误归为视频。

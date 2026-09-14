@@ -72,6 +72,7 @@ describe('blueprint store', () => {
       selectedEdgeId: null,
       drawerNodeId: null,
       currentRun: null,
+      activeRuns: {},
       executionLock: false,
       abortController: null,
       errorSummary: [],
@@ -227,6 +228,73 @@ describe('blueprint store', () => {
     expect(persisted).not.toHaveProperty('abortController');
     expect(persisted).not.toHaveProperty('currentRun');
     expect(persisted.activeProjectId).toBe(projectA);
+  });
+
+  describe('parallel runs', () => {
+    beforeEach(() => {
+      useBlueprintStore.getState().setActiveProjectId(projectA);
+      useBlueprintStore.getState().createBlueprint('parallel');
+      useBlueprintStore.getState().addNode(textNode('a'));
+      useBlueprintStore.getState().addNode(textNode('b'));
+    });
+
+    it('allows different nodes to run concurrently and rejects duplicate targets', () => {
+      const first = useBlueprintStore.getState().beginRun('node', 'a');
+      const second = useBlueprintStore.getState().beginRun('node', 'b');
+      const duplicate = useBlueprintStore.getState().beginRun('node', 'a');
+
+      expect(first).not.toBeNull();
+      expect(second).not.toBeNull();
+      expect(duplicate).toBeNull();
+      expect(Object.keys(useBlueprintStore.getState().activeRuns)).toHaveLength(2);
+      expect(useBlueprintStore.getState().executionLock).toBe(true);
+    });
+
+    it('finishes one run without releasing the other run', () => {
+      const first = useBlueprintStore.getState().beginRun('node', 'a')!;
+      const second = useBlueprintStore.getState().beginRun('node', 'b')!;
+
+      useBlueprintStore.getState().finishRun([], first.runId);
+
+      const state = useBlueprintStore.getState();
+      expect(state.activeRuns[first.runId]).toBeUndefined();
+      expect(state.activeRuns[second.runId]).toBeDefined();
+      expect(state.currentRun?.runId).toBe(second.runId);
+      expect(state.executionLock).toBe(true);
+    });
+
+    it('cancels only the run belonging to the requested node', () => {
+      const firstController = new AbortController();
+      const secondController = new AbortController();
+      const first = useBlueprintStore
+        .getState()
+        .beginRun('node', 'a', firstController)!;
+      const second = useBlueprintStore
+        .getState()
+        .beginRun('node', 'b', secondController)!;
+      useBlueprintStore.getState().updateNodeExecution('a', {
+        status: 'running',
+        runId: first.runId,
+      });
+      useBlueprintStore.getState().updateNodeExecution('b', {
+        status: 'running',
+        runId: second.runId,
+      });
+
+      useBlueprintStore.getState().cancelRun('a');
+
+      const state = useBlueprintStore.getState();
+      const blueprint = state.blueprints.find((bp) => bp.id === state.activeBlueprintId)!;
+      expect(firstController.signal.aborted).toBe(true);
+      expect(secondController.signal.aborted).toBe(false);
+      expect(blueprint.nodes.find((node) => node.id === 'a')?.data.execution?.status)
+        .toBe('cancelled');
+      expect(blueprint.nodes.find((node) => node.id === 'b')?.data.execution?.status)
+        .toBe('running');
+      expect(state.activeRuns[first.runId]).toBeUndefined();
+      expect(state.activeRuns[second.runId]).toBeDefined();
+      expect(state.executionLock).toBe(true);
+    });
   });
 
   it('keeps project data isolated when changing active project', () => {

@@ -65,6 +65,7 @@ function setupStore() {
     selectedEdgeId: null,
     drawerNodeId: null,
     currentRun: null,
+    activeRuns: {},
     executionLock: false,
     abortController: null,
     errorSummary: [],

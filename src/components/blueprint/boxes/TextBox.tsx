@@ -14,25 +14,18 @@
 
 import { memo, useCallback, useState } from 'react';
 import type { NodeProps } from '@xyflow/react';
+import { Maximize2 } from 'lucide-react';
 import type { BlueprintNode, BlueprintNodeData, TextBoxConfig } from '@/types/blueprint';
 import { useBlueprintStore } from '@/stores/blueprint-store';
-import { NodeSection, NodeTextarea, NodeSelect } from '../nodes/NodeUI';
+import { NodeSection, NodeTextarea } from '../nodes/NodeUI';
 import { AIAssistPanel } from '../AIAssistPanel';
 import { BoxShell } from './BoxShell';
-
-const LANGUAGE_OPTIONS = [
-  { value: 'zh', label: '中文' },
-  { value: 'en', label: 'English' },
-  { value: 'ja', label: '日本語' },
-  { value: 'auto', label: '自动检测' },
-];
-
-const TEXT_ROLE_OPTIONS = [
-  { value: 'prompt', label: '提示词' },
-  { value: 'negative', label: '负向提示词' },
-  { value: 'dialogue', label: '台词' },
-  { value: 'context', label: '上下文' },
-];
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 
 function TextBoxComponent({ id, data, selected }: NodeProps<BlueprintNode>) {
   const nodeData = data as BlueprintNodeData;
@@ -40,6 +33,7 @@ function TextBoxComponent({ id, data, selected }: NodeProps<BlueprintNode>) {
   const execution = nodeData.execution;
   const updateNode = useBlueprintStore((s) => s.updateNode);
   const [showAI, setShowAI] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   const patchConfig = useCallback(
     (patch: Partial<TextBoxConfig>) => {
@@ -55,6 +49,11 @@ function TextBoxComponent({ id, data, selected }: NodeProps<BlueprintNode>) {
     },
     [],
   );
+
+  const handleExpandClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setExpanded(true);
+  }, []);
 
   const charCount = typeof config.text === 'string' ? config.text.length : 0;
   const isFromShot = nodeData.sourceRef?.kind === 'shot';
@@ -81,12 +80,22 @@ function TextBoxComponent({ id, data, selected }: NodeProps<BlueprintNode>) {
             </span>
           )}
           <button
+            onClick={handleExpandClick}
+            className={`nodrag shrink-0 rounded px-1 py-0.5 text-[9px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground ${
+              charCount === 0 ? 'ml-auto' : 'ml-1'
+            }`}
+            title="放大编辑"
+            aria-label="放大编辑"
+          >
+            <Maximize2 className="h-3 w-3" />
+          </button>
+          <button
             onClick={handleAIAssistClick}
             className={`nodrag shrink-0 rounded px-1 py-0.5 text-[9px] transition-colors ${
               showAI
                 ? 'bg-primary/20 text-primary'
                 : 'text-muted-foreground hover:bg-accent hover:text-foreground'
-            } ${charCount === 0 ? 'ml-auto' : 'ml-1'}`}
+            } ml-1`}
             title="AI 写作助手"
           >
             ✨
@@ -100,26 +109,8 @@ function TextBoxComponent({ id, data, selected }: NodeProps<BlueprintNode>) {
           onChange={(text) => patchConfig({ text })}
           placeholder="输入提示词、台词或上下文…"
           rows={4}
+          className="h-[188px]"
         />
-      </NodeSection>
-
-      <NodeSection className="flex gap-1.5">
-        <div className="flex-1">
-          <label className="mb-0.5 block text-[9px] text-muted-foreground">语言</label>
-          <NodeSelect
-            value={config.language ?? 'auto'}
-            onChange={(language) => patchConfig({ language })}
-            options={LANGUAGE_OPTIONS}
-          />
-        </div>
-        <div className="flex-1">
-          <label className="mb-0.5 block text-[9px] text-muted-foreground">类型</label>
-          <NodeSelect
-            value={config.role ?? 'prompt'}
-            onChange={(role) => patchConfig({ role })}
-            options={TEXT_ROLE_OPTIONS}
-          />
-        </div>
       </NodeSection>
 
       {showAI && (
@@ -138,6 +129,31 @@ function TextBoxComponent({ id, data, selected }: NodeProps<BlueprintNode>) {
           />
         </div>
       )}
+
+      {/* 放大编辑弹窗：长文本编辑时提供更大的输入区域 */}
+      <Dialog open={expanded} onOpenChange={setExpanded}>
+        <DialogContent
+          className="flex h-[70vh] w-[min(720px,calc(100%-2rem))] max-w-none flex-col gap-3"
+          onOpenAutoFocus={(e) => e.preventDefault()}
+        >
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-sm">
+              <span>📝</span>
+              <span className="truncate">{nodeData.label || '文本窗口'}</span>
+              <span className="ml-auto text-[10px] font-normal tabular-nums text-muted-foreground">
+                {charCount} 字
+              </span>
+            </DialogTitle>
+          </DialogHeader>
+          <textarea
+            autoFocus
+            value={typeof config.text === 'string' ? config.text : ''}
+            onChange={(e) => patchConfig({ text: e.target.value })}
+            placeholder="输入提示词、台词或上下文…"
+            className="min-h-0 flex-1 resize-none rounded-md border border-input bg-background p-3 text-sm leading-relaxed text-foreground outline-none focus:border-primary"
+          />
+        </DialogContent>
+      </Dialog>
     </BoxShell>
   );
 }

@@ -146,6 +146,13 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
   'gemini-3-flash-preview': ['text'],
   'gemini-3-pro-preview': ['text'],
   'claude-haiku-4-5-20251001': ['text', 'vision'],
+  'gpt-5': ['text'],
+  'gpt-5.1': ['text'],
+  'gpt-5.2': ['text'],
+  'gpt-5-codex': ['text'],
+  'gpt-5.3-codex-spark': ['text'],
+  'gpt-5.4': ['text'],
+  'gpt-5.4-mini': ['text'],
 
   // ---- 图片生成模型 ----
   'cogview-3-plus': ['image_generation'],
@@ -284,7 +291,11 @@ function modelSupportsCapability(
     return inferred.includes(required);
   }
 
-  // 6. 平台级别 fallback
+  // 6. 平台级别 fallback —— 仅对未明确分类的模型
+  // 如果 classifyModelByName 返回了 text（非生成类），则不允许进入 image/video 栏目
+  if (inferred.includes('text') && (required === 'image_generation' || required === 'video_generation')) {
+    return false;
+  }
   return providerSupportsCapability(provider, required);
 }
 

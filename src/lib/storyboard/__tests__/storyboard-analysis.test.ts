@@ -226,7 +226,12 @@ describe("storyboard-validator（§12 非法字段与空镜头拒绝）", () => 
 
   it("严格 JSON Schema 描述镜头数组结构", () => {
     expect(STORYBOARD_JSON_SCHEMA.type).toBe("array");
-    expect(STORYBOARD_JSON_SCHEMA.items.properties.content.required).toContain("summary");
+    // 阶段 3：summary 已废弃，不再是必需字段；action 为核心必需字段
+    expect(STORYBOARD_JSON_SCHEMA.items.properties.content.required).toContain("action");
+    expect(STORYBOARD_JSON_SCHEMA.items.properties.content.required).not.toContain("summary");
+    // 阶段 3：支持源单元覆盖与对白切片
+    expect(Object.keys(STORYBOARD_JSON_SCHEMA.items.properties)).toContain("sourceUnitIds");
+    expect(Object.keys(STORYBOARD_JSON_SCHEMA.items.properties)).toContain("dialogueSlices");
     // 不包含任何禁止字段（集/场/提示词）
     const props = Object.keys(STORYBOARD_JSON_SCHEMA.items.properties);
     expect(props).not.toContain("imagePrompt");

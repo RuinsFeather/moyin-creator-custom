@@ -22,7 +22,7 @@ export function TabBar() {
       <div className="flex flex-col w-14 bg-panel border-r border-border py-2">
         <div className="p-2">
           <div className="w-8 h-8 bg-primary text-primary-foreground flex items-center justify-center mx-auto rounded">
-            <span className="text-sm font-bold">M</span>
+            <span className="text-sm font-bold">π</span>
           </div>
         </div>
         {/* Dashboard nav */}
@@ -111,7 +111,7 @@ export function TabBar() {
       {/* Logo + Back */}
       <div className="p-2 border-b border-border">
         <div className="w-8 h-8 bg-primary text-primary-foreground flex items-center justify-center mx-auto rounded mb-1">
-          <span className="text-sm font-bold">M</span>
+          <span className="text-sm font-bold">π</span>
         </div>
         <TooltipProvider delayDuration={300}>
           <Tooltip>

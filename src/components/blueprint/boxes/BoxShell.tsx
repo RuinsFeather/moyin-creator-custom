@@ -86,6 +86,7 @@ function BoxShellComponent({
   const selectNode = useBlueprintStore((s) => s.selectNode);
   const openDrawer = useBlueprintStore((s) => s.openDrawer);
   const cancelRun = useBlueprintStore((s) => s.cancelRun);
+  const updateNode = useBlueprintStore((s) => s.updateNode);
 
   const statusColor = getNodeStatusColor(execution?.status);
   const isFailed = execution?.status === 'failed';
@@ -212,7 +213,11 @@ function BoxShellComponent({
         </div>
       )}
 
-      <NodeLabel icon={icon} label={label}>
+      <NodeLabel
+        icon={icon}
+        label={label}
+        onRename={(next) => updateNode(id, { label: next })}
+      >
         {headerExtra}
       </NodeLabel>
 
@@ -251,7 +256,7 @@ function BoxShellComponent({
               )}
               onClick={(e) => {
                 e.stopPropagation();
-                cancelRun();
+                cancelRun(id);
               }}
             >
               <StopCircle className="h-3.5 w-3.5" />

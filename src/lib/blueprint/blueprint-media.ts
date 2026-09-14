@@ -23,6 +23,33 @@ import type { BlueprintMediaRef } from '@/types/blueprint';
 import { generateUUID } from '@/lib/utils';
 import { readFileAsDataUrl } from '@/hooks/use-asset-upload';
 
+export type BlueprintDroppedMediaKind = 'image' | 'video';
+
+export interface PersistedBlueprintDroppedMedia {
+  file: File;
+  kind: BlueprintDroppedMediaKind;
+  ref: BlueprintMediaRef;
+}
+
+const IMAGE_FILE_EXTENSIONS = new Set([
+  'avif', 'bmp', 'gif', 'heic', 'heif', 'jpeg', 'jpg', 'png', 'svg', 'webp',
+]);
+const VIDEO_FILE_EXTENSIONS = new Set([
+  'avi', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'webm',
+]);
+
+/** 根据 MIME 类型识别文件，并在系统未提供 MIME 时使用扩展名兜底。 */
+export function classifyBlueprintMediaFile(file: Pick<File, 'name' | 'type'>): BlueprintDroppedMediaKind | null {
+  const mimeType = file.type.toLowerCase();
+  if (mimeType.startsWith('image/')) return 'image';
+  if (mimeType.startsWith('video/')) return 'video';
+
+  const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
+  if (IMAGE_FILE_EXTENSIONS.has(extension)) return 'image';
+  if (VIDEO_FILE_EXTENSIONS.has(extension)) return 'video';
+  return null;
+}
+
 /** 媒体在 `local-image://` 下的目录名（对应 getMediaRoot()/blueprint-media）。 */
 const BLUEPRINT_MEDIA_CATEGORY = 'blueprint-media';
 
@@ -67,6 +94,17 @@ export async function persistFilesAsRefs(
       ...extra,
     })),
   );
+}
+
+/** 持久化拖入画布的受支持素材，并保留文件与媒体类型的对应关系。 */
+export async function persistDroppedBlueprintFiles(
+  files: File[],
+): Promise<PersistedBlueprintDroppedMedia[]> {
+  const supported = files
+    .map((file) => ({ file, kind: classifyBlueprintMediaFile(file) }))
+    .filter((item): item is { file: File; kind: BlueprintDroppedMediaKind } => item.kind !== null);
+  const refs = await persistFilesAsRefs(supported.map(({ file }) => file));
+  return supported.map((item, index) => ({ ...item, ref: refs[index] }));
 }
 
 /**

@@ -94,4 +94,26 @@ describe('TextBox', () => {
     fireEvent.click(aiButton);
     expect(aiButton.className).toContain('bg-primary/20');
   });
+
+  it('opens the expanded editor dialog via the maximize button', () => {
+    renderTextBox({ data: { nodeType: 'text-box', label: '文本框', config: { text: '长文本' } } });
+    fireEvent.click(screen.getByTitle('放大编辑'));
+    const editor = screen.getByRole('dialog');
+    expect(editor).toBeTruthy();
+    const textarea = editor.querySelector('textarea') as HTMLTextAreaElement;
+    expect(textarea.value).toBe('长文本');
+  });
+
+  it('edits text in the expanded editor and patches config', () => {
+    const updateNode = vi.fn();
+    useBlueprintStore.setState({ updateNode });
+    renderTextBox();
+    fireEvent.click(screen.getByTitle('放大编辑'));
+    const editor = screen.getByRole('dialog');
+    const textarea = editor.querySelector('textarea') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: '在弹窗中编辑' } });
+    expect(updateNode).toHaveBeenCalledWith('node-1', {
+      config: { text: '在弹窗中编辑' },
+    });
+  });
 });
